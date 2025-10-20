@@ -1,6 +1,6 @@
 [project]
 name = "users-service"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Servicio que maneja la gestión de usuarios"
 authors = [
     { name = "Agustín Altamirano", email = " aaltamirano@fi.uba.ar" },
@@ -8,10 +8,12 @@ authors = [
     { name = "Máximo Gismondi", email = "magismondi@fi.uba.ar" },
     { name = "Matías Valeriani", email = "mvaleriani@fi.uba.ar" },
 ]
-readme = "README.md"
+readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.13"
-dependencies = ["fastapi (>=0.119.1,<0.120.0)"]
+dependencies = ["fastapi (>=0.119.1,<0.120.0)", "newrelic (>=11.0.1,<12.0.0)"]
 
+[tool.setuptools.dynamic]
+version = {file = "version.txt"}
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
