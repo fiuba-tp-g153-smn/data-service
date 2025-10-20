@@ -16,7 +16,7 @@ router = APIRouter()
 def root():
     """Check if the API service is up and running."""
     logger.info("Root endpoint was accessed")
-    return {"status": "ok", "service": "api-asistente-auroretail"}
+    return {"status": "ok", "service": "users-service"}
   
 @router.get(
     "/health",
