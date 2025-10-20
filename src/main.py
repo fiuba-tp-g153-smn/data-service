@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+
 from controller import general
 
 app: FastAPI = FastAPI(

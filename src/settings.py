@@ -1,5 +1,7 @@
 import os
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 
@@ -11,6 +13,7 @@ class Settings:
 
     log_level: str = ""
     app_env: str = ""
+
     def __init__(self):
         # Load from environment variables
         self._load_from_env()

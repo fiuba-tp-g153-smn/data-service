@@ -1,11 +1,13 @@
 import logging
 from logging import Logger
+
 from newrelic.agent import NewRelicContextFormatter
 
 from settings import Settings
 
 DEFAULT_LOG_LEVEL: str = "INFO"
 APP_ENV_DEVELOPMENT: str = "development"
+
 
 def init_logger(settings: Settings) -> Logger:
     handler = logging.StreamHandler()
