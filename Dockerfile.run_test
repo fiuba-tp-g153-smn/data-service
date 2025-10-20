@@ -17,7 +17,7 @@ RUN pip install "poetry" && poetry config virtualenvs.create false
 # Install all dependencies, tests need dev dependencies as well
 # "--no-root" avoids installing this project package itself, since tests usually run against
 # the source code rather than an installed package
-RUN poetry lock --check || poetry lock && poetry install --no-root
+RUN (poetry check --lock || poetry lock --no-update) && poetry install --no-root
 
 # Copy the rest of the project files (source code, tests, configs, etc.)
 COPY . .
