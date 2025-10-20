@@ -1,6 +1,6 @@
 [project]
 name = "users-service"
-dynamic = ["version"]
+version = "0.1.0"
 description = "Servicio que maneja la gestión de usuarios"
 authors = [
     { name = "Agustín Altamirano", email = " aaltamirano@fi.uba.ar" },
