@@ -1,0 +1,32 @@
+# Based on slim Debian 13 Trixie
+FROM python:3.13.8-slim-trixie
+
+# Set working directory inside the container
+WORKDIR /app
+
+# Copy only dependency manifests first (to leverage Docker build cache for faster builds)
+COPY pyproject.toml poetry.lock* /app/
+
+# Use python implementation of protobuf instead of binary
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+
+# Install Poetry (dependency manager) globally, disable venvs to install into system site-packages
+RUN pip install "poetry" && poetry config virtualenvs.create false
+
+# Verify that poetry.lock matches pyproject.toml, regenerate if out of date
+# Install all dependencies, tests need dev dependencies as well
+# "--no-root" avoids installing this project package itself, since tests usually run against
+# the source code rather than an installed package
+RUN poetry lock --check || poetry lock && poetry install --no-root
+
+# Copy the rest of the project files (source code, tests, configs, etc.)
+COPY . .
+
+# Run pytest with:
+# -s                : show stdout output directly
+# -m "not skip"     : skip tests marked @pytest.mark.skip
+# --color=yes       : force colored output even in Docker/CI logs
+# --junitxml=...    : generate JUnit XML report for GitLab artifacts/test report
+# --cov=src         : coverage for "src" package
+# --cov-report=html : export HTML coverage report under reports/coverage
+CMD ["poetry", "run", "pytest", "-m", "not skip", "--color=yes", "--junitxml=reports/junit_report.xml", "--cov=src", "--cov-report", "term","--cov-report", "html:reports/coverage", "-W", "ignore::DeprecationWarning"]

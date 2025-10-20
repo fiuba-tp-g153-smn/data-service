@@ -1,4 +1,4 @@
-# Based on slim Debian 12 Bookworm
+# Based on slim Debian 13 Trixie
 FROM python:3.13.8-slim-trixie
 
 # Set working directory inside the container

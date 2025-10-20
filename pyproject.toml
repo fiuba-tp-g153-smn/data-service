@@ -9,7 +9,7 @@ authors = [
     { name = "Matías Valeriani", email = "mvaleriani@fi.uba.ar" },
 ]
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.13"
+requires-python = ">=3.13,<4.0"
 dependencies = ["fastapi (>=0.119.1,<0.120.0)", "newrelic (>=11.0.1,<12.0.0)", "uvicorn (>=0.38.0,<0.39.0)", "python-dotenv (>=1.1.1,<2.0.0)"]
 
 [tool.setuptools.dynamic]
@@ -25,5 +25,11 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
-    "pytest (>=8.4.2,<9.0.0)"
+    "pytest (>=8.4.2,<9.0.0)",
+    "pytest-cov (>=7.0.0,<8.0.0)",
+    "pytest-socket (>=0.7.0,<0.8.0)"
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "--disable-socket --allow-hosts=127.0.0.1"
