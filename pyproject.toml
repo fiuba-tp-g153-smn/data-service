@@ -1,0 +1,18 @@
+[project]
+name = "users-service"
+version = "0.1.0"
+description = "Servicio que maneja la gestión de usuarios"
+authors = [
+    { name = "Agustín Altamirano", email = " aaltamirano@fi.uba.ar" },
+    { name = "Gabriel Diem", email = "wdiem@fi.uba.ar" },
+    { name = "Máximo Gismondi", email = "magismondi@fi.uba.ar" },
+    { name = "Matías Valeriani", email = "mvaleriani@fi.uba.ar" },
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["fastapi (>=0.119.1,<0.120.0)"]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

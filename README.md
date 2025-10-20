@@ -1,3 +1,3 @@
 # Users service - SMN
 
-test
+Servicio que maneja la gestión de usuarios, hecho con Python y FastAPI.

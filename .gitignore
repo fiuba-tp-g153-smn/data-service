@@ -1,0 +1,65 @@
+# Byte-compiled / optimized Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE specific
+.vscode/
+!.vscode/settings.json.example
+
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+
+# Local development configuration
+.local/
+.env
+src/application.ini
+
+# Development database
+.db.sqlite3
+
+# Dependency directories
+lib/
+libs/
+site-packages/
+bin/
+include/
+share/
+
+# Compiled Python modules
+*.pyd
+*.so
+*.dll
+
+# Caches and backups
+*.swp
+*~
+.DS_Store
+
+# Editor and tooling files
+piplock.txt
+
+.ipynb_checkpoints
+
+#reports
+junit_report.xml
+.coverage
+.pytest_cache
