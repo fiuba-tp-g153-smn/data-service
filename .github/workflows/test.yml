@@ -1,4 +1,4 @@
-name: CI
+name: Run tests
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
 
 jobs:
   test:
-    runs-on: python:3.13.8-slim-trixie
+    runs-on: ubuntu-24.04
 
     steps:
     - uses: actions/checkout@v4
@@ -14,13 +14,10 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.13'
+        python-version: '3.13.8'
 
-    - name: Install Poetry
-      run: pip install poetry
-
-    - name: Configure Poetry
-      run: poetry config virtualenvs.create false
+    - name: Setup Poetry
+      run: pip install poetry &&  poetry config virtualenvs.create false
 
     - name: Install dependencies
       run: poetry install
