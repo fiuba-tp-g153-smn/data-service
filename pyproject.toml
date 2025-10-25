@@ -1,7 +1,7 @@
 [project]
 name = "data-service"
 version = "0.1.0"
-description = "Servicio que maneja la gestión de usuarios"
+description = "Servicio que maneja la gestión de datos"
 authors = [
     { name = "Agustín Altamirano", email = " aaltamirano@fi.uba.ar" },
     { name = "Gabriel Diem", email = "wdiem@fi.uba.ar" },

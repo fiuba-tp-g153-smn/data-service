@@ -4,7 +4,7 @@ from controller import general
 
 app: FastAPI = FastAPI(
     title="data-service",
-    description="Servicio que maneja la gestión de usuarios",
+    description="Servicio que maneja la gestión de datos",
     contact={
         "name": "FIUBA TPF Team N°153 Altamirano, Diem, Gismondi, Valeriani",
     },
