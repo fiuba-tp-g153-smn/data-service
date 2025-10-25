@@ -1,6 +1,6 @@
-# Users Service - SMN
+# Data Service - SMN
 
-The Users Service is a Python-based microservice built with FastAPI for managing user operations. It handles user creation, authentication, and related functionalities in a RESTful API.
+The Data Service is a Python-based microservice built with FastAPI for managing data operations. It handles data CRUD and related functionalities in a RESTful API.
 
 ### Team members
 

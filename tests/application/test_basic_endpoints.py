@@ -18,7 +18,7 @@ def app_client(init_env_vars):
 def test_root_ok(app_client):
     response = app_client.get("/")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "users-service"}
+    assert response.json() == {"status": "ok", "service": "data-service"}
 
 
 def test_health_check(app_client):

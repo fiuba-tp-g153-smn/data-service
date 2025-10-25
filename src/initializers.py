@@ -18,7 +18,7 @@ def init_logger(settings: Settings) -> Logger:
     handler.setFormatter(formatter)
     log_level = Settings.get_settings().log_level or DEFAULT_LOG_LEVEL
 
-    logger = logging.getLogger("users-service")
+    logger = logging.getLogger("data-service")
     logger.setLevel(log_level)
     logger.handlers.clear()
     logger.addHandler(handler)

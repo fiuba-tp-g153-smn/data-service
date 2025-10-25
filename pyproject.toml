@@ -1,5 +1,5 @@
 [project]
-name = "users-service"
+name = "data-service"
 version = "0.1.0"
 description = "Servicio que maneja la gestión de usuarios"
 authors = [
