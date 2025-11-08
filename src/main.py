@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 
 from controller import general
+from routes import weather
 
 app: FastAPI = FastAPI(
     title="data-service",
@@ -11,3 +12,4 @@ app: FastAPI = FastAPI(
 )
 
 app.include_router(general.router)
+app.include_router(weather.router)
