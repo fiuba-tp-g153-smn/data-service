@@ -1,0 +1,9 @@
+services:
+  data-service:
+    container_name: data-service-container
+    image: data-service
+    build:
+      context: .
+    ports:
+      - "${APP_HOST_PORT}:8080"
+    restart: unless-stopped
