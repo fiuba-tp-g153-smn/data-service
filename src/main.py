@@ -1,7 +1,8 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
-from routes import weather
+from routes import weather, tiles
 
 app: FastAPI = FastAPI(
     title="data-service",
@@ -11,5 +12,15 @@ app: FastAPI = FastAPI(
     },
 )
 
+# Add CORS middleware for tile serving
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(general.router)
 app.include_router(weather.router)
+app.include_router(tiles.router)
