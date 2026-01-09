@@ -63,3 +63,5 @@ piplock.txt
 junit_report.xml
 .coverage
 .pytest_cache
+
+.tmp

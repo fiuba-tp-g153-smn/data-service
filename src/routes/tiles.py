@@ -78,14 +78,12 @@ async def get_tile(
     
     Example: /tiles/band_13/OR_ABI-L1b-RadF-M6C13_G19_s20261234567/5/10/15.webp
     """
-    # Validate product
     if not tiles_service.product_exists(product):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Product '{product}' not found"
         )
     
-    # Validate zoom level
     is_valid, error_msg = tiles_service.validate_zoom_level(product, z)
     if not is_valid:
         raise HTTPException(
@@ -93,7 +91,6 @@ async def get_tile(
             detail=error_msg
         )
     
-    # Get tile path
     tile_path = tiles_service.get_tile_path(product, tileset_id, z, x, y)
     
     if not tile_path.exists():

@@ -13,7 +13,7 @@ dev:
 # - Mounts ./src to /app for live code reloading during development.
 # - Mounts .env file for environment variables.
 # - Exposes port 8080 for access at http://localhost:8080
-	docker build . -f Dockerfile.dev -t data-service && docker run -p 8080:8080 -v ./src:/app -v ./.env:/app/.env data-service
+	docker build . -f Dockerfile.dev -t data-service && docker run -p 8080:8080 -v ./src:/app -v ./.env:/app/.env -v ./.tmp:/app/.tmp data-service
 
 local:
 	cd ./src && uvicorn main:app --host 0.0.0.0 --port 8080 --reload

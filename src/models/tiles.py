@@ -12,7 +12,6 @@ class ZoomLevels(BaseModel):
 class ProductConfig(BaseModel):
     """Configuration for a tile product."""
     name: str
-    description: str
     zoom_levels: ZoomLevels
 
 

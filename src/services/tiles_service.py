@@ -8,25 +8,19 @@ from dependencies import logger
 class TilesService:
     """Service to manage and serve GOES satellite tiles."""
     
-    # Base path where tiles are stored (matches GenerateTilesService output)
     TILES_BASE_PATH = Path.cwd() / ".tmp"
     
-    # Available products/channels - easily extensible for future channels
     AVAILABLE_PRODUCTS: Dict[str, dict] = {
         "band_13": {
             "name": "Band 13 - Cloud Top",
-            "description": "Clean Longwave Infrared Window Band",
             "zoom_levels": {"min": 3, "max": 7},
         },
-        # Future channels:
         # "band_2": {
         #     "name": "Band 2 - Red Visible",
-        #     "description": "Red Visible Band",
         #     "zoom_levels": {"min": 3, "max": 7},
         # },
         # "band_9": {
         #     "name": "Band 9 - Mid-Level Water Vapor",
-        #     "description": "Mid-Level Tropospheric Water Vapor Band",
         #     "zoom_levels": {"min": 3, "max": 7},
         # },
     }
@@ -58,6 +52,8 @@ class TilesService:
             List of tileset information dictionaries
         """
         tiles_dir = self.TILES_BASE_PATH / product / "tiles"
+        logger.info(f"Looking for tilesets in directory: {self.TILES_BASE_PATH}")
+        logger.info(f"Tiles directory exists: {tiles_dir}")
         
         if not tiles_dir.exists():
             logger.info(f"Tiles directory does not exist: {tiles_dir}")
@@ -113,5 +109,4 @@ class TilesService:
         return True, ""
 
 
-# Singleton instance
 tiles_service = TilesService()
