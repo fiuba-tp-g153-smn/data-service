@@ -1,16 +1,18 @@
 name: Deploy
 
 on:
-  workflow_run:
-    workflows: ["Run tests"]
+  push:
     branches:
       - main
-    types:
-      - completed
   workflow_dispatch:
 
+
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    needs: test
     runs-on: ubuntu-24.04
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment:
@@ -34,11 +36,11 @@ jobs:
         id: trigger
         env:
           COOLIFY_DEPLOY_HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
         run: |
           echo "🚀 Triggering Coolify deployment..."
           RESPONSE=$(curl -s -X GET \
-            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN" \
             "$COOLIFY_DEPLOY_HOOK")
 
           echo "$RESPONSE"
@@ -59,7 +61,7 @@ jobs:
         env:
           BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
           DEPLOYMENT_UUID: ${{ steps.trigger.outputs.deployment_uuid }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
           echo "⏳ Waiting for deployment with ID $DEPLOYMENT_UUID to finish..."
           STATUS="in_progress"
@@ -68,16 +70,16 @@ jobs:
           ELAPSED=0
 
           while [[ "$STATUS" != "finished" && "$STATUS" != "failed" && $ELAPSED -lt $TIMEOUT ]]; do
-            echo "curl -s -H Authorization: Bearer $COOLIFY_TOKEN $BASE_URL/deployments/$DEPLOYMENT_UUID"
+            echo "curl -s -H Authorization: Bearer $COOLIFY_READ_TOKEN $BASE_URL/deployments/$DEPLOYMENT_UUID"
             STATUS=$(curl -s \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
               "$BASE_URL/deployments/$DEPLOYMENT_UUID" | jq -r '.status')
 
             echo "➡️  Current status: $STATUS (elapsed: ${ELAPSED}s)"
 
             if [[ "$STATUS" == "finished" ]]; then
               echo "✅ Deployment finished successfully!"
-              break
+              brworkflowseak
             elif [[ "$STATUS" == "failed" ]]; then
               echo "❌ Deployment failed!"
               exit 1
@@ -96,7 +98,7 @@ jobs:
         env:
           BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
           APP_UUID: ${{ steps.trigger.outputs.app_uuid }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
           echo "🔍 Checking application health for ID $APP_UUID..."
 
@@ -107,7 +109,7 @@ jobs:
 
           while [[ $ELAPSED -lt $TIMEOUT ]]; do
             STATUS=$(curl -s \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
               "$BASE_URL/applications/$APP_UUID" | jq -r '.status')
 
             echo "➡️  Current app status: $STATUS (elapsed: ${ELAPSED}s)"
