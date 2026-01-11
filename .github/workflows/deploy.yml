@@ -121,7 +121,7 @@ jobs:
                 echo "✅ Deployment finished successfully!"
                 echo "🏥 Checking application health..."
                 
-                HEALTH_TIMEOUT=180
+                HEALTH_TIMEOUT=60
                 HEALTH_ELAPSED=0
                 HEALTH_INTERVAL=3
                 
@@ -134,7 +134,7 @@ jobs:
                   echo "🔍 App status: $APP_STATUS (${HEALTH_ELAPSED}s)"
                   
                   case "$APP_STATUS" in
-                    "running"|"healthy")
+                    "running"|"healthy"|"running:healthy")
                       END_TIME=$(date +%s)
                       TOTAL_DURATION=$((END_TIME - START_TIME))
                       echo "🎉 Application is running! Total time: ${TOTAL_DURATION}s"
