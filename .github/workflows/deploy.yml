@@ -1,0 +1,125 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["Run tests"]
+    branches:
+      - main
+    types:
+      - completed
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    environment:
+      name: ${{ (github.ref_name == 'main' && 'prod') || 'unknown' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Display selected environment
+        run: |
+          echo "🌍 Git branch: ${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            echo "🔧 Using environment: prod"
+          else
+            echo "⚠️ Unsupported branch, stopping."
+            exit 1
+          fi
+
+      - name: Trigger Coolify deployment
+        id: trigger
+        env:
+          COOLIFY_DEPLOY_HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          echo "🚀 Triggering Coolify deployment..."
+          RESPONSE=$(curl -s -X GET \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            "$COOLIFY_DEPLOY_HOOK")
+
+          echo "$RESPONSE"
+
+          DEPLOYMENT_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].deployment_uuid')
+          APP_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].resource_uuid')
+
+          if [ "$DEPLOYMENT_UUID" = "null" ] || [ -z "$DEPLOYMENT_UUID" ]; then
+            echo "❌ Failed to extract deployment UUID!"
+            exit 1
+          fi
+
+          echo "deployment_uuid=$DEPLOYMENT_UUID" >> $GITHUB_OUTPUT
+          echo "app_uuid=$APP_UUID" >> $GITHUB_OUTPUT
+
+      - name: Wait for deployment to finish
+        id: wait
+        env:
+          BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
+          DEPLOYMENT_UUID: ${{ steps.trigger.outputs.deployment_uuid }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          echo "⏳ Waiting for deployment with ID $DEPLOYMENT_UUID to finish..."
+          STATUS="in_progress"
+          TIMEOUT=180   # 3 minutes
+          INTERVAL=4
+          ELAPSED=0
+
+          while [[ "$STATUS" != "finished" && "$STATUS" != "failed" && $ELAPSED -lt $TIMEOUT ]]; do
+            echo "curl -s -H Authorization: Bearer $COOLIFY_TOKEN $BASE_URL/deployments/$DEPLOYMENT_UUID"
+            STATUS=$(curl -s \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              "$BASE_URL/deployments/$DEPLOYMENT_UUID" | jq -r '.status')
+
+            echo "➡️  Current status: $STATUS (elapsed: ${ELAPSED}s)"
+
+            if [[ "$STATUS" == "finished" ]]; then
+              echo "✅ Deployment finished successfully!"
+              break
+            elif [[ "$STATUS" == "failed" ]]; then
+              echo "❌ Deployment failed!"
+              exit 1
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          if [[ "$STATUS" != "finished" ]]; then
+            echo "❌ Deployment did not finish successfully within ${TIMEOUT}s (last status: $STATUS)"
+            exit 1
+          fi
+
+      - name: Check application health
+        env:
+          BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
+          APP_UUID: ${{ steps.trigger.outputs.app_uuid }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+        run: |
+          echo "🔍 Checking application health for ID $APP_UUID..."
+
+          TIMEOUT=180     # 3 minutes
+          INTERVAL=5      # check every 5 seconds
+          ELAPSED=0
+          STATUS="unknown"
+
+          while [[ $ELAPSED -lt $TIMEOUT ]]; do
+            STATUS=$(curl -s \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              "$BASE_URL/applications/$APP_UUID" | jq -r '.status')
+
+            echo "➡️  Current app status: $STATUS (elapsed: ${ELAPSED}s)"
+
+            if [[ "$STATUS" == "running"* ]]; then
+              echo "✅ App is running successfully!"
+              exit 0
+            fi
+
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "❌ App did not become healthy within ${TIMEOUT}s (last status: $STATUS)"
+          exit 1
