@@ -22,5 +22,5 @@ app.add_middleware(
 )
 
 app.include_router(general.router)
-app.include_router(weather.router) asdasd
+app.include_router(weather.router)
 app.include_router(tiles.router)
