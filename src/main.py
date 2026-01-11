@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
-from routes import weather, tiles
+from routes import weather, products
 
 app: FastAPI = FastAPI(
     title="data-service",
@@ -23,4 +23,4 @@ app.add_middleware(
 
 app.include_router(general.router)
 app.include_router(weather.router)
-app.include_router(tiles.router)
+app.include_router(products.router)
