@@ -22,6 +22,75 @@ class ProductsService:
     # Default zoom levels for GOES-19 ABI
     GOES19_ABI_ZOOM_LEVELS = {"min": 3, "max": 7}
     
+    # Default zoom levels for Radar
+    RADAR_ZOOM_LEVELS = {"min": 4, "max": 10}
+    
+    # ============== Radar Configuration ==============
+    
+    # Radar variables (productos meteorológicos)
+    RADAR_VARIABLES: Dict[str, dict] = {
+        "dbzh": {
+            "name": "DBZH",
+            "description": "Reflectividad Horizontal (dBZ)",
+            "unit": "dBZ",
+            "available": True,
+            "dir_name": "DBZH",  # Directory name in filesystem
+        },
+        "zdr": {
+            "name": "ZDR",
+            "description": "Reflectividad Diferencial",
+            "unit": "dB",
+            "available": False,  # Coming soon
+            "dir_name": "ZDR",
+        },
+        "rhohv": {
+            "name": "RHOHV",
+            "description": "Coeficiente de Correlación",
+            "unit": "adimensional",
+            "available": False,  # Coming soon
+            "dir_name": "RHOHV",
+        },
+        "kdp": {
+            "name": "KDP",
+            "description": "Fase Diferencial Específica",
+            "unit": "°/km",
+            "available": False,  # Coming soon
+            "dir_name": "KDP",
+        },
+    }
+    
+    # Radar stations (estaciones de radar)
+    RADAR_STATIONS: Dict[str, dict] = {
+        "rma3": {
+            "id": "RMA3",
+            "name": "RMA3 - Pergamino",
+            "description": "Radar Meteorológico Argentino 3 - Pergamino, Buenos Aires",
+            "location": {"lat": -33.9456, "lon": -60.5517},
+            "available": True,
+        },
+        "rma4": {
+            "id": "RMA4",
+            "name": "RMA4 - Resistencia",
+            "description": "Radar Meteorológico Argentino 4 - Resistencia, Chaco",
+            "location": {"lat": -27.4500, "lon": -59.0500},
+            "available": True,
+        },
+        "rma9": {
+            "id": "RMA9",
+            "name": "RMA9 - Córdoba",
+            "description": "Radar Meteorológico Argentino 9 - Córdoba",
+            "location": {"lat": -31.4167, "lon": -64.1833},
+            "available": True,
+        },
+    }
+    
+    # Radar elevation angles
+    RADAR_ELEVATIONS: List[dict] = [
+        {"id": "elev0", "angle": 0.5, "description": "Elevación 0.5°"},
+        {"id": "elev1", "angle": 0.9, "description": "Elevación 0.9°"},
+        {"id": "elev2", "angle": 1.3, "description": "Elevación 1.3°"},
+    ]
+    
     # ============== Products Configuration ==============
     # Hierarchical structure: Product -> Instrument -> Channel
     
@@ -63,10 +132,10 @@ class ProductsService:
         },
         # Future products placeholders
         "radar": {
-            "name": "Radar",
-            "description": "Weather Radar Network",
+            "name": "Red de Radares",
+            "description": "Red de Radares Meteorológicos de Argentina (SMN)",
             "type": "radar",
-            "instruments": {}
+            "instruments": {}  # Radar uses a different structure (variables/stations)
         },
         "numerical-models": {
             "name": "Numerical Models",
@@ -289,6 +358,180 @@ class ProductsService:
         if z < zoom_levels["min"] or z > zoom_levels["max"]:
             return False, f"Zoom level {z} not available. Valid range: {zoom_levels['min']}-{zoom_levels['max']}"
         
+        return True, ""
+    
+    # ============== Radar Methods ==============
+    
+    def get_radar_product(self) -> dict:
+        """Get radar product with available variables."""
+        variables_summary = {}
+        for var_id, var_config in self.RADAR_VARIABLES.items():
+            variables_summary[var_id] = {
+                "name": var_config["name"],
+                "description": var_config["description"],
+                "unit": var_config["unit"],
+                "available": var_config.get("available", False)
+            }
+        
+        return {
+            "product_id": "radar",
+            "product_info": {
+                "name": "Red de Radares",
+                "description": "Red de Radares Meteorológicos de Argentina (SMN)",
+                "type": "radar"
+            },
+            "variables": variables_summary,
+            "endpoints": {
+                var_id: f"/products/radar/{var_id}"
+                for var_id, var_config in self.RADAR_VARIABLES.items()
+                if var_config.get("available", False)
+            }
+        }
+    
+    def radar_variable_exists(self, variable_id: str) -> bool:
+        """Check if a radar variable exists."""
+        return variable_id.lower() in self.RADAR_VARIABLES
+    
+    def get_radar_variable(self, variable_id: str) -> Optional[dict]:
+        """Get radar variable configuration with available stations."""
+        variable = self.RADAR_VARIABLES.get(variable_id.lower())
+        if not variable:
+            return None
+        
+        # Build stations info
+        stations_info = {}
+        for station_id, station_config in self.RADAR_STATIONS.items():
+            stations_info[station_id] = {
+                "id": station_config["id"],
+                "name": station_config["name"],
+                "description": station_config["description"],
+                "location": station_config.get("location"),
+                "available": station_config.get("available", False)
+            }
+        
+        return {
+            "product": "radar",
+            "variable": variable_id.lower(),
+            "variable_info": {
+                "name": variable["name"],
+                "description": variable["description"],
+                "unit": variable["unit"],
+                "zoom_levels": self.RADAR_ZOOM_LEVELS,
+                "tile_format": "webp"
+            },
+            "stations": stations_info,
+            "elevations": self.RADAR_ELEVATIONS,
+            "endpoints": {
+                station_id: f"/products/radar/{variable_id.lower()}/{station_id}"
+                for station_id, station_config in self.RADAR_STATIONS.items()
+                if station_config.get("available", False)
+            }
+        }
+    
+    def radar_station_exists(self, station_id: str) -> bool:
+        """Check if a radar station exists."""
+        return station_id.lower() in self.RADAR_STATIONS
+    
+    def get_radar_station_tilesets(self, variable_id: str, station_id: str) -> Optional[dict]:
+        """Get available tilesets for a radar station and variable."""
+        variable = self.RADAR_VARIABLES.get(variable_id.lower())
+        station = self.RADAR_STATIONS.get(station_id.lower())
+        
+        if not variable or not station:
+            return None
+        
+        # Get tilesets from filesystem
+        tilesets = self._get_radar_tilesets(variable_id, station_id)
+        
+        return {
+            "product": "radar",
+            "variable": variable_id.lower(),
+            "station": station_id.lower(),
+            "station_info": {
+                "id": station["id"],
+                "name": station["name"],
+                "description": station["description"],
+                "location": station.get("location"),
+                "available": station.get("available", False)
+            },
+            "variable_info": {
+                "name": variable["name"],
+                "description": variable["description"],
+                "unit": variable["unit"],
+                "zoom_levels": self.RADAR_ZOOM_LEVELS,
+                "tile_format": "webp"
+            },
+            "elevations": self.RADAR_ELEVATIONS,
+            "tilesets": tilesets,
+            "tile_url_pattern": f"/products/radar/{variable_id.lower()}/{station_id.lower()}/{{elevation_id}}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+        }
+    
+    def _get_radar_tilesets(self, variable_id: str, station_id: str) -> List[dict]:
+        """Get list of available tilesets for a radar station/variable."""
+        variable = self.RADAR_VARIABLES.get(variable_id.lower())
+        station = self.RADAR_STATIONS.get(station_id.lower())
+        
+        if not variable or not station:
+            return []
+        
+        dir_name = variable["dir_name"]
+        station_prefix = station["id"]  # e.g., "RMA3"
+        
+        radar_dir = self.TILES_BASE_PATH / "output_radar" / dir_name
+        logger.info(f"Looking for radar tilesets in: {radar_dir}")
+        
+        if not radar_dir.exists():
+            logger.info(f"Radar directory does not exist: {radar_dir}")
+            return []
+        
+        tilesets = []
+        seen_timestamps = set()
+        
+        # Look for directories matching the pattern: {STATION}_{VARIABLE}_{TIMESTAMP}_elev{N}
+        for item in radar_dir.iterdir():
+            if item.is_dir() and item.name.startswith(f"{station_prefix}_{dir_name}_"):
+                # Extract timestamp from directory name
+                # Format: RMA3_DBZH_20251230T151917Z_elev0
+                parts = item.name.split("_")
+                if len(parts) >= 4:
+                    timestamp = parts[2]  # e.g., "20251230T151917Z"
+                    if timestamp not in seen_timestamps:
+                        seen_timestamps.add(timestamp)
+                        tilesets.append({
+                            "id": timestamp,
+                            "url_pattern": f"/products/radar/{variable_id.lower()}/{station_id.lower()}/{{elevation_id}}/{timestamp}/{{z}}/{{x}}/{{y}}.webp"
+                        })
+        
+        # Sort by timestamp (most recent first)
+        tilesets.sort(key=lambda x: x["id"], reverse=True)
+        
+        logger.info(f"Found {len(tilesets)} radar tilesets for {station_prefix}/{dir_name}")
+        return tilesets
+    
+    def elevation_exists(self, elevation_id: str) -> bool:
+        """Check if an elevation exists."""
+        return any(elev["id"] == elevation_id for elev in self.RADAR_ELEVATIONS)
+    
+    def get_radar_tile_path(self, variable_id: str, station_id: str, elevation_id: str,
+                           tileset_id: str, z: int, x: int, y: int) -> Path:
+        """Build the full path to a radar tile file."""
+        variable = self.RADAR_VARIABLES.get(variable_id.lower())
+        station = self.RADAR_STATIONS.get(station_id.lower())
+        
+        if not variable or not station:
+            return Path("")
+        
+        dir_name = variable["dir_name"]
+        station_prefix = station["id"]
+        
+        # Path: .tmp/output_radar/DBZH/RMA3_DBZH_20251230T151917Z_elev0/tiles/z/x/y.webp
+        folder_name = f"{station_prefix}_{dir_name}_{tileset_id}_{elevation_id}"
+        return self.TILES_BASE_PATH / "output_radar" / dir_name / folder_name / "tiles" / str(z) / str(x) / f"{y}.webp"
+    
+    def validate_radar_zoom_level(self, z: int) -> Tuple[bool, str]:
+        """Validate if a zoom level is valid for radar."""
+        if z < self.RADAR_ZOOM_LEVELS["min"] or z > self.RADAR_ZOOM_LEVELS["max"]:
+            return False, f"Zoom level {z} not available. Valid range: {self.RADAR_ZOOM_LEVELS['min']}-{self.RADAR_ZOOM_LEVELS['max']}"
         return True, ""
 
 
