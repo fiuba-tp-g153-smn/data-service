@@ -14,7 +14,6 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: ${{ (github.ref_name == 'main' && 'prod') || 'unknown' }}
 
@@ -79,7 +78,7 @@ jobs:
 
             if [[ "$STATUS" == "finished" ]]; then
               echo "✅ Deployment finished successfully!"
-              brworkflowseak
+              break
             elif [[ "$STATUS" == "failed" ]]; then
               echo "❌ Deployment failed!"
               exit 1
