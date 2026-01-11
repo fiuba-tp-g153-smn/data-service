@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
-from routes import weather, tiles
+from routes import tiles, weather
 
 app: FastAPI = FastAPI(
     title="data-service",

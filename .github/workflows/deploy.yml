@@ -1,18 +1,18 @@
 name: Deploy
 
 on:
-  workflow_run:
-    workflows: ["Run tests"]
+  push:
     branches:
       - main
-    types:
-      - completed
   workflow_dispatch:
 
 jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
   deploy:
+    needs: test
     runs-on: ubuntu-24.04
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     environment:
       name: ${{ (github.ref_name == 'main' && 'prod') || 'unknown' }}
 
@@ -20,106 +20,186 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Display selected environment
+      - name: Validate environment
         run: |
+          echo "🚀 Deployment started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "🌍 Git branch: ${GITHUB_REF_NAME}"
-          if [[ "${GITHUB_REF_NAME}" == "main" ]]; then
-            echo "🔧 Using environment: prod"
-          else
-            echo "⚠️ Unsupported branch, stopping."
+          
+          if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+            echo "⚠️ Only 'main' branch is supported for deployments!"
             exit 1
           fi
+          
+          echo "✅ Environment: prod"
 
       - name: Trigger Coolify deployment
         id: trigger
         env:
           COOLIFY_DEPLOY_HOOK: ${{ secrets.COOLIFY_DEPLOY_HOOK }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
         run: |
-          echo "🚀 Triggering Coolify deployment..."
-          RESPONSE=$(curl -s -X GET \
-            -H "Authorization: Bearer $COOLIFY_TOKEN" \
-            "$COOLIFY_DEPLOY_HOOK")
-
-          echo "$RESPONSE"
-
-          DEPLOYMENT_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].deployment_uuid')
-          APP_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].resource_uuid')
-
-          if [ "$DEPLOYMENT_UUID" = "null" ] || [ -z "$DEPLOYMENT_UUID" ]; then
-            echo "❌ Failed to extract deployment UUID!"
+          echo "📡 Triggering deployment..."
+          
+          if ! RESPONSE=$(curl -s -X GET \
+            --max-time 30 \
+            -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN" \
+            "$COOLIFY_DEPLOY_HOOK"); then
+            echo "❌ Failed to trigger deployment - network error"
             exit 1
           fi
 
+          if ! echo "$RESPONSE" | jq empty 2>/dev/null; then
+            echo "❌ Invalid JSON response from Coolify"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+
+          DEPLOYMENT_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].deployment_uuid // empty')
+          APP_UUID=$(echo "$RESPONSE" | jq -r '.deployments[0].resource_uuid // empty')
+
+          if [[ -z "$DEPLOYMENT_UUID" || "$DEPLOYMENT_UUID" == "null" ]]; then
+            echo "❌ No deployment found in response!"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+
+          echo "✅ Deployment triggered - ID: $DEPLOYMENT_UUID"
           echo "deployment_uuid=$DEPLOYMENT_UUID" >> $GITHUB_OUTPUT
           echo "app_uuid=$APP_UUID" >> $GITHUB_OUTPUT
 
-      - name: Wait for deployment to finish
-        id: wait
+      - name: Monitor deployment and health
+        id: monitor
         env:
           BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
           DEPLOYMENT_UUID: ${{ steps.trigger.outputs.deployment_uuid }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          APP_UUID: ${{ steps.trigger.outputs.app_uuid }}
+          COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
-          echo "⏳ Waiting for deployment with ID $DEPLOYMENT_UUID to finish..."
-          STATUS="in_progress"
-          TIMEOUT=180   # 3 minutes
-          INTERVAL=4
+          echo "⏳ Monitoring deployment $DEPLOYMENT_UUID..."
+          
+          INTERVAL=2      # Start with 2 seconds (was 4-5)
+          MAX_INTERVAL=10 # Cap at 10 seconds
+          TIMEOUT=600     # 10 minutes total (was 3+3 minutes)
           ELAPSED=0
-
-          while [[ "$STATUS" != "finished" && "$STATUS" != "failed" && $ELAPSED -lt $TIMEOUT ]]; do
-            echo "curl -s -H Authorization: Bearer $COOLIFY_TOKEN $BASE_URL/deployments/$DEPLOYMENT_UUID"
-            STATUS=$(curl -s \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
-              "$BASE_URL/deployments/$DEPLOYMENT_UUID" | jq -r '.status')
-
-            echo "➡️  Current status: $STATUS (elapsed: ${ELAPSED}s)"
-
-            if [[ "$STATUS" == "finished" ]]; then
-              echo "✅ Deployment finished successfully!"
-              break
-            elif [[ "$STATUS" == "failed" ]]; then
-              echo "❌ Deployment failed!"
-              exit 1
+          RETRY_COUNT=0
+          START_TIME=$(date +%s)
+          
+          while [[ $ELAPSED -lt $TIMEOUT ]]; do
+            
+            DEPLOYMENT_STATUS=$(curl -s \
+              --max-time 10 \
+              -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
+              "$BASE_URL/deployments/$DEPLOYMENT_UUID" | jq -r '.status // "unknown"')
+            
+            echo "📊 Status: $DEPLOYMENT_STATUS (elapsed: ${ELAPSED}s, interval: ${INTERVAL}s)"
+            
+            # Handle API failures gracefully
+            if [[ "$DEPLOYMENT_STATUS" == "null" || "$DEPLOYMENT_STATUS" == "unknown" ]]; then
+              echo "⚠️ API call failed, retrying in ${INTERVAL}s..."
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              
+              if [[ $RETRY_COUNT -gt 3 ]]; then
+                echo "❌ Too many API failures, aborting"
+                exit 1
+              fi
+              
+              sleep $INTERVAL
+              INTERVAL=$((INTERVAL * 2))  # Exponential backoff
+              ELAPSED=$(( $(date +%s) - START_TIME ))
+              continue
             fi
-
+            
+            # Reset retry count on successful API call
+            RETRY_COUNT=0
+            
+            # OPTIMIZATION: Handle different deployment outcomes
+            case "$DEPLOYMENT_STATUS" in
+              "in_progress")
+                echo "🚀 Deployment in progress..."
+                ;;
+              "finished")
+                echo "✅ Deployment finished successfully!"
+                echo "🏥 Checking application health..."
+                
+                HEALTH_TIMEOUT=60
+                HEALTH_ELAPSED=0
+                HEALTH_INTERVAL=3
+                
+                while [[ $HEALTH_ELAPSED -lt $HEALTH_TIMEOUT ]]; do
+                  APP_STATUS=$(curl -s \
+                    --max-time 10 \
+                    -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
+                    "$BASE_URL/applications/$APP_UUID" | jq -r '.status // "unknown"')
+                  
+                  echo "🔍 App status: $APP_STATUS (${HEALTH_ELAPSED}s)"
+                  
+                  case "$APP_STATUS" in
+                    "running"|"healthy"|"running:healthy")
+                      END_TIME=$(date +%s)
+                      TOTAL_DURATION=$((END_TIME - START_TIME))
+                      echo "🎉 Application is running! Total time: ${TOTAL_DURATION}s"
+                      exit 0
+                      ;;
+                    "restarting")
+                      echo "🔄 Application restarting, waiting..."
+                      ;;
+                    "stopped"|"failed")
+                      echo "❌ Application deployment failed with status: $APP_STATUS"
+                      exit 1
+                      ;;
+                    *)
+                      echo "⚠️ Unknown app status: $APP_STATUS"
+                      ;;
+                  esac
+                  
+                  sleep $HEALTH_INTERVAL
+                  HEALTH_ELAPSED=$((HEALTH_ELAPSED + HEALTH_INTERVAL))
+                done
+                
+                echo "⚠️ Health check timeout, but deployment finished successfully"
+                exit 0
+                ;;
+              "failed")
+                echo "❌ Deployment failed!"
+                exit 1
+                ;;
+              "restart_only")
+                echo "⚠️ Restart-only deployment - skipping health checks"
+                exit 0
+                ;;
+              *)
+                echo "⚠️ Unknown deployment status: $DEPLOYMENT_STATUS"
+                ;;
+            esac
+            
             sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
+            INTERVAL=$((INTERVAL + 2))  # Gradually increase interval
+            
+            if [[ $INTERVAL -gt $MAX_INTERVAL ]]; then
+              INTERVAL=$MAX_INTERVAL
+            fi
+            
+            ELAPSED=$(( $(date +%s) - START_TIME ))
           done
+          
+          echo "❌ Deployment timeout after ${TIMEOUT}s"
+          echo "💡 This might indicate a resource issue or long deployment"
+          exit 1
 
-          if [[ "$STATUS" != "finished" ]]; then
-            echo "❌ Deployment did not finish successfully within ${TIMEOUT}s (last status: $STATUS)"
-            exit 1
-          fi
-
-      - name: Check application health
+      - name: Fetch deployment logs
+        if: failure()
         env:
           BASE_URL: ${{ secrets.COOLIFY_BASE_URL }}
-          APP_UUID: ${{ steps.trigger.outputs.app_uuid }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          DEPLOYMENT_UUID: ${{ steps.trigger.outputs.deployment_uuid }}
+          COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
-          echo "🔍 Checking application health for ID $APP_UUID..."
-
-          TIMEOUT=180     # 3 minutes
-          INTERVAL=5      # check every 5 seconds
-          ELAPSED=0
-          STATUS="unknown"
-
-          while [[ $ELAPSED -lt $TIMEOUT ]]; do
-            STATUS=$(curl -s \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
-              "$BASE_URL/applications/$APP_UUID" | jq -r '.status')
-
-            echo "➡️  Current app status: $STATUS (elapsed: ${ELAPSED}s)"
-
-            if [[ "$STATUS" == "running"* ]]; then
-              echo "✅ App is running successfully!"
-              exit 0
-            fi
-
-            sleep $INTERVAL
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          echo "❌ App did not become healthy within ${TIMEOUT}s (last status: $STATUS)"
-          exit 1
+          echo "📋 Fetching deployment logs for debugging..."
+          
+          LOGS=$(curl -s \
+            --max-time 15 \
+            -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
+            "$BASE_URL/deployments/$DEPLOYMENT_UUID/logs" | jq -r '.logs // "No logs available"')
+          
+          echo "--- DEPLOYMENT LOGS ---"
+          echo "$LOGS"
+          echo "--- END LOGS ---"

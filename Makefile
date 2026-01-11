@@ -1,11 +1,14 @@
 # Makefile for managing the Data Service application
 
 # Declare phony targets to avoid conflicts with files of the same name
-.PHONY: run-dev test
+.PHONY: up dev test
 
 install:
 	pip install poetry
 	poetry install
+
+up:
+	docker compose up --build
 
 dev:
 # Build the development Docker image and run the service in development mode.
