@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
-from routes import weather, products, radar
+from routes import weather, products, satellite, radar
 
 app: FastAPI = FastAPI(
     title="data-service",
@@ -23,5 +23,6 @@ app.add_middleware(
 
 app.include_router(general.router)
 app.include_router(weather.router)
-app.include_router(radar.router)  # Radar routes first (more specific paths)
-app.include_router(products.router)
+app.include_router(radar.router)      # Radar routes (most specific)
+app.include_router(satellite.router)  # Satellite routes
+app.include_router(products.router)   # General products list (least specific)

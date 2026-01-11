@@ -57,16 +57,12 @@ class ElevationInfo(BaseModel):
 class RadarStationInfo(BaseModel):
     """Information about a radar station."""
     id: str  # RMA3, RMA4, RMA9
-    name: str
-    description: str
-    location: Optional[Dict[str, float]] = None  # lat, lon
     available: bool = True
 
 
 class RadarVariableConfig(BaseModel):
     """Configuration for a radar variable (e.g., DBZH)."""
     name: str
-    description: str
     unit: str
     zoom_levels: ZoomLevels
     tile_format: str = "webp"
@@ -75,7 +71,6 @@ class RadarVariableConfig(BaseModel):
 class RadarVariableSummary(BaseModel):
     """Summary info for a radar variable in product listing."""
     name: str
-    description: str
     unit: str
     available: bool = True
 
@@ -85,6 +80,8 @@ class RadarProductResponse(BaseModel):
     product_id: str
     product_info: Dict[str, str]
     variables: Dict[str, RadarVariableSummary]
+    zoom_levels: ZoomLevels
+    elevations: List[ElevationInfo]
     endpoints: Dict[str, str]
 
 
@@ -92,9 +89,7 @@ class RadarVariableResponse(BaseModel):
     """Response for a specific radar variable showing available stations."""
     product: str
     variable: str
-    variable_info: RadarVariableConfig
     stations: Dict[str, RadarStationInfo]
-    elevations: List[ElevationInfo]
     endpoints: Dict[str, str]
 
 

@@ -63,23 +63,17 @@ class ProductsService:
     RADAR_STATIONS: Dict[str, dict] = {
         "rma3": {
             "id": "RMA3",
-            "name": "RMA3 - Pergamino",
-            "description": "Radar Meteorológico Argentino 3 - Pergamino, Buenos Aires",
-            "location": {"lat": -33.9456, "lon": -60.5517},
+            "name": "RMA3",
             "available": True,
         },
         "rma4": {
             "id": "RMA4",
-            "name": "RMA4 - Resistencia",
-            "description": "Radar Meteorológico Argentino 4 - Resistencia, Chaco",
-            "location": {"lat": -27.4500, "lon": -59.0500},
+            "name": "RMA4",
             "available": True,
         },
         "rma9": {
             "id": "RMA9",
-            "name": "RMA9 - Córdoba",
-            "description": "Radar Meteorológico Argentino 9 - Córdoba",
-            "location": {"lat": -31.4167, "lon": -64.1833},
+            "name": "RMA9",
             "available": True,
         },
     }
@@ -405,7 +399,6 @@ class ProductsService:
                 "id": station_config["id"],
                 "name": station_config["name"],
                 "description": station_config["description"],
-                "location": station_config.get("location"),
                 "available": station_config.get("available", False)
             }
         
@@ -450,8 +443,6 @@ class ProductsService:
             "station_info": {
                 "id": station["id"],
                 "name": station["name"],
-                "description": station["description"],
-                "location": station.get("location"),
                 "available": station.get("available", False)
             },
             "variable_info": {

@@ -3,8 +3,8 @@ from fastapi import APIRouter, HTTPException, status, Path as PathParam
 from fastapi.responses import FileResponse
 
 from dependencies import logger
-from services.products_service import products_service
-from models.products import (
+from services.radar_service import radar_service
+from models.radar import (
     RadarProductResponse,
     RadarVariableResponse,
     RadarStationTilesetsResponse,
@@ -31,7 +31,7 @@ async def get_radar_product():
     - **kdp**: Fase Diferencial Específica (°/km)
     """
     logger.info("Getting radar product info")
-    return products_service.get_radar_product()
+    return radar_service.get_radar_product()
 
 
 @router.get(
@@ -55,14 +55,14 @@ async def get_radar_variable(
     
     Example: /products/radar/dbzh
     """
-    if not products_service.radar_variable_exists(variable_id):
+    if not radar_service.variable_exists(variable_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Radar variable '{variable_id}' not found. Available: dbzh, zdr, rhohv, kdp"
         )
     
     logger.info(f"Getting radar variable details: {variable_id}")
-    return products_service.get_radar_variable(variable_id)
+    return radar_service.get_variable(variable_id)
 
 
 @router.get(
@@ -80,7 +80,7 @@ async def get_radar_station_tilesets(
     Get available tilesets for a specific radar station and variable.
     
     Returns:
-    - Station info (name, description, location)
+    - Station info (name)
     - Variable config (name, description, unit, zoom levels)
     - Available elevation angles
     - List of available tilesets (timestamps)
@@ -88,20 +88,20 @@ async def get_radar_station_tilesets(
     
     Example: /products/radar/dbzh/rma3
     """
-    if not products_service.radar_variable_exists(variable_id):
+    if not radar_service.variable_exists(variable_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Radar variable '{variable_id}' not found"
         )
     
-    if not products_service.radar_station_exists(station_id):
+    if not radar_service.station_exists(station_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Radar station '{station_id}' not found. Available: rma3, rma4, rma9"
         )
     
     logger.info(f"Getting radar station tilesets: {variable_id}/{station_id}")
-    return products_service.get_radar_station_tilesets(variable_id, station_id)
+    return radar_service.get_station_tilesets(variable_id, station_id)
 
 
 # ============== Radar Tile Serving Endpoint ==============
@@ -135,28 +135,28 @@ async def get_radar_tile(
     - elev2: 1.3°
     """
     # Validate variable
-    if not products_service.radar_variable_exists(variable_id):
+    if not radar_service.variable_exists(variable_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Radar variable '{variable_id}' not found"
         )
     
     # Validate station
-    if not products_service.radar_station_exists(station_id):
+    if not radar_service.station_exists(station_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Radar station '{station_id}' not found"
         )
     
     # Validate elevation
-    if not products_service.elevation_exists(elevation_id):
+    if not radar_service.elevation_exists(elevation_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Elevation '{elevation_id}' not found. Available: elev0, elev1, elev2"
         )
     
     # Validate zoom level
-    is_valid, error_msg = products_service.validate_radar_zoom_level(z)
+    is_valid, error_msg = radar_service.validate_zoom_level(z)
     if not is_valid:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -164,7 +164,7 @@ async def get_radar_tile(
         )
     
     # Get tile path
-    tile_path = products_service.get_radar_tile_path(
+    tile_path = radar_service.get_tile_path(
         variable_id, station_id, elevation_id, tileset_id, z, x, y
     )
     
