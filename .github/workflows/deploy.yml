@@ -78,7 +78,7 @@ jobs:
           echo "⏳ Monitoring deployment $DEPLOYMENT_UUID..."
           
           INTERVAL=2      # Start with 2 seconds (was 4-5)
-          MAX_INTERVAL=30 # Cap at 30 seconds
+          MAX_INTERVAL=10 # Cap at 10 seconds
           TIMEOUT=600     # 10 minutes total (was 3+3 minutes)
           ELAPSED=0
           RETRY_COUNT=0
