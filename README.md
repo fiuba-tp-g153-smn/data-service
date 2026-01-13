@@ -1,5 +1,7 @@
 # Data Service - SMN
 
+<img src="https://uptime.mapasmn.com/api/badge/5/status?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/uptime?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/ping?style=flat-square" />
+
 The Data Service is a Python-based microservice built with FastAPI for managing data operations. It handles data CRUD and related functionalities in a RESTful API.
 
 ### Team members

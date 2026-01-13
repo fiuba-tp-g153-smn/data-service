@@ -2,11 +2,12 @@ name: Run tests
 
 on:
   push:
-    branches:
-      - '*'
+    branches-ignore:
+      - 'main'
   pull_request:
-    branches:
-      - '*'
+    branches-ignore:
+      - 'main'
+  workflow_call:
 
 jobs:
   test:

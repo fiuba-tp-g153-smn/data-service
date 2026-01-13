@@ -29,3 +29,4 @@ EXPOSE 8080
 # - host=0.0.0.0 : bind to all network interfaces (needed in containers)
 # - port=8080 : matches EXPOSE above
 CMD ["uvicorn", "main:app", "--host=0.0.0.0", "--port", "8080"]
+HEALTHCHECK --interval=2s --timeout=10s --retries=3 CMD curl -f http://localhost:8080/health
