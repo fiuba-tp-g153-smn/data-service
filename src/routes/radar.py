@@ -1,15 +1,17 @@
 """Radar-specific endpoints for the products API."""
 
-from fastapi import APIRouter, HTTPException, status, Path as PathParam
+from fastapi import APIRouter, HTTPException
+from fastapi import Path as PathParam
+from fastapi import status
 from fastapi.responses import FileResponse
 
 from dependencies import logger
-from services.radar_service import radar_service
 from models.radar import (
     RadarProductResponse,
-    RadarVariableResponse,
     RadarStationTilesetsResponse,
+    RadarVariableResponse,
 )
+from services.radar_service import radar_service
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
 

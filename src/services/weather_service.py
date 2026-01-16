@@ -1,9 +1,11 @@
 """Service for interacting with Weather.com API."""
 
-import httpx
-from typing import Optional
-from dependencies import logger
 from datetime import datetime, timedelta
+from typing import Optional
+
+import httpx
+
+from dependencies import logger
 
 
 class WeatherService:
@@ -64,7 +66,7 @@ class WeatherService:
         try:
             async with httpx.AsyncClient() as client:
                 logger.info(f"Fetching weather data for tile ({x}, {y}) at LOD {lod}")
-                logger.debug(f"Time ranges: {time_ranges}")
+                logger.info(f"Time ranges: {time_ranges}")
                 response = await client.get(self.BASE_URL, params=params, timeout=30.0)
                 response.raise_for_status()
                 return response.json()

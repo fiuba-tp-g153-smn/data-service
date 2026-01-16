@@ -14,13 +14,13 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle events."""
     # Startup
     logger.info("Starting data-service...")
-    await sync_service.start()
+    await sync_service.start(logger)
 
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
-    await sync_service.stop()
+    await sync_service.stop(logger)
 
 
 app: FastAPI = FastAPI(

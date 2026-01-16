@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from clients.minio_sync_client import MinioSyncClient
 from settings import Settings
-
+from logging import Logger
 logger = logging.getLogger(__name__)
 
 
@@ -61,7 +61,7 @@ class SyncService:
             secure=self._settings.minio_secure,
         )
 
-    async def start(self) -> None:
+    async def start(self, logger: Logger) -> None:
         """Start the background sync task."""
         if not self._settings.is_minio_configured():
             logger.warning(
@@ -92,7 +92,7 @@ class SyncService:
             f"Prefixes: {self._sync_prefixes}"
         )
 
-    async def stop(self) -> None:
+    async def stop(self, logger: Logger) -> None:
         """Stop the background sync task."""
         if not self._running:
             return
@@ -130,7 +130,7 @@ class SyncService:
         if not self._client:
             return
 
-        logger.debug("Starting sync cycle...")
+        logger.info("Starting sync cycle...")
         total_downloaded = 0
 
         for prefix in self._sync_prefixes:
@@ -151,31 +151,7 @@ class SyncService:
         if total_downloaded > 0:
             logger.info(f"Sync cycle completed: {total_downloaded} files downloaded")
         else:
-            logger.debug("Sync cycle completed: no new files")
-
-    async def sync_now(self) -> int:
-        """
-        Trigger an immediate sync (useful for testing or manual refresh).
-
-        Returns:
-            Total number of files downloaded
-        """
-        if not self._client:
-            if not self._settings.is_minio_configured():
-                logger.warning("MinIO not configured. Cannot sync.")
-                return 0
-            self._client = self._create_client()
-
-        total = 0
-        for prefix in self._sync_prefixes:
-            local_dir = self._local_base_path / prefix
-            downloaded = await self._client.sync_prefix(
-                s3_prefix=prefix,
-                local_dir=local_dir,
-                delete_orphans=True,
-            )
-            total += downloaded
-        return total
+            logger.info("Sync cycle completed: no new files")
 
 
 # Singleton instance for use across the application

@@ -5,11 +5,12 @@ Provides sync functionality to download tiles from MinIO S3 bucket to local stor
 Used by data-service to periodically sync tiles for serving via REST API.
 """
 
-import aioboto3
 import asyncio
 import logging
 from pathlib import Path
 from typing import List, Set
+
+import aioboto3
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class MinioSyncClient:
                 content = await stream.read()
 
             await asyncio.to_thread(local_path.write_bytes, content)
-            logger.debug(f"Downloaded: {s3_key}")
+            logger.info(f"Downloaded: {s3_key}")
             return True
         except Exception as e:
             logger.error(f"Failed to download {s3_key}: {e}")
@@ -197,7 +198,7 @@ class MinioSyncClient:
                     try:
                         file_path.unlink()
                         deleted += 1
-                        logger.debug(f"Deleted orphan: {file_path}")
+                        logger.info(f"Deleted orphan: {file_path}")
                     except Exception as e:
                         logger.warning(f"Failed to delete orphan {file_path}: {e}")
 
