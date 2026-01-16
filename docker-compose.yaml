@@ -20,7 +20,6 @@ services:
       context: .
     ports:
       - "${APP_HOST_PORT}:8080"
-    network_mode: "host"
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
@@ -42,6 +41,12 @@ services:
       interval: 2s
       timeout: 10s
       retries: 3
+    networks:
+      - data_service_network
+
+networks:
+  data_service_network:
+    external: true
 
 volumes:
   data_service_data:
