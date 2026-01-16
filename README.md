@@ -17,9 +17,11 @@ The Data Service is a Python-based microservice built with FastAPI for managing 
 
 1. [Dependencies](#dependencies)
 1. [Setup for development](#Setup-for-development)
+1. [MinIO S3 Integration](#minio-s3-integration)
 1. [Makefile Commands](#Makefile-Commands)
 1. [Running Tests](#Running-Tests)
 1. [Dockerfiles](#Dockerfiles)
+1. [Environment Variables](#environment-variables)
 1. [API Documentation](#API-Documentation)
 
 ## Dependencies
@@ -57,6 +59,70 @@ You need to have the next dependencies installed:
 
      The app will be available at http://localhost:8080.
 
+## MinIO S3 Integration
+
+The Data Service syncs tile data from a MinIO S3 bucket, typically populated by the `tiles-processor` service. This decouples tile generation from tile serving.
+
+### How It Works
+
+1. **Background Sync Service**: On startup, data-service starts a background task that periodically syncs tiles from MinIO to local storage.
+2. **Sync Interval**: Configurable via `SYNC_INTERVAL_SECONDS` (default: 60 seconds).
+3. **Incremental Sync**: Only downloads new or changed files, deletes local files removed from S3.
+4. **Graceful Handling**: If MinIO is not configured or unavailable, the service continues without sync (uses existing local tiles).
+
+### S3 Bucket Structure
+
+The service expects tiles in the following structure:
+
+```
+tiles-data/                              # Bucket name
+├── band_13/
+│   └── tiles/
+│       └── {tileset_id}_tiles/
+│           └── {z}/{x}/{y}.webp
+└── band_9/
+    └── tiles/
+        └── {tileset_id}_tiles/
+            └── {z}/{x}/{y}.webp
+```
+
+### Connecting to tiles-processor MinIO
+
+When running both services separately:
+
+1. **Start tiles-processor** (includes MinIO):
+   ```bash
+   cd ../tiles-processor
+   docker compose up -d
+   ```
+   MinIO will be available at `localhost:9000` (S3 API) and `localhost:9001` (Console).
+
+2. **Configure data-service** to connect:
+   ```bash
+   # In data-service/.env
+   MINIO_ENDPOINT=host.docker.internal:9000
+   MINIO_ACCESS_KEY=minioadmin
+   MINIO_SECRET_KEY=minioadmin
+   MINIO_BUCKET=tiles-data
+   ```
+
+3. **Start data-service**:
+   ```bash
+   docker compose up -d
+   ```
+
+The data-service will sync tiles from tiles-processor's MinIO and serve them via REST API.
+
+### Architecture
+
+```
+┌─────────────────────┐         ┌─────────────────────┐         ┌─────────────────────┐
+│   tiles-processor   │ upload  │        MinIO        │  sync   │    data-service     │
+│                     │ ──────> │    (S3 Bucket)      │ <────── │                     │
+│ Generates tiles     │         │ Port 9000 (S3 API)  │         │ Serves tiles via    │
+│ from GOES-19        │         │ Port 9001 (Console) │         │ REST API            │
+└─────────────────────┘         └─────────────────────┘         └─────────────────────┘
+```
 
 ## Makefile Commands
 
@@ -132,6 +198,20 @@ The project includes three Dockerfiles for different environments:
     Use this to execute **tests in an isolated environment** in a production-like environment.
 
 All images use Python 3.13.8-slim-trixie as the base for minimal size.
+
+## Environment Variables
+
+| Variable | Description | Default |
+| :--- | :--- | :--- |
+| `LOG_LEVEL` | Logging verbosity (DEBUG, INFO, WARNING, ERROR). | `INFO` |
+| `APP_ENV` | Application environment (development, production). | `production` |
+| `APP_HOST_PORT` | Host port for the API service. | `6006` |
+| `MINIO_ENDPOINT` | MinIO S3 endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync |
+| `MINIO_ACCESS_KEY` | MinIO access key (username). | `minioadmin` |
+| `MINIO_SECRET_KEY` | MinIO secret key (password). | `minioadmin` |
+| `MINIO_BUCKET` | S3 bucket name for tile storage. | `tiles-data` |
+| `MINIO_SECURE` | Use HTTPS for MinIO connection (`true`/`false`). | `false` |
+| `SYNC_INTERVAL_SECONDS` | Interval between sync operations (seconds). | `60` |
 
 ## API Documentation
 

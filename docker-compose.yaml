@@ -1,3 +1,17 @@
+# Data Service - Tile Serving via REST API
+#
+# This service syncs tiles from an external MinIO S3 bucket and serves them via REST API.
+# The MinIO instance is typically provided by tiles-processor running separately.
+#
+# Configuration:
+#   MINIO_ENDPOINT: Set to the MinIO host:port (e.g., "host.docker.internal:9000" for local,
+#                   or "minio.example.com:9000" for remote)
+#
+# Usage with tiles-processor MinIO:
+#   1. Start tiles-processor: cd ../tiles-processor && docker compose up -d
+#   2. Set MINIO_ENDPOINT=host.docker.internal:9000 in .env
+#   3. Start data-service: docker compose up -d
+
 services:
   data-service:
     container_name: data-service-container
@@ -5,16 +19,20 @@ services:
     build:
       context: .
     ports:
-      - "${APP_HOST_PORT}:8080"
+      - "${APP_HOST_PORT:-6006}:8080"
     restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
     volumes:
       - data_service_data:/app/data
     environment:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - APP_ENV=${APP_ENV:-production}
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      # MinIO Configuration - connect to external MinIO (e.g., from tiles-processor)
+      # Use host.docker.internal:9000 to connect to MinIO running on the host
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-host.docker.internal:9000}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       - MINIO_BUCKET=${MINIO_BUCKET:-tiles-data}
       - MINIO_SECURE=${MINIO_SECURE:-false}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS:-60}
