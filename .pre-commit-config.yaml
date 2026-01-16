@@ -1,0 +1,29 @@
+repos:
+  - repo: https://github.com/psf/black
+    rev: 25.1.0
+    hooks:
+      - id: black
+        name: "Formatter (Black)"
+        language_version: python3.12
+        verbose: true
+
+  - repo: https://github.com/pylint-dev/pylint
+    rev: v3.3.8
+    hooks:
+      - id: pylint
+        name: "Static Code Analysis (Pylint)"
+        entry: pylint src --ignore-patterns=".*\.json" --ignore-patterns="test_.*?py,(.)*_test\\.py"
+        language: system
+        types: [python]
+        verbose: true
+
+
+  # - repo: local
+  #   hooks:
+  #     - id: mypy
+  #       name: "Static Type Checker (mypy)"
+  #       entry: mypy src
+  #       language: system
+  #       types: [python]
+  #       pass_filenames: false
+  #       verbose: true
