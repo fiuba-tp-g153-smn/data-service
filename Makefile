@@ -8,15 +8,10 @@ install:
 	poetry install
 
 up:
-	docker compose up --build
+	docker compose -f docker-compose-dev.yaml up --build
 
-dev:
-# Build the development Docker image and run the service in development mode.
-# - Uses Dockerfile.dev for a lightweight setup without copying source code (mounted as volume).
-# - Mounts ./src to /app for live code reloading during development.
-# - Mounts .env file for environment variables.
-# - Exposes port 8080 for access at http://localhost:8080
-	docker build . -f Dockerfile.dev -t data-service && docker run -p 8080:8080 -v ./src:/app -v ./.env:/app/.env -v ./data:/app/data data-service
+prod:
+	docker compose up --build
 
 local:
 	cd ./src && uvicorn main:app --host 0.0.0.0 --port 8080 --reload

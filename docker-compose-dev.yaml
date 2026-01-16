@@ -14,17 +14,21 @@
 
 services:
   data-service:
-    container_name: data-service-container
-    image: data-service
+    container_name: data-service-dev-container
     build:
       context: .
+      dockerfile: Dockerfile.dev
+      args:
+        - APP_HOST_PORT=${APP_HOST_PORT}
     ports:
-      - "${APP_HOST_PORT}:8080"
+      - "${APP_HOST_PORT:-6006}:8080"
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
     volumes:
-      - data_service_data:/app/data
+      - ./src:/app
+      - ./data:/app/data
+
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -41,6 +45,3 @@ services:
       interval: 2s
       timeout: 10s
       retries: 3
-
-volumes:
-  data_service_data:
