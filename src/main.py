@@ -43,6 +43,6 @@ app.add_middleware(
 
 app.include_router(general.router)
 app.include_router(weather.router)
-app.include_router(radar.router)      # Radar routes (most specific)
+app.include_router(radar.router)  # Radar routes (most specific)
 app.include_router(satellite.router)  # Satellite routes
-app.include_router(products.router)   # General products list (least specific)
+app.include_router(products.router)  # General products list (least specific)

@@ -71,7 +71,9 @@ class MinioSyncClient:
         """
         local_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Starting sync from s3://{self._bucket}/{s3_prefix} to {local_dir}")
+        logger.info(
+            f"Starting sync from s3://{self._bucket}/{s3_prefix} to {local_dir}"
+        )
 
         async with self._session.client(
             "s3",
@@ -98,7 +100,7 @@ class MinioSyncClient:
                 s3_keys.add(s3_key)
 
                 # Calculate local path
-                relative_path = s3_key[len(s3_prefix):].lstrip("/")
+                relative_path = s3_key[len(s3_prefix) :].lstrip("/")
                 local_path = local_dir / relative_path
 
                 # Check if we need to download
@@ -162,9 +164,7 @@ class MinioSyncClient:
         async with self._semaphore:
             return await self._download_file(s3_client, s3_key, local_path)
 
-    async def _download_file(
-        self, s3_client, s3_key: str, local_path: Path
-    ) -> bool:
+    async def _download_file(self, s3_client, s3_key: str, local_path: Path) -> bool:
         """Download a single file from S3."""
         try:
             local_path.parent.mkdir(parents=True, exist_ok=True)

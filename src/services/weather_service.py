@@ -1,4 +1,5 @@
 """Service for interacting with Weather.com API."""
+
 import httpx
 from typing import Optional
 from dependencies import logger
@@ -7,26 +8,23 @@ from datetime import datetime, timedelta
 
 class WeatherService:
     """Service to fetch weather data from Weather.com API."""
-    
+
     BASE_URL = "https://api2.weather.com/v2/vector-api/products/614/features"
     API_KEY = "REDACTED"
     TILE_SIZE = 512
-    
+
     async def _get_time_ranges_from_info(self, lod: int = 8) -> list[str]:
         """
         Fetch time ranges from the Weather.com /info endpoint for the given LOD.
-        
+
         Args:
             lod: Level of detail (default: 8)
-        
+
         Returns:
             List of time range strings
         """
         info_url = "https://api2.weather.com/v2/vector-api/products/614/info"
-        params = {
-            "apiKey": self.API_KEY,
-            "tile-size": self.TILE_SIZE
-        }
+        params = {"apiKey": self.API_KEY, "tile-size": self.TILE_SIZE}
         try:
             async with httpx.AsyncClient() as client:
                 logger.info("Fetching time ranges from /info endpoint")
@@ -40,11 +38,7 @@ class WeatherService:
             raise
 
     async def get_emas(
-        self,
-        x: int,
-        y: int,
-        lod: int = 8,
-        time: Optional[list[str]] = None
+        self, x: int, y: int, lod: int = 8, time: Optional[list[str]] = None
     ) -> dict:
         """
         Get weather stations (EMAs) data from Weather.com.
@@ -66,7 +60,7 @@ class WeatherService:
         ]
         for time_range in time_ranges:
             params.append(("time", time_range))
-        
+
         try:
             async with httpx.AsyncClient() as client:
                 logger.info(f"Fetching weather data for tile ({x}, {y}) at LOD {lod}")
@@ -80,5 +74,6 @@ class WeatherService:
         except Exception as e:
             logger.error(f"Unexpected error: {e}")
             raise
+
 
 weather_service = WeatherService()

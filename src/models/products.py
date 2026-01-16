@@ -4,14 +4,17 @@ from pydantic import BaseModel
 
 # ============== Shared Models ==============
 
+
 class ZoomLevels(BaseModel):
     """Zoom level configuration."""
+
     min: int
     max: int
 
 
 class BoundingBox(BaseModel):
     """Geographic bounding box in EPSG:3857."""
+
     minx: float
     miny: float
     maxx: float
@@ -20,14 +23,17 @@ class BoundingBox(BaseModel):
 
 # ============== Channel/Tileset Level Models ==============
 
+
 class TilesetInfo(BaseModel):
     """Information about a tileset (timestamp-based)."""
+
     id: str
     url_pattern: str
 
 
 class ChannelConfig(BaseModel):
     """Configuration for a channel (e.g., ch-13)."""
+
     name: str
     description: str
     zoom_levels: ZoomLevels
@@ -37,6 +43,7 @@ class ChannelConfig(BaseModel):
 
 class ChannelTilesetsResponse(BaseModel):
     """Response for listing tilesets of a specific channel."""
+
     product: str
     instrument: str
     channel: str
@@ -47,8 +54,10 @@ class ChannelTilesetsResponse(BaseModel):
 
 # ============== Radar Models ==============
 
+
 class ElevationInfo(BaseModel):
     """Information about a radar elevation angle."""
+
     id: str  # elev0, elev1, elev2
     angle: float  # 0.5, 0.9, 1.3 degrees
     description: str
@@ -56,12 +65,14 @@ class ElevationInfo(BaseModel):
 
 class RadarStationInfo(BaseModel):
     """Information about a radar station."""
+
     id: str  # RMA3, RMA4, RMA9
     available: bool = True
 
 
 class RadarVariableConfig(BaseModel):
     """Configuration for a radar variable (e.g., DBZH)."""
+
     name: str
     unit: str
     zoom_levels: ZoomLevels
@@ -70,6 +81,7 @@ class RadarVariableConfig(BaseModel):
 
 class RadarVariableSummary(BaseModel):
     """Summary info for a radar variable in product listing."""
+
     name: str
     unit: str
     available: bool = True
@@ -77,6 +89,7 @@ class RadarVariableSummary(BaseModel):
 
 class RadarProductResponse(BaseModel):
     """Response for radar product showing available variables."""
+
     product_id: str
     product_info: Dict[str, str]
     variables: Dict[str, RadarVariableSummary]
@@ -87,6 +100,7 @@ class RadarProductResponse(BaseModel):
 
 class RadarVariableResponse(BaseModel):
     """Response for a specific radar variable showing available stations."""
+
     product: str
     variable: str
     stations: Dict[str, RadarStationInfo]
@@ -95,6 +109,7 @@ class RadarVariableResponse(BaseModel):
 
 class RadarStationTilesetsResponse(BaseModel):
     """Response for listing tilesets of a specific radar station/variable."""
+
     product: str
     variable: str
     station: str
@@ -107,8 +122,10 @@ class RadarStationTilesetsResponse(BaseModel):
 
 # ============== Instrument Level Models ==============
 
+
 class ChannelSummary(BaseModel):
     """Summary info for a channel in instrument listing."""
+
     name: str
     description: str
     available: bool = True
@@ -116,6 +133,7 @@ class ChannelSummary(BaseModel):
 
 class InstrumentConfig(BaseModel):
     """Configuration for an instrument (e.g., ABI, GLM)."""
+
     name: str
     description: str
     channels: Dict[str, ChannelSummary]
@@ -123,6 +141,7 @@ class InstrumentConfig(BaseModel):
 
 class InstrumentResponse(BaseModel):
     """Response for a specific instrument."""
+
     product: str
     instrument: str
     instrument_info: InstrumentConfig
@@ -131,8 +150,10 @@ class InstrumentResponse(BaseModel):
 
 # ============== Product Level Models ==============
 
+
 class InstrumentSummary(BaseModel):
     """Summary info for an instrument in product listing."""
+
     name: str
     description: str
     available: bool = True
@@ -140,6 +161,7 @@ class InstrumentSummary(BaseModel):
 
 class ProductConfig(BaseModel):
     """Configuration for a product (e.g., GOES-19)."""
+
     name: str
     description: str
     type: str  # satellite, radar, numerical_model, station
@@ -148,6 +170,7 @@ class ProductConfig(BaseModel):
 
 class ProductResponse(BaseModel):
     """Response for a specific product."""
+
     product_id: str
     product_info: ProductConfig
     endpoints: Dict[str, str]
@@ -155,8 +178,10 @@ class ProductResponse(BaseModel):
 
 # ============== Top Level Models ==============
 
+
 class ProductSummary(BaseModel):
     """Summary of a product for the products listing."""
+
     name: str
     description: str
     type: str
@@ -165,4 +190,5 @@ class ProductSummary(BaseModel):
 
 class ProductsListResponse(BaseModel):
     """Response for listing all products."""
+
     products: Dict[str, ProductSummary]

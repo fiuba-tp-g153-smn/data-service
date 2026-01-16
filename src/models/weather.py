@@ -1,16 +1,19 @@
 """Models for Weather.com API responses."""
+
 from typing import Optional
 from pydantic import BaseModel
 
 
 class Geometry(BaseModel):
     """Geometry of the weather station."""
+
     coordinates: list[float]
     type: str
 
 
 class Properties(BaseModel):
     """Properties of a weather station (EMA)."""
+
     id: Optional[str] = None
     country: str
     neighborhood: str
@@ -39,6 +42,7 @@ class Properties(BaseModel):
 
 class WeatherFeature(BaseModel):
     """A single weather station feature."""
+
     type: str
     id: str
     geometry: Geometry
@@ -47,4 +51,5 @@ class WeatherFeature(BaseModel):
 
 class WeatherTimeSlot(BaseModel):
     """Weather data for a specific time slot."""
+
     features: list[WeatherFeature]

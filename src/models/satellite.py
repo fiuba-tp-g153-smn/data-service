@@ -1,4 +1,5 @@
 """Satellite-specific models (GOES-19, ABI, etc.)."""
+
 from typing import Dict, List
 from pydantic import BaseModel
 from models.base import ZoomLevels, BoundingBox, TilesetInfo
@@ -6,6 +7,7 @@ from models.base import ZoomLevels, BoundingBox, TilesetInfo
 
 class ChannelConfig(BaseModel):
     """Configuration for a satellite channel (e.g., ch-13)."""
+
     name: str
     description: str
     zoom_levels: ZoomLevels
@@ -15,6 +17,7 @@ class ChannelConfig(BaseModel):
 
 class ChannelTilesetsResponse(BaseModel):
     """Response for listing tilesets of a specific channel."""
+
     product: str
     instrument: str
     channel: str
@@ -25,6 +28,7 @@ class ChannelTilesetsResponse(BaseModel):
 
 class ChannelSummary(BaseModel):
     """Summary info for a channel in instrument listing."""
+
     name: str
     description: str
     available: bool = True
@@ -32,6 +36,7 @@ class ChannelSummary(BaseModel):
 
 class InstrumentConfig(BaseModel):
     """Configuration for an instrument (e.g., ABI, GLM)."""
+
     name: str
     description: str
     channels: Dict[str, ChannelSummary]
@@ -39,6 +44,7 @@ class InstrumentConfig(BaseModel):
 
 class InstrumentResponse(BaseModel):
     """Response for a specific instrument."""
+
     product: str
     instrument: str
     instrument_info: InstrumentConfig
@@ -47,6 +53,7 @@ class InstrumentResponse(BaseModel):
 
 class InstrumentSummary(BaseModel):
     """Summary info for an instrument in product listing."""
+
     name: str
     description: str
     available: bool = True
@@ -54,6 +61,7 @@ class InstrumentSummary(BaseModel):
 
 class SatelliteProductConfig(BaseModel):
     """Configuration for a satellite product (e.g., GOES-19)."""
+
     name: str
     description: str
     type: str  # satellite
@@ -62,6 +70,7 @@ class SatelliteProductConfig(BaseModel):
 
 class SatelliteProductResponse(BaseModel):
     """Response for a specific satellite product."""
+
     product_id: str
     product_info: SatelliteProductConfig
     endpoints: Dict[str, str]

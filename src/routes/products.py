@@ -1,4 +1,5 @@
 """General products API endpoints."""
+
 from fastapi import APIRouter, status
 
 from dependencies import logger
@@ -13,12 +14,12 @@ router = APIRouter(prefix="/products", tags=["Products"])
     status_code=status.HTTP_200_OK,
     summary="List All Products",
     response_description="Returns all available products (satellites, radar, models, etc.)",
-    response_model=ProductsListResponse
+    response_model=ProductsListResponse,
 )
 async def list_products():
     """
     List all available products and their basic information.
-    
+
     Products include:
     - **goes-19**: GOES-19 Satellite (ABI, GLM instruments)
     - **radar**: Weather Radar Network
