@@ -226,3 +226,73 @@ class MinioSyncClient:
         except Exception as e:
             logger.warning(f"MinIO connection check failed: {e}")
             return False
+
+    async def get_subdirectories(self, prefix: str) -> List[str]:
+        """
+        List immediate subdirectories (prefixes) under a given prefix.
+        Uses '/' as a delimiter.
+        """
+        subdirs = []
+        if not prefix.endswith("/"):
+            prefix += "/"
+
+        try:
+            async with self._session.client(
+                "s3",
+                endpoint_url=self._get_endpoint_url(),
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+            ) as s3_client:
+                paginator = s3_client.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(
+                    Bucket=self._bucket, Prefix=prefix, Delimiter="/"
+                ):
+                    for common_prefix in page.get("CommonPrefixes", []):
+                        subdirs.append(common_prefix["Prefix"])
+        except Exception as e:
+            logger.error(f"Error listing subdirectories for {prefix}: {e}")
+
+        return subdirs
+
+    async def delete_prefix(self, prefix: str) -> bool:
+        """
+        recursively delete all objects under a prefix.
+        """
+        try:
+            async with self._session.client(
+                "s3",
+                endpoint_url=self._get_endpoint_url(),
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+            ) as s3_client:
+                # List all objects under the prefix
+                objects_to_delete = []
+                paginator = s3_client.get_paginator("list_objects_v2")
+                async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                    for obj in page.get("Contents", []):
+                        objects_to_delete.append({"Key": obj["Key"]})
+
+                        # Batch delete in chunks of 1000 (S3 limit)
+                        if len(objects_to_delete) >= 1000:
+                            await self._delete_objects_batch(
+                                s3_client, objects_to_delete
+                            )
+                            objects_to_delete = []
+
+                # Delete remaining
+                if objects_to_delete:
+                    await self._delete_objects_batch(s3_client, objects_to_delete)
+
+            logger.info(f"Deleted prefix: {prefix}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting prefix {prefix}: {e}")
+            return False
+
+    async def _delete_objects_batch(self, s3_client, objects: List[dict]) -> None:
+        """Helper to delete a batch of objects."""
+        if not objects:
+            return
+        await s3_client.delete_objects(
+            Bucket=self._bucket, Delete={"Objects": objects, "Quiet": True}
+        )

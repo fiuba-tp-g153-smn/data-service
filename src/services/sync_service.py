@@ -135,7 +135,10 @@ class SyncService:
 
         for prefix in self._sync_prefixes:
             try:
-                # Map S3 prefix to local directory
+                # 1. Enforce retention policy before sync
+                await self._enforce_retention_policy(prefix)
+
+                # 2. Map S3 prefix to local directory
                 # e.g., "band_13/tiles" -> local_base_path/band_13/tiles
                 local_dir = self._local_base_path / prefix
 
@@ -152,6 +155,46 @@ class SyncService:
             logger.info(f"Sync cycle completed: {total_downloaded} files downloaded")
         else:
             logger.info("Sync cycle completed: no new files")
+
+    async def _enforce_retention_policy(self, band_prefix: str) -> None:
+        """
+        Enforce retention policy: keep only the latest 26 tilesets (prefixes).
+        Oldest prefixes are deleted from S3.
+        """
+        if not self._client:
+            return
+
+        KEEP_COUNT = 26
+
+        try:
+            # 1. List tileset prefixes (subdirectories)
+            # keys look like: band_13/tiles/OR_ABI-L1b-RadF-M6C13_G19_s20250141230210.../
+            tileset_prefixes = await self._client.get_subdirectories(band_prefix)
+
+            # 2. Sort lexicographically (effectively chronological due to filename format: sYYYYJJJHHMMSSS)
+            tileset_prefixes.sort()
+
+            # 3. Check threshold
+            if len(tileset_prefixes) <= KEEP_COUNT:
+                return
+
+            # 4. Prune excess
+            # We want to keep the last KEEP_COUNT items.
+            # Delete items from index 0 to (len - KEEP_COUNT)
+            prefixes_to_delete = tileset_prefixes[: -KEEP_COUNT]
+
+            if prefixes_to_delete:
+                logger.info(
+                    f"Retention policy triggered for {band_prefix}. "
+                    f"Found {len(tileset_prefixes)} tilesets, limit is {KEEP_COUNT}. "
+                    f"Deleting {len(prefixes_to_delete)} old tilesets."
+                )
+
+                for prefix_to_delete in prefixes_to_delete:
+                    await self._client.delete_prefix(prefix_to_delete)
+
+        except Exception as e:
+            logger.error(f"Error enforcing retention policy for {band_prefix}: {e}")
 
 
 # Singleton instance for use across the application
