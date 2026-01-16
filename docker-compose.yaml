@@ -7,8 +7,14 @@ services:
     ports:
       - "${APP_HOST_PORT}:8080"
     restart: unless-stopped
+    volumes:
+      - tkgs0oo8wg0ss4c400g4gs84_tiles-data:/app/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${APP_HOST_PORT}/health"]
       interval: 2s
       timeout: 10s
       retries: 3
+
+volumes:
+  tkgs0oo8wg0ss4c400g4gs84_tiles-data:
+    external: true

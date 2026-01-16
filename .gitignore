@@ -65,3 +65,4 @@ junit_report.xml
 .pytest_cache
 
 .tmp
+data/
