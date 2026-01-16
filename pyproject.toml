@@ -8,12 +8,20 @@ authors = [
     { name = "Máximo Gismondi", email = "magismondi@fi.uba.ar" },
     { name = "Matías Valeriani", email = "mvaleriani@fi.uba.ar" },
 ]
-readme = {file = "README.md", content-type = "text/markdown"}
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.13,<4.0"
-dependencies = ["fastapi (>=0.119.1,<0.120.0)", "newrelic (>=11.0.1,<12.0.0)", "uvicorn (>=0.38.0,<0.39.0)", "python-dotenv (>=1.1.1,<2.0.0)", "httpx (>=0.28.0,<0.29.0)", "pydantic (>=2.10.0,<3.0.0)"]
+dependencies = [
+    "fastapi (>=0.119.1,<0.120.0)",
+    "newrelic (>=11.0.1,<12.0.0)",
+    "uvicorn (>=0.38.0,<0.39.0)",
+    "python-dotenv (>=1.1.1,<2.0.0)",
+    "httpx (>=0.28.0,<0.29.0)",
+    "pydantic (>=2.10.0,<3.0.0)",
+    "aioboto3 (>=15.0.0,<16.0.0)",
+]
 
 [tool.setuptools.dynamic]
-version = {file = "version.txt"}
+version = { file = "version.txt" }
 
 [tool.poetry]
 packages = [{ include = "src" }]
@@ -27,7 +35,7 @@ build-backend = "poetry.core.masonry.api"
 dev = [
     "pytest (>=8.4.2,<9.0.0)",
     "pytest-cov (>=7.0.0,<8.0.0)",
-    "pytest-socket (>=0.7.0,<0.8.0)"
+    "pytest-socket (>=0.7.0,<0.8.0)",
 ]
 
 [tool.pytest.ini_options]

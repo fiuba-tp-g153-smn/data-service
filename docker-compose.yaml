@@ -8,13 +8,21 @@ services:
       - "${APP_HOST_PORT}:8080"
     restart: unless-stopped
     volumes:
-      - tkgs0oo8wg0ss4c400g4gs84_tiles-data:/app/data
+      - data_service_data:/app/data
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - APP_ENV=${APP_ENV:-production}
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=${MINIO_BUCKET:-tiles-data}
+      - MINIO_SECURE=${MINIO_SECURE:-false}
+      - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS:-60}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:${APP_HOST_PORT}/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 2s
       timeout: 10s
       retries: 3
 
 volumes:
-  tkgs0oo8wg0ss4c400g4gs84_tiles-data:
-    external: true
+  data_service_data:

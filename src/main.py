@@ -1,8 +1,27 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
 from routes import weather, products, satellite, radar
+from services.sync_service import sync_service
+from dependencies import logger
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle events."""
+    # Startup
+    logger.info("Starting data-service...")
+    await sync_service.start()
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down data-service...")
+    await sync_service.stop()
+
 
 app: FastAPI = FastAPI(
     title="data-service",
@@ -10,6 +29,7 @@ app: FastAPI = FastAPI(
     contact={
         "name": "FIUBA TPF Team N°153 Altamirano, Diem, Gismondi, Valeriani",
     },
+    lifespan=lifespan,
 )
 
 # Add CORS middleware for tile serving
