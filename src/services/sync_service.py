@@ -63,26 +63,8 @@ class SyncService:
 
     async def start(self, logger: Logger) -> None:
         """Start the background sync task."""
-        if not self._settings.is_minio_configured():
-            logger.warning(
-                "MinIO not configured. Sync service will not start. "
-                "Set MINIO_ENDPOINT, MINIO_ACCESS_KEY, and MINIO_SECRET_KEY."
-            )
-            return
-
         if self._running:
             logger.warning("Sync service is already running")
-            return
-
-        self._client = self._create_client()
-
-        # Check connection before starting
-        if not await self._client.check_connection():
-            logger.error(
-                "Failed to connect to MinIO. Sync service will not start. "
-                f"Endpoint: {self._settings.minio_endpoint}, "
-                f"Bucket: {self._settings.minio_bucket}"
-            )
             return
 
         self._running = True
@@ -110,19 +92,28 @@ class SyncService:
 
     async def _sync_loop(self) -> None:
         """Main sync loop that runs periodically."""
-        # Run initial sync immediately
-        await self._run_sync()
-
         while self._running:
             try:
-                await asyncio.sleep(self._settings.sync_interval_seconds)
-                if self._running:
+                if not self._settings.is_minio_configured():
+                    logger.warning(
+                        "MinIO not configured. "
+                        "Set MINIO_ENDPOINT, MINIO_ACCESS_KEY, and MINIO_SECRET_KEY. "
+                        "Retrying in next cycle..."
+                    )
+                else:
+                    if not self._client:
+                        self._client = self._create_client()
+
+                    # Execute sync cycle
                     await self._run_sync()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in sync loop: {e}")
-                # Continue running despite errors
+
+            # Wait for next interval
+            if self._running:
                 await asyncio.sleep(self._settings.sync_interval_seconds)
 
     async def _run_sync(self) -> None:
