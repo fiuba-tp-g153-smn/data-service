@@ -41,7 +41,7 @@ services:
       - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 2s
       timeout: 10s
       retries: 3
