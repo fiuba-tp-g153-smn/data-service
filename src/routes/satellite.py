@@ -1,9 +1,12 @@
 """Satellite-specific endpoints (GOES-19, ABI, etc.)."""
 
 from fastapi import APIRouter, HTTPException, status, Path as PathParam
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, status, Path as PathParam, Response
+from fastapi.responses import FileResponse, JSONResponse
+from email.utils import format_datetime
+import json
 
-from dependencies import logger
+from dependencies import logger, settings
 from services.satellite_service import satellite_service
 from models.satellite import (
     SatelliteProductResponse,
@@ -109,7 +112,23 @@ async def list_channel_tilesets(
         )
 
     logger.info(f"Listing tilesets for: {product_id}/{instrument_id}/{channel_id}")
-    return satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
+    data = satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
+
+    # Generate ETag
+    etag = f'"{satellite_service.get_config_hash(data)}"'
+
+    # Get Last-Modified
+    last_modified = satellite_service.get_latest_tileset_timestamp(data["tilesets"])
+    
+    headers = {
+        "Cache-Control": settings.cache_control_config,
+        "ETag": etag,
+    }
+    
+    if last_modified:
+        headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
+
+    return JSONResponse(content=data, headers=headers)
 
 
 @router.get(
@@ -165,11 +184,16 @@ async def get_satellite_tile(
         )
 
     logger.debug(f"Serving satellite tile: {tile_path}")
+    
+    # ETag based on unique tile identifier
+    etag = f'"{tileset_id}-{z}-{x}-{y}"'
+    
     return FileResponse(
         tile_path,
         media_type="image/webp",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": settings.cache_control_tile,
+            "ETag": etag,
             "Access-Control-Allow-Origin": "*",
         },
     )

@@ -22,6 +22,10 @@ class Settings:
     minio_secure: bool = False
     sync_interval_seconds: int = 60
 
+    # Caching
+    cache_control_config: str = "public, max-age=60, stale-while-revalidate=300"
+    cache_control_tile: str = "public, max-age=31536000, immutable"
+
     def __init__(self):
         # Load from environment variables
         self._load_from_env()
@@ -39,6 +43,14 @@ class Settings:
         self.minio_secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
         self.sync_interval_seconds = int(
             os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
+        )
+
+        # Caching
+        self.cache_control_config = os.getenv(
+            "CACHE_CONTROL_CONFIG", self.cache_control_config
+        )
+        self.cache_control_tile = os.getenv(
+            "CACHE_CONTROL_TILE", self.cache_control_tile
         )
 
     def is_minio_configured(self) -> bool:

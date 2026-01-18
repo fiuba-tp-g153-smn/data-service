@@ -2,6 +2,10 @@
 
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import hashlib
+import json
+import re
+from datetime import datetime, timezone
 
 from services.base_service import BaseProductService
 from dependencies import logger
@@ -284,6 +288,39 @@ class SatelliteService(BaseProductService):
             )
 
         return True, ""
+
+    # ============== Caching Helper Methods ==============
+
+    def get_config_hash(self, config: dict) -> str:
+        """Generate a stable hash for a configuration dictionary."""
+        # Sort keys to ensure stability
+        config_str = json.dumps(config, sort_keys=True)
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    def get_latest_tileset_timestamp(self, tilesets: List[dict]) -> Optional[datetime]:
+        """Get the timestamp of the most recent tileset as a datetime object."""
+        if not tilesets:
+            return None
+
+        # Extract timestamps from IDs and find max
+        # ID format varies but usually ends with _sYYYYJJJHHMMSS...
+        # We'll just sort by ID since they contain timestamps
+        sorted_tilesets = sorted(tilesets, key=lambda x: x["id"], reverse=True)
+        
+        if not sorted_tilesets:
+            return None
+            
+        # Try to extract timestamp from the ID of the latest tileset
+        latest_id = sorted_tilesets[0]["id"]
+        match = re.search(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})", latest_id)
+        
+        if match:
+            year, julian_day, hour, minute, second = map(int, match.groups())
+            # Convert Julian day to date
+            dt = datetime.strptime(f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}", "%Y%j%H%M%S")
+            return dt.replace(tzinfo=timezone.utc)
+            
+        return None
 
 
 # Singleton instance
