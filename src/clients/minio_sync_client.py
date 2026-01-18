@@ -8,7 +8,7 @@ Used by data-service to periodically sync tiles for serving via REST API.
 import asyncio
 import logging
 from pathlib import Path
-from typing import List, Set
+from typing import List, Optional, Set
 
 import aioboto3
 
@@ -58,6 +58,7 @@ class MinioSyncClient:
         s3_prefix: str,
         local_dir: Path,
         delete_orphans: bool = True,
+        extensions: Optional[List[str]] = None,
     ) -> int:
         """
         Sync files from S3 prefix to local directory.
@@ -88,6 +89,13 @@ class MinioSyncClient:
             if not s3_objects:
                 logger.info(f"No objects found under {s3_prefix}")
                 return 0
+
+            # Filter by extension if specified
+            if extensions:
+                s3_objects = [
+                    obj for obj in s3_objects
+                    if any(obj["Key"].endswith(ext) for ext in extensions)
+                ]
 
             # Get existing local files
             local_files = self._get_local_files(local_dir, s3_prefix)
