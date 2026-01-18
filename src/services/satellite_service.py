@@ -295,7 +295,7 @@ class SatelliteService(BaseProductService):
         """Generate a stable hash for a configuration dictionary."""
         # Sort keys to ensure stability
         config_str = json.dumps(config, sort_keys=True)
-        return hashlib.md5(config_str.encode()).hexdigest()
+        return hashlib.sha256(config_str.encode()).hexdigest()
 
     def get_latest_tileset_timestamp(self, tilesets: List[dict]) -> Optional[datetime]:
         """Get the timestamp of the most recent tileset as a datetime object."""
