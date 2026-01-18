@@ -13,3 +13,6 @@ env
 .venv
 .gitignore
 README.md
+
+data/
+reports/
