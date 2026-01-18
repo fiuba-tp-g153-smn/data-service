@@ -1,7 +1,7 @@
 """
-MinIO S3 Sync Client.
+S3 Client.
 
-Provides sync functionality to download tiles from MinIO S3 bucket to local storage.
+Provides sync functionality to download tiles from S3 bucket to local storage.
 Used by data-service to periodically sync tiles for serving via REST API.
 """
 
@@ -15,17 +15,17 @@ import aioboto3
 logger = logging.getLogger(__name__)
 
 
-class MinioSyncClient:
+class S3Client:
     """
-    Async MinIO sync client for tile downloads.
+    Async S3 client for tile downloads.
 
-    Syncs tile directories from MinIO S3 bucket to local storage with
+    Syncs tile directories from S3 S3 bucket to local storage with
     incremental updates (only downloads new/changed files).
 
     Attributes:
-        _endpoint: MinIO endpoint URL (e.g., "minio:9000")
-        _access_key: MinIO access key
-        _secret_key: MinIO secret key
+        _endpoint: S3 endpoint URL (e.g., "minio:9000")
+        _access_key: S3 access key
+        _secret_key: S3 secret key
         _bucket: Source bucket name
         _secure: Whether to use HTTPS
         _max_concurrent_downloads: Maximum parallel downloads
@@ -221,7 +221,7 @@ class MinioSyncClient:
         return deleted
 
     async def check_connection(self) -> bool:
-        """Check if we can connect to MinIO."""
+        """Check if we can connect to S3."""
         try:
             async with self._session.client(
                 "s3",
@@ -232,7 +232,7 @@ class MinioSyncClient:
                 await s3_client.head_bucket(Bucket=self._bucket)
                 return True
         except Exception as e:
-            logger.warning(f"MinIO connection check failed: {e}")
+            logger.warning(f"S3 connection check failed: {e}")
             return False
 
     async def get_subdirectories(self, prefix: str) -> List[str]:

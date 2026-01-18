@@ -28,5 +28,7 @@ EXPOSE 8080
 # - "main:app" : entrypoint -> file main.py, ASGI (Asynchronous Server Gateway Interface) app instance "app"
 # - host=0.0.0.0 : bind to all network interfaces (needed in containers)
 # - port=8080 : matches EXPOSE above
+RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
+
 CMD ["uvicorn", "main:app", "--host=0.0.0.0", "--port", "8080"]
 HEALTHCHECK --interval=2s --timeout=10s --retries=3 CMD curl -f http://localhost:8080/health

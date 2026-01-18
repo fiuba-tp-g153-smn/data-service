@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from clients.minio_sync_client import MinioSyncClient
+from clients.s3_client import S3Client
 from settings import Settings
 from logging import Logger
 logger = logging.getLogger(__name__)
@@ -18,21 +18,22 @@ logger = logging.getLogger(__name__)
 
 class SyncService:
     """
-    Background service that syncs tiles from MinIO to local storage.
+    Background service that syncs tiles from S3 to local storage.
 
     Runs periodically (default: every 60 seconds) to ensure local tile
-    storage stays in sync with the MinIO bucket populated by tiles-processor.
+    storage stays in sync with the S3 bucket populated by tiles-processor.
 
     Attributes:
-        _settings: Application settings with MinIO configuration
-        _client: MinIO sync client
+        _settings: Application settings with S3 configuration
+        _client: S3 client
+
         _sync_prefixes: List of S3 prefixes to sync
         _local_base_path: Local base directory for synced files
         _task: Background asyncio task
         _running: Flag indicating if sync is active
     """
 
-    # Prefixes to sync from MinIO (matches tiles-processor output structure)
+    # Prefixes to sync from S3 (matches tiles-processor output structure)
     DEFAULT_SYNC_PREFIXES = [
         "band_13/tiles",
         "band_9/tiles",
@@ -49,16 +50,16 @@ class SyncService:
         self._sync_prefixes = sync_prefixes or self.DEFAULT_SYNC_PREFIXES
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._client: Optional[MinioSyncClient] = None
+        self._client: Optional[S3Client] = None
 
-    def _create_client(self) -> MinioSyncClient:
-        """Create MinIO sync client from settings."""
-        return MinioSyncClient(
-            endpoint=self._settings.minio_endpoint,
-            access_key=self._settings.minio_access_key,
-            secret_key=self._settings.minio_secret_key,
-            bucket=self._settings.minio_bucket,
-            secure=self._settings.minio_secure,
+    def _create_client(self) -> S3Client:
+        """Create S3 client from settings."""
+        return S3Client(
+            endpoint=self._settings.s3_tiles_data_endpoint,
+            access_key=self._settings.s3_tiles_data_access_key,
+            secret_key=self._settings.s3_tiles_data_secret_key,
+            bucket=self._settings.s3_tiles_data_bucket_name,
+            secure=self._settings.s3_tiles_data_secure,
         )
 
     async def start(self, logger: Logger) -> None:
@@ -94,10 +95,10 @@ class SyncService:
         """Main sync loop that runs periodically."""
         while self._running:
             try:
-                if not self._settings.is_minio_configured():
+                if not self._settings.is_s3_configured():
                     logger.warning(
-                        "MinIO not configured. "
-                        "Set MINIO_ENDPOINT, MINIO_ACCESS_KEY, and MINIO_SECRET_KEY. "
+                        "S3 not configured. "
+                        "Set S3_TILES_DATA_ENDPOINT, S3_TILES_DATA_ACCESS_KEY, and S3_TILES_DATA_SECRET_KEY. "
                         "Retrying in next cycle..."
                     )
                 else:

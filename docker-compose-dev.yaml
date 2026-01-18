@@ -4,12 +4,12 @@
 # The MinIO instance is typically provided by tiles-processor running separately.
 #
 # Configuration:
-#   MINIO_ENDPOINT: Set to the MinIO host:port (e.g., "host.docker.internal:9000" for local,
+#   S3_TILES_DATA_ENDPOINT: Set to the S3/MinIO host:port (e.g., "host.docker.internal:9000" for local,
 #                   or "minio.example.com:9000" for remote)
 #
 # Usage with tiles-processor MinIO:
 #   1. Start tiles-processor: cd ../tiles-processor && docker compose up -d
-#   2. Set MINIO_ENDPOINT=host.docker.internal:9000 in .env
+#   2. Set S3_TILES_DATA_ENDPOINT=host.docker.internal:9000 in .env
 #   3. Start data-service: docker compose up -d
 
 services:
@@ -32,13 +32,13 @@ services:
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
-      # MinIO Configuration - connect to external MinIO (e.g., from tiles-processor)
+      # S3 Configuration - connect to external S3 (e.g., MinIO from tiles-processor)
       # Use host.docker.internal:9000 to connect to MinIO running on the host
-      - MINIO_ENDPOINT=${MINIO_ENDPOINT}
-      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
-      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
-      - MINIO_BUCKET=${MINIO_BUCKET}
-      - MINIO_SECURE=${MINIO_SECURE}
+      - S3_TILES_DATA_ENDPOINT=${S3_TILES_DATA_ENDPOINT}
+      - S3_TILES_DATA_ACCESS_KEY=${S3_TILES_DATA_ACCESS_KEY}
+      - S3_TILES_DATA_SECRET_KEY=${S3_TILES_DATA_SECRET_KEY}
+      - S3_TILES_DATA_BUCKET_NAME=${S3_TILES_DATA_BUCKET_NAME}
+      - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

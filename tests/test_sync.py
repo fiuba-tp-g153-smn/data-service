@@ -1,12 +1,12 @@
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from pathlib import Path
-from clients.minio_sync_client import MinioSyncClient
+from clients.s3_client import S3Client
 
 @pytest.mark.asyncio
 async def test_sync_prefix_filtering():
     """Verify that sync_prefix filters files by extension."""
-    client = MinioSyncClient("endpoint", "access", "secret", "bucket")
+    client = S3Client("endpoint", "access", "secret", "bucket")
     
     # Mock internal methods
     client._list_objects = AsyncMock(return_value=[
@@ -42,7 +42,7 @@ async def test_sync_prefix_filtering():
 @pytest.mark.asyncio
 async def test_sync_prefix_no_filtering():
     """Verify that sync_prefix downloads all files if no extensions provided."""
-    client = MinioSyncClient("endpoint", "access", "secret", "bucket")
+    client = S3Client("endpoint", "access", "secret", "bucket")
     
     # Mock internal methods
     client._list_objects = AsyncMock(return_value=[
