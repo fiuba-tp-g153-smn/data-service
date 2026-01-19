@@ -24,12 +24,15 @@ COPY ./src /app
 # Expose port 8080 (FastAPI main.py sets default to 8080)
 EXPOSE 8080
 
+ARG WEB_CONCURRENCY
+ENV WEB_CONCURRENCY=${WEB_CONCURRENCY}
+
 # Run the app with uvicorn
 # - "main:app" : entrypoint -> file main.py, ASGI (Asynchronous Server Gateway Interface) app instance "app"
 # - host=0.0.0.0 : bind to all network interfaces (needed in containers)
 # - port=8080 : matches EXPOSE above
 # Run the app with uvicorn
 # - workers: use WEB_CONCURRENCY env var or default to number of CPU cores
-CMD ["uvicorn main:app --host=0.0.0.0 --port 8080 --workers ${WEB_CONCURRENCY:-$(nproc)}"]
+CMD ["sh", "-c", "exec uvicorn main:app --host=0.0.0.0 --port=8080 --workers=${WEB_CONCURRENCY}"]
 
 HEALTHCHECK --interval=10s --timeout=10s --retries=3 CMD python -c 'import urllib.request; urllib.request.urlopen("http://localhost:8080/health")'

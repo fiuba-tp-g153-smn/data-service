@@ -40,6 +40,7 @@ services:
       - S3_TILES_DATA_BUCKET_NAME=${S3_TILES_DATA_BUCKET_NAME}
       - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
+      - WEB_CONCURRENCY=${WEB_CONCURRENCY}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s

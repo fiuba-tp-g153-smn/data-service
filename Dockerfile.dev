@@ -25,8 +25,12 @@ RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-ro
 # Expose port 8080 (FastAPI main.py sets default to 8080)
 EXPOSE 8080
 
+ARG WEB_CONCURRENCY
+ENV WEB_CONCURRENCY=${WEB_CONCURRENCY}
+
 # Run the app with uvicorn
 # - "main:app" : entrypoint -> file main.py, ASGI (Asynchronous Server Gateway Interface) app instance "app"
 # - host=0.0.0.0 : bind to all network interfaces (needed in containers)
 # - port=8080 : matches EXPOSE above
-CMD ["uvicorn", "main:app", "--host=0.0.0.0", "--reload", "--port", "8080"]
+
+CMD ["sh", "-c", "exec uvicorn main:app --host=0.0.0.0 --port=8080 --workers=${WEB_CONCURRENCY}"]

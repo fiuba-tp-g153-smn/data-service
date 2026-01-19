@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
-
+import asyncio
+import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +9,7 @@ from routes import weather, products, satellite, radar
 from services.sync_service import sync_service
 from dependencies import logger
 
+asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

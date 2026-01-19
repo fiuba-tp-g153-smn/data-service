@@ -7,6 +7,8 @@ Runs as a background task during application lifetime.
 
 import asyncio
 import logging
+import fcntl
+import os
 from pathlib import Path
 from typing import List, Optional
 
@@ -51,6 +53,10 @@ class SyncService:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._client: Optional[S3Client] = None
+        
+        # Lock file mechanism to ensure only one worker syncs
+        self._lock_file_path = "/tmp/data-service-sync.lock"
+        self._lock_file_handle = None
 
     def _create_client(self) -> S3Client:
         """Create S3 client from settings."""
@@ -68,10 +74,22 @@ class SyncService:
             logger.warning("Sync service is already running")
             return
 
+        # Attempt to acquire lock
+        try:
+            self._lock_file_handle = open(self._lock_file_path, "w")
+            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError:
+            # Lock is held by another process
+            logger.info("Sync service disabled (another worker is active).")
+            if self._lock_file_handle:
+                self._lock_file_handle.close()
+                self._lock_file_handle = None
+            return
+
         self._running = True
         self._task = asyncio.create_task(self._sync_loop())
         logger.info(
-            f"Sync service started. Interval: {self._settings.sync_interval_seconds}s, "
+            f"Sync service started (Lock acquired). Interval: {self._settings.sync_interval_seconds}s, "
             f"Prefixes: {self._sync_prefixes}"
         )
 
@@ -88,6 +106,15 @@ class SyncService:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        
+        # Release lock
+        if self._lock_file_handle:
+            try:
+                fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
+                self._lock_file_handle.close()
+            except Exception as e:
+                logger.error(f"Error releasing lock: {e}")
+            self._lock_file_handle = None
 
         logger.info("Sync service stopped")
 
