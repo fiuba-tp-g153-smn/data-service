@@ -98,7 +98,7 @@ class S3Client:
                 ]
 
             # Get existing local files
-            local_files = self._get_local_files(local_dir, s3_prefix)
+            local_files = await asyncio.to_thread(self._get_local_files, local_dir, s3_prefix)
 
             # Determine files to download (new or updated)
             files_to_download = []
@@ -132,8 +132,8 @@ class S3Client:
 
             # Delete orphan files if requested
             if delete_orphans:
-                orphans_deleted = await self._delete_orphans(
-                    local_dir, s3_prefix, s3_keys
+                orphans_deleted = await asyncio.to_thread(
+                    self._delete_orphans, local_dir, s3_prefix, s3_keys
                 )
                 if orphans_deleted > 0:
                     logger.info(f"Deleted {orphans_deleted} orphan files")
@@ -176,7 +176,7 @@ class S3Client:
     async def _download_file(self, s3_client, s3_key: str, local_path: Path) -> bool:
         """Download a single file from S3."""
         try:
-            local_path.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(local_path.parent.mkdir, parents=True, exist_ok=True)
 
             response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
@@ -189,10 +189,11 @@ class S3Client:
             logger.error(f"Failed to download {s3_key}: {e}")
             return False
 
-    async def _delete_orphans(
+    def _delete_orphans(
         self, local_dir: Path, s3_prefix: str, s3_keys: Set[str]
     ) -> int:
-        """Delete local files that don't exist in S3."""
+        """Delete local files that don't exist in S3 (blocking)."""
+        # This method is designed to be run in a thread executor
         deleted = 0
         if not local_dir.exists():
             return deleted

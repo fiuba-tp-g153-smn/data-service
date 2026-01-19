@@ -16,7 +16,7 @@ async def test_sync_prefix_filtering():
     ])
     client._get_local_files = MagicMock(return_value={})
     client._download_file_with_limit = AsyncMock(return_value=True)
-    client._delete_orphans = AsyncMock(return_value=0)
+    client._delete_orphans = MagicMock(return_value=0)
     
     # Mock session and s3 client context manager
     mock_s3 = AsyncMock()
@@ -51,7 +51,7 @@ async def test_sync_prefix_no_filtering():
     ])
     client._get_local_files = MagicMock(return_value={})
     client._download_file_with_limit = AsyncMock(return_value=True)
-    client._delete_orphans = AsyncMock(return_value=0)
+    client._delete_orphans = MagicMock(return_value=0)
     
     # Mock session
     mock_s3 = AsyncMock()
