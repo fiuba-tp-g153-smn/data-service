@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 from main import app
 from datetime import datetime, timezone
 import pytest
@@ -17,7 +17,7 @@ def test_get_channel_config_headers():
     
     with patch("routes.satellite.satellite_service") as mock_service:
         mock_service.channel_exists.return_value = True
-        mock_service.get_channel_tilesets.return_value = mock_data
+        mock_service.get_channel_tilesets = AsyncMock(return_value=mock_data)
         mock_service.get_config_hash.return_value = "test-hash-123"
         mock_service.get_latest_tileset_timestamp.return_value = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
         

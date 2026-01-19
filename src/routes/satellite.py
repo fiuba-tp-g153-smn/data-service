@@ -4,7 +4,6 @@ from fastapi import APIRouter, HTTPException, status, Path as PathParam
 from fastapi import APIRouter, HTTPException, status, Path as PathParam, Response
 from fastapi.responses import FileResponse, JSONResponse
 from email.utils import format_datetime
-import json
 
 from dependencies import logger, settings
 from services.satellite_service import satellite_service
@@ -13,6 +12,7 @@ from models.satellite import (
     InstrumentResponse,
     ChannelTilesetsResponse,
 )
+import asyncio
 
 router = APIRouter(prefix="/products", tags=["Satellite"])
 
@@ -112,7 +112,7 @@ async def list_channel_tilesets(
         )
 
     logger.info(f"Listing tilesets for: {product_id}/{instrument_id}/{channel_id}")
-    data = satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
+    data = await satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
 
     # Generate ETag
     etag = f'"{satellite_service.get_config_hash(data)}"'
@@ -176,8 +176,8 @@ async def get_satellite_tile(
     tile_path = satellite_service.get_tile_path(
         product_id, instrument_id, channel_id, tileset_id, z, x, y
     )
-
-    if not tile_path.exists():
+    
+    if not await asyncio.to_thread(tile_path.exists):
         logger.warning(f"Satellite tile not found: {tile_path}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"

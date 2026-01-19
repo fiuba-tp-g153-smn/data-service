@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 from services.base_service import BaseProductService
 from dependencies import logger
-
+import asyncio
 
 class SatelliteService(BaseProductService):
     """Service to manage satellite products and tiles."""
@@ -201,12 +201,12 @@ class SatelliteService(BaseProductService):
             "tile_format": "webp",
         }
 
-    def get_channel_tilesets(
+    async def get_channel_tilesets(
         self, product_id: str, instrument_id: str, channel_id: str
     ) -> dict:
         """Get available tilesets for a channel with full metadata."""
         channel_config = self.get_channel_config(product_id, instrument_id, channel_id)
-        tilesets = self._get_tilesets_for_channel(product_id, instrument_id, channel_id)
+        tilesets = await self._get_tilesets_for_channel(product_id, instrument_id, channel_id)
 
         tile_url_pattern = f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
 
@@ -219,10 +219,18 @@ class SatelliteService(BaseProductService):
             "tile_url_pattern": tile_url_pattern,
         }
 
-    def _get_tilesets_for_channel(
+    async def _get_tilesets_for_channel(
         self, product_id: str, instrument_id: str, channel_id: str
     ) -> List[dict]:
-        """Get list of available tilesets for a channel."""
+        """Get list of available tilesets for a channel (async)."""
+        return await asyncio.to_thread(
+            self._get_tilesets_for_channel_sync, product_id, instrument_id, channel_id
+        )
+
+    def _get_tilesets_for_channel_sync(
+        self, product_id: str, instrument_id: str, channel_id: str
+    ) -> List[dict]:
+        """Get list of available tilesets for a channel (sync)."""
         dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
         tiles_dir = self.TILES_BASE_PATH / dir_name / "tiles"
 

@@ -12,6 +12,7 @@ from models.radar import (
     RadarVariableResponse,
 )
 from services.radar_service import radar_service
+import asyncio
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
 
@@ -108,7 +109,7 @@ async def get_radar_station_tilesets(
         )
 
     logger.info(f"Getting radar station tilesets: {variable_id}/{station_id}")
-    return radar_service.get_station_tilesets(variable_id, station_id)
+    return await radar_service.get_station_tilesets(variable_id, station_id)
 
 
 # ============== Radar Tile Serving Endpoint ==============
@@ -177,7 +178,7 @@ async def get_radar_tile(
         variable_id, station_id, elevation_id, tileset_id, z, x, y
     )
 
-    if not tile_path.exists():
+    if not await asyncio.to_thread(tile_path.exists):
         logger.warning(f"Radar tile not found: {tile_path}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"

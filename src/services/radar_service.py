@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple
 
 from services.base_service import BaseProductService
 from dependencies import logger
-
+import asyncio
 
 class RadarService(BaseProductService):
     """Service to manage radar products and tiles."""
@@ -144,7 +144,7 @@ class RadarService(BaseProductService):
         """Check if a radar station exists."""
         return station_id.lower() in self.RADAR_STATIONS
 
-    def get_station_tilesets(self, variable_id: str, station_id: str) -> Optional[dict]:
+    async def get_station_tilesets(self, variable_id: str, station_id: str) -> Optional[dict]:
         """Get available tilesets for a radar station and variable."""
         variable = self.RADAR_VARIABLES.get(variable_id.lower())
         station = self.RADAR_STATIONS.get(station_id.lower())
@@ -153,7 +153,7 @@ class RadarService(BaseProductService):
             return None
 
         # Get tilesets from filesystem
-        tilesets = self._get_tilesets(variable_id, station_id)
+        tilesets = await self._get_tilesets(variable_id, station_id)
 
         return {
             "product": "radar",
@@ -174,8 +174,12 @@ class RadarService(BaseProductService):
             "tile_url_pattern": f"/products/radar/{variable_id.lower()}/{station_id.lower()}/{{elevation_id}}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp",
         }
 
-    def _get_tilesets(self, variable_id: str, station_id: str) -> List[dict]:
-        """Get list of available tilesets for a radar station/variable."""
+    async def _get_tilesets(self, variable_id: str, station_id: str) -> List[dict]:
+        """Get list of available tilesets for a radar station/variable (async)."""
+        return await asyncio.to_thread(self._get_tilesets_sync, variable_id, station_id)
+
+    def _get_tilesets_sync(self, variable_id: str, station_id: str) -> List[dict]:
+        """Get list of available tilesets for a radar station/variable (sync)."""
         variable = self.RADAR_VARIABLES.get(variable_id.lower())
         station = self.RADAR_STATIONS.get(station_id.lower())
 
