@@ -28,6 +28,8 @@ EXPOSE 8080
 # - "main:app" : entrypoint -> file main.py, ASGI (Asynchronous Server Gateway Interface) app instance "app"
 # - host=0.0.0.0 : bind to all network interfaces (needed in containers)
 # - port=8080 : matches EXPOSE above
-CMD ["uvicorn", "main:app", "--host=0.0.0.0", "--port", "8080"]
+# Run the app with uvicorn
+# - workers: use WEB_CONCURRENCY env var or default to number of CPU cores
+CMD ["uvicorn main:app --host=0.0.0.0 --port 8080 --workers ${WEB_CONCURRENCY:-$(nproc)}"]
 
 HEALTHCHECK --interval=10s --timeout=10s --retries=3 CMD python -c 'import urllib.request; urllib.request.urlopen("http://localhost:8080/health")'
