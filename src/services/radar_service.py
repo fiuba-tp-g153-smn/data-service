@@ -1,271 +1,78 @@
 """Service for radar products."""
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from services.base_service import BaseProductService
 from dependencies import logger
-import asyncio
+
 
 class RadarService(BaseProductService):
     """Service to manage radar products and tiles."""
 
-    # Default zoom levels for Radar
-    RADAR_ZOOM_LEVELS = {"min": 4, "max": 10}
+    OUTPUT_RADAR_PATH = Path.cwd().parent / "output_radar"
 
-    # Radar variables (productos meteorológicos)
-    RADAR_VARIABLES: Dict[str, dict] = {
-        "dbzh": {
-            "name": "DBZH",
-            "unit": "dBZ",
-            "available": True,
-            "dir_name": "DBZH",
-        },
-        "zdr": {
-            "name": "ZDR",
-            "unit": "dB",
-            "available": False,
-            "dir_name": "ZDR",
-        },
-        "rhohv": {
-            "name": "RHOHV",
-            "unit": "adimensional",
-            "available": False,
-            "dir_name": "RHOHV",
-        },
-        "kdp": {
-            "name": "KDP",
-            "unit": "°/km",
-            "available": False,
-            "dir_name": "KDP",
-        },
-    }
+    def list_radars(self):
+        """List all available radars (folders in output_radar)."""
+        logger.info(f"Listing all radars in: {self.OUTPUT_RADAR_PATH}")
+        radars = []
+        if self.OUTPUT_RADAR_PATH.exists():
+            for radar_dir in self.OUTPUT_RADAR_PATH.iterdir():
+                if radar_dir.is_dir():
+                    radars.append(radar_dir.name)
+        else:
+            logger.warning(f"Radar path does not exist: {self.OUTPUT_RADAR_PATH}")
+        return {"radars": radars}
 
-    # Radar stations (estaciones de radar)
-    RADAR_STATIONS: Dict[str, dict] = {
-        "rma3": {
-            "id": "RMA3",
-            "available": True,
-        },
-        "rma4": {
-            "id": "RMA4",
-            "available": True,
-        },
-        "rma9": {
-            "id": "RMA9",
-            "available": True,
-        },
-    }
+    def list_radar_variables(self, radar_id: str):
+        """List all variables for a given radar (folders in output_radar/{radar_id})."""
+        radar_path = self.OUTPUT_RADAR_PATH / radar_id
+        logger.info(f"Listing variables for radar: {radar_id} in {radar_path}")
+        variables = []
+        if radar_path.exists():
+            for var_dir in radar_path.iterdir():
+                if var_dir.is_dir():
+                    variables.append(var_dir.name)
+        else:
+            logger.warning(f"Radar directory does not exist: {radar_path}")
+        return {"radar": radar_id, "variables": variables}
 
-    # Radar elevation angles
-    RADAR_ELEVATIONS: List[dict] = [
-        {"id": "elev0", "angle": 0.5, "description": "Elevación 0.5°"},
-        {"id": "elev1", "angle": 0.9, "description": "Elevación 0.9°"},
-        {"id": "elev2", "angle": 1.3, "description": "Elevación 1.3°"},
-    ]
+    def list_radar_elevations(self, radar_id: str, variable_id: str):
+        """List all elevations for a given radar and variable (parse folders in output_radar/{radar_id}/{variable_id})."""
+        var_path = self.OUTPUT_RADAR_PATH / radar_id / variable_id
+        logger.info(f"Listing elevations for radar: {radar_id}, variable: {variable_id} in {var_path}")
+        elevations = set()
+        if var_path.exists():
+            for ts_dir in var_path.iterdir():
+                if ts_dir.is_dir():
+                    # Folder name: {TIMESTAMP}_elev{N}
+                    parts = ts_dir.name.split("_elev")
+                    if len(parts) == 2:
+                        elevations.add(f"elev{parts[1]}")
+        else:
+            logger.warning(f"Variable directory does not exist: {var_path}")
+        return {"radar": radar_id, "variable": variable_id, "elevations": sorted(elevations)}
 
-    def __init__(self):
-        """Initialize and register radar product."""
-        # Check if any variable is available
-        has_available = any(
-            var.get("available", False) for var in self.RADAR_VARIABLES.values()
-        )
-
-        # Register radar in the global registry
-        self.register_product(
-            "radar",
-            {
-                "name": "Red de Radares",
-                "description": "Red de Radares Meteorológicos de Argentina (SMN)",
-                "type": "radar",
-                "available": has_available,
-            },
-        )
-
-    # ============== Radar Product Methods ==============
-
-    def get_radar_product(self) -> dict:
-        """Get radar product with available variables."""
-        variables_summary = {}
-        for var_id, var_config in self.RADAR_VARIABLES.items():
-            variables_summary[var_id] = {
-                "name": var_config["name"],
-                "unit": var_config["unit"],
-                "available": var_config.get("available", False),
-            }
-
-        return {
-            "product_id": "radar",
-            "product_info": {
-                "name": "Red de Radares",
-                "description": "Red de Radares Meteorológicos de Argentina (SMN)",
-                "type": "radar",
-            },
-            "variables": variables_summary,
-            "zoom_levels": self.RADAR_ZOOM_LEVELS,
-            "elevations": self.RADAR_ELEVATIONS,
-            "endpoints": {
-                var_id: f"/products/radar/{var_id}"
-                for var_id, var_config in self.RADAR_VARIABLES.items()
-                if var_config.get("available", False)
-            },
-        }
-
-    def variable_exists(self, variable_id: str) -> bool:
-        """Check if a radar variable exists."""
-        return variable_id.lower() in self.RADAR_VARIABLES
-
-    def get_variable(self, variable_id: str) -> Optional[dict]:
-        """Get radar variable configuration with available stations."""
-        variable = self.RADAR_VARIABLES.get(variable_id.lower())
-        if not variable:
-            return None
-
-        # Build stations info
-        stations_info = {}
-        for station_id, station_config in self.RADAR_STATIONS.items():
-            stations_info[station_id] = {
-                "id": station_config["id"],
-                "available": station_config.get("available", False),
-            }
-
-        return {
-            "product": "radar",
-            "variable": variable_id.lower(),
-            "stations": stations_info,
-            "endpoints": {
-                station_id: f"/products/radar/{variable_id.lower()}/{station_id}"
-                for station_id, station_config in self.RADAR_STATIONS.items()
-                if station_config.get("available", False)
-            },
-        }
-
-    def station_exists(self, station_id: str) -> bool:
-        """Check if a radar station exists."""
-        return station_id.lower() in self.RADAR_STATIONS
-
-    async def get_station_tilesets(self, variable_id: str, station_id: str) -> Optional[dict]:
-        """Get available tilesets for a radar station and variable."""
-        variable = self.RADAR_VARIABLES.get(variable_id.lower())
-        station = self.RADAR_STATIONS.get(station_id.lower())
-
-        if not variable or not station:
-            return None
-
-        # Get tilesets from filesystem
-        tilesets = await self._get_tilesets(variable_id, station_id)
-
-        return {
-            "product": "radar",
-            "variable": variable_id.lower(),
-            "station": station_id.lower(),
-            "station_info": {
-                "id": station["id"],
-                "available": station.get("available", False),
-            },
-            "variable_info": {
-                "name": variable["name"],
-                "unit": variable["unit"],
-                "zoom_levels": self.RADAR_ZOOM_LEVELS,
-                "tile_format": "webp",
-            },
-            "elevations": self.RADAR_ELEVATIONS,
-            "tilesets": tilesets,
-            "tile_url_pattern": f"/products/radar/{variable_id.lower()}/{station_id.lower()}/{{elevation_id}}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp",
-        }
-
-    async def _get_tilesets(self, variable_id: str, station_id: str) -> List[dict]:
-        """Get list of available tilesets for a radar station/variable (async)."""
-        return await asyncio.to_thread(self._get_tilesets_sync, variable_id, station_id)
-
-    def _get_tilesets_sync(self, variable_id: str, station_id: str) -> List[dict]:
-        """Get list of available tilesets for a radar station/variable (sync)."""
-        variable = self.RADAR_VARIABLES.get(variable_id.lower())
-        station = self.RADAR_STATIONS.get(station_id.lower())
-
-        if not variable or not station:
-            return []
-
-        dir_name = variable["dir_name"]
-        station_prefix = station["id"]
-
-        radar_dir = self.TILES_BASE_PATH / "output_radar" / dir_name
-        logger.info(f"Looking for radar tilesets in: {radar_dir}")
-
-        if not radar_dir.exists():
-            logger.info(f"Radar directory does not exist: {radar_dir}")
-            return []
-
+    def list_radar_tilesets(self, radar_id: str, variable_id: str, elevation_id: str):
+        """List all tilesets (timestamps) for a radar, variable, and elevation."""
+        var_path = self.OUTPUT_RADAR_PATH / radar_id / variable_id
+        logger.info(f"Listing tilesets for radar: {radar_id}, variable: {variable_id}, elevation: {elevation_id} in {var_path}")
         tilesets = []
-        seen_timestamps = set()
+        if var_path.exists():
+            for ts_dir in var_path.iterdir():
+                if ts_dir.is_dir() and ts_dir.name.endswith(f"_{elevation_id}"):
+                    # Folder name: {TIMESTAMP}_elev{N}
+                    ts = ts_dir.name.split("_elev")[0]
+                    tilesets.append(ts)
+        else:
+            logger.warning(f"Variable directory does not exist: {var_path}")
+        return {"radar": radar_id, "variable": variable_id, "elevation": elevation_id, "tilesets": sorted(tilesets, reverse=True)}
 
-        # Look for directories matching the pattern: {STATION}_{VARIABLE}_{TIMESTAMP}_elev{N}
-        for item in radar_dir.iterdir():
-            if item.is_dir() and item.name.startswith(f"{station_prefix}_{dir_name}_"):
-                parts = item.name.split("_")
-                if len(parts) >= 4:
-                    timestamp = parts[2]
-                    if timestamp not in seen_timestamps:
-                        seen_timestamps.add(timestamp)
-                        tilesets.append(
-                            {
-                                "id": timestamp,
-                                "url_pattern": f"/products/radar/{variable_id.lower()}/{station_id.lower()}/{{elevation_id}}/{timestamp}/{{z}}/{{x}}/{{y}}.webp",
-                            }
-                        )
-
-        # Sort by timestamp (most recent first)
-        tilesets.sort(key=lambda x: x["id"], reverse=True)
-
-        logger.info(
-            f"Found {len(tilesets)} radar tilesets for {station_prefix}/{dir_name}"
-        )
-        return tilesets
-
-    def elevation_exists(self, elevation_id: str) -> bool:
-        """Check if an elevation exists."""
-        return any(elev["id"] == elevation_id for elev in self.RADAR_ELEVATIONS)
-
-    def get_tile_path(
-        self,
-        variable_id: str,
-        station_id: str,
-        elevation_id: str,
-        tileset_id: str,
-        z: int,
-        x: int,
-        y: int,
-    ) -> Path:
-        """Build the full path to a radar tile file."""
-        variable = self.RADAR_VARIABLES.get(variable_id.lower())
-        station = self.RADAR_STATIONS.get(station_id.lower())
-
-        if not variable or not station:
-            return Path("")
-
-        dir_name = variable["dir_name"]
-        station_prefix = station["id"]
-
-        folder_name = f"{station_prefix}_{dir_name}_{tileset_id}_{elevation_id}"
-        return (
-            self.TILES_BASE_PATH
-            / "output_radar"
-            / dir_name
-            / folder_name
-            / "tiles"
-            / str(z)
-            / str(x)
-            / f"{y}.webp"
-        )
-
-    def validate_zoom_level(self, z: int) -> Tuple[bool, str]:
-        """Validate if a zoom level is valid for radar."""
-        if z < self.RADAR_ZOOM_LEVELS["min"] or z > self.RADAR_ZOOM_LEVELS["max"]:
-            return (
-                False,
-                f"Zoom level {z} not available. Valid range: {self.RADAR_ZOOM_LEVELS['min']}-{self.RADAR_ZOOM_LEVELS['max']}",
-            )
-        return True, ""
+    def get_tile_path_output_radar(self, radar_id, variable_id, elevation_id, tileset_id, z, x, y):
+        """Build the path to a tile in output_radar."""
+        folder_name = f"{tileset_id}_{elevation_id}"
+        tile_path = self.OUTPUT_RADAR_PATH / radar_id / variable_id / folder_name / "tiles" / str(z) / str(x) / f"{y}.webp"
+        logger.debug(f"Radar tile path resolved: {tile_path}")
+        return tile_path
 
 
 # Singleton instance

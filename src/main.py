@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from controller import general
-from routes import weather, products, satellite, radar
+from routes import weather, satellite, radar
 from services.sync_service import sync_service
 from dependencies import logger
 
@@ -47,4 +47,3 @@ app.include_router(general.router)
 app.include_router(weather.router)
 app.include_router(radar.router)  # Radar routes (most specific)
 app.include_router(satellite.router)  # Satellite routes
-app.include_router(products.router)  # General products list (least specific)

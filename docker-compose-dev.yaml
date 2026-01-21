@@ -28,6 +28,7 @@ services:
     volumes:
       - ./src:/app
       - ./data:/app/data
+      - ./output_radar:/output_radar 
 
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
