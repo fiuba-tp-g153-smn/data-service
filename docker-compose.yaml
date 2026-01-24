@@ -25,6 +25,7 @@ services:
       - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
     volumes:
       - data_service_data:/app/data
+      - data_service_cache:/app/cache
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -51,3 +52,4 @@ networks:
 
 volumes:
   data_service_data:
+  data_service_cache:

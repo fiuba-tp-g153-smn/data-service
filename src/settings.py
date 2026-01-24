@@ -21,6 +21,7 @@ class Settings:
     s3_tiles_data_bucket_name: str = "tiles-data"
     s3_tiles_data_secure: bool = False
     sync_interval_seconds: int = 60
+    cache_dir: str = "/app/cache"
 
     # Caching
     cache_control_config: str = "public, max-age=60, stale-while-revalidate=300"
@@ -35,12 +36,15 @@ class Settings:
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
         self.app_env = os.getenv("APP_ENV", self.app_env)
 
-        # S3 Tiles Data Configuration
-        self.s3_tiles_data_endpoint = os.getenv("S3_TILES_DATA_ENDPOINT", self.s3_tiles_data_endpoint)
-        self.s3_tiles_data_access_key = os.getenv("S3_TILES_DATA_ACCESS_KEY", self.s3_tiles_data_access_key)
-        self.s3_tiles_data_secret_key = os.getenv("S3_TILES_DATA_SECRET_KEY", self.s3_tiles_data_secret_key)
-        self.s3_tiles_data_bucket_name = os.getenv("S3_TILES_DATA_BUCKET_NAME", self.s3_tiles_data_bucket_name)
-        self.s3_tiles_data_secure = os.getenv("S3_TILES_DATA_SECURE", "false").lower() == "true"
+        # Cache Configuration
+        self.cache_dir = os.getenv("CACHE_DIR", self.cache_dir)
+
+        # MinIO Configuration
+        self.minio_endpoint = os.getenv("MINIO_ENDPOINT", self.minio_endpoint)
+        self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", self.minio_access_key)
+        self.minio_secret_key = os.getenv("MINIO_SECRET_KEY", self.minio_secret_key)
+        self.minio_bucket = os.getenv("MINIO_BUCKET", self.minio_bucket)
+        self.minio_secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
         self.sync_interval_seconds = int(
             os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
         )
@@ -56,7 +60,9 @@ class Settings:
     def is_s3_configured(self) -> bool:
         """Check if S3 is properly configured."""
         return bool(
-            self.s3_tiles_data_endpoint and self.s3_tiles_data_access_key and self.s3_tiles_data_secret_key
+            self.s3_tiles_data_endpoint
+            and self.s3_tiles_data_access_key
+            and self.s3_tiles_data_secret_key
         )
 
     @staticmethod

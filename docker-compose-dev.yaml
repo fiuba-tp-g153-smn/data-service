@@ -29,6 +29,7 @@ services:
       - ./src:/app
       - ./data:/app/data
       - ./output_radar:/output_radar 
+      - ./cache:/app/cache
 
     environment:
       - LOG_LEVEL=${LOG_LEVEL}

@@ -112,23 +112,56 @@ async def list_channel_tilesets(
         )
 
     logger.info(f"Listing tilesets for: {product_id}/{instrument_id}/{channel_id}")
-    data = await satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
+    return await satellite_service.get_channel_tilesets(
+        product_id, instrument_id, channel_id
+    )
 
-    # Generate ETag
-    etag = f'"{satellite_service.get_config_hash(data)}"'
 
-    # Get Last-Modified
-    last_modified = satellite_service.get_latest_tileset_timestamp(data["tilesets"])
-    
-    headers = {
-        "Cache-Control": settings.cache_control_config,
-        "ETag": etag,
-    }
-    
-    if last_modified:
-        headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
+@router.get(
+    "/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/cog",
+    status_code=status.HTTP_200_OK,
+    summary="Get COG File",
+    response_description="Returns the raw COG file (GeoTIFF) for client-side decoding. Supports Range requests.",
+    response_class=FileResponse,
+)
+async def get_cog_file(
+    product_id: str = PathParam(..., description="Product ID"),
+    instrument_id: str = PathParam(..., description="Instrument ID"),
+    channel_id: str = PathParam(..., description="Channel ID"),
+    tileset_id: str = PathParam(..., description="Tileset ID (Timestamp)"),
+):
+    """
+    Get the specific COG file for a tileset.
+    If not cached locally, it will be downloaded from MinIO.
+    This endpoint supports HTTP Range requests for partial content (Client-Side Decoding).
+    """
+    # Verify existence of logical path components
+    if not satellite_service.channel_exists(product_id, instrument_id, channel_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Channel '{channel_id}' not found",
+        )
 
-    return JSONResponse(content=data, headers=headers)
+    path = await satellite_service.get_cog_file(
+        product_id, instrument_id, channel_id, tileset_id
+    )
+
+    if not path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"COG file not found for tileset '{tileset_id}'",
+        )
+
+    logger.debug(f"Serving COG file: {path}")
+    return FileResponse(
+        path=path,
+        media_type="image/tiff",
+        filename=f"{tileset_id}.tif",
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": f'"{tileset_id}"',
+        },
+    )
 
 
 @router.get(
@@ -176,7 +209,7 @@ async def get_satellite_tile(
     tile_path = satellite_service.get_tile_path(
         product_id, instrument_id, channel_id, tileset_id, z, x, y
     )
-    
+
     if not await asyncio.to_thread(tile_path.exists):
         logger.warning(f"Satellite tile not found: {tile_path}")
         raise HTTPException(
@@ -184,10 +217,10 @@ async def get_satellite_tile(
         )
 
     logger.debug(f"Serving satellite tile: {tile_path}")
-    
+
     # ETag based on unique tile identifier
     etag = f'"{tileset_id}-{z}-{x}-{y}"'
-    
+
     return FileResponse(
         tile_path,
         media_type="image/webp",

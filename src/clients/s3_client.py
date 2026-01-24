@@ -53,6 +53,47 @@ class S3Client:
         protocol = "https" if self._secure else "http"
         return f"{protocol}://{self._endpoint}"
 
+    async def download_file(self, s3_key: str, local_path: Path) -> bool:
+        """
+        Download a single file from S3 to local path.
+
+        Args:
+            s3_key: S3 key to download
+            local_path: Local path to save file
+
+        Returns:
+            True if download successful, False otherwise
+        """
+        async with self._session.client(
+            "s3",
+            endpoint_url=self._get_endpoint_url(),
+            aws_access_key_id=self._access_key,
+            aws_secret_access_key=self._secret_key,
+        ) as s3_client:
+            return await self._download_file(s3_client, s3_key, local_path)
+
+    async def list_files(self, s3_prefix: str, extension: str = "") -> List[str]:
+        """
+        List files in S3 prefix, optionally filtering by extension.
+        Returns list of filenames (not full keys).
+        """
+        files = []
+        async with self._session.client(
+            "s3",
+            endpoint_url=self._get_endpoint_url(),
+            aws_access_key_id=self._access_key,
+            aws_secret_access_key=self._secret_key,
+        ) as s3_client:
+            objects = await self._list_objects(s3_client, s3_prefix)
+            for obj in objects:
+                key = obj["Key"]
+                if extension and not key.endswith(extension):
+                    continue
+                # Extract filename from key
+                filename = key.split("/")[-1]
+                files.append(filename)
+        return files
+
     async def sync_prefix(
         self,
         s3_prefix: str,
@@ -277,7 +318,9 @@ class S3Client:
                 # List all objects under the prefix
                 objects_to_delete = []
                 paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                async for page in paginator.paginate(
+                    Bucket=self._bucket, Prefix=prefix
+                ):
                     for obj in page.get("Contents", []):
                         objects_to_delete.append({"Key": obj["Key"]})
 

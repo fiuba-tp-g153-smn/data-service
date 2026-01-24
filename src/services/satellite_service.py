@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 
 from services.base_service import BaseProductService
 from dependencies import logger
-import asyncio
+from settings import Settings
+from clients.minio_sync_client import MinioSyncClient
+
 
 class SatelliteService(BaseProductService):
     """Service to manage satellite products and tiles."""
@@ -75,6 +77,15 @@ class SatelliteService(BaseProductService):
         """Initialize and register satellite products."""
         for product_id, config in self.SATELLITE_PRODUCTS.items():
             self.register_product(product_id, config)
+
+        self.settings = Settings.get_settings()
+        self.minio_client = MinioSyncClient(
+            endpoint=self.settings.minio_endpoint,
+            access_key=self.settings.minio_access_key,
+            secret_key=self.settings.minio_secret_key,
+            bucket=self.settings.minio_bucket,
+            secure=self.settings.minio_secure,
+        )
 
     # ============== Product Level Methods ==============
 
@@ -206,9 +217,14 @@ class SatelliteService(BaseProductService):
     ) -> dict:
         """Get available tilesets for a channel with full metadata."""
         channel_config = self.get_channel_config(product_id, instrument_id, channel_id)
-        tilesets = await self._get_tilesets_for_channel(product_id, instrument_id, channel_id)
+        tilesets = await self._get_tilesets_for_channel(
+            product_id, instrument_id, channel_id
+        )
 
-        tile_url_pattern = f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+        # COG Endpoint pattern
+        tile_url_pattern = (
+            f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/cog"
+        )
 
         return {
             "product": product_id,
@@ -222,39 +238,68 @@ class SatelliteService(BaseProductService):
     async def _get_tilesets_for_channel(
         self, product_id: str, instrument_id: str, channel_id: str
     ) -> List[dict]:
-        """Get list of available tilesets for a channel (async)."""
-        return await asyncio.to_thread(
-            self._get_tilesets_for_channel_sync, product_id, instrument_id, channel_id
-        )
-
-    def _get_tilesets_for_channel_sync(
-        self, product_id: str, instrument_id: str, channel_id: str
-    ) -> List[dict]:
-        """Get list of available tilesets for a channel (sync)."""
+        """Get list of available tilesets for a channel (from S3 COGs)."""
         dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
-        tiles_dir = self.TILES_BASE_PATH / dir_name / "tiles"
 
-        logger.info(f"Looking for tilesets in: {tiles_dir}")
-
-        if not tiles_dir.exists():
-            logger.info(f"Tiles directory does not exist: {tiles_dir}")
-            return []
+        # Use S3 as source of truth for available COGs
+        try:
+            # FIX: S3 paths in MinIO include "/tiles" suffix from tiles-processor config
+            files = await self.minio_client.list_files(f"{dir_name}/tiles/", ".tif")
+        except Exception as e:
+            logger.error(f"Error listing files from MinIO: {e}")
+            files = []
 
         tilesets = []
-        for item in tiles_dir.iterdir():
-            if item.is_dir() and item.name.endswith("_tiles"):
-                tileset_id = item.name.replace("_tiles", "")
-                tilesets.append(
-                    {
-                        "id": tileset_id,
-                        "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/{{z}}/{{x}}/{{y}}.webp",
-                    }
-                )
+        for filename in files:
+            # filename: "20240101123456.tif" -> id: "20240101123456"
+            tileset_id = filename.replace(".tif", "")
+            tilesets.append(
+                {
+                    "id": tileset_id,
+                    "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/cog",
+                }
+            )
+
+        # Sort descending (usually by timestamp)
+        tilesets.sort(key=lambda x: x["id"], reverse=True)
 
         logger.info(
-            f"Found {len(tilesets)} tilesets for {product_id}/{instrument_id}/{channel_id}"
+            f"Found {len(tilesets)} tilesets (COGs) for {product_id}/{instrument_id}/{channel_id}"
         )
         return tilesets
+
+    async def get_cog_file(
+        self, product_id: str, instrument_id: str, channel_id: str, tileset_id: str
+    ) -> Optional[Path]:
+        """
+        Get the local path to a COG file, downloading from S3 if necessary.
+        """
+        dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
+        filename = f"{tileset_id}.tif"
+
+        # FIX: S3 paths in MinIO include "/tiles" suffix from tiles-processor config
+        # band_13/tiles/filename.tif
+        s3_key = f"{dir_name}/tiles/{filename}"
+
+        # Calculate local cache path
+        # Use settings.cache_dir
+        cache_dir = Path(self.settings.cache_dir) / dir_name
+        local_path = cache_dir / filename
+
+        # Check if exists
+        if local_path.exists() and local_path.is_file():
+            # Optional: Check file size or integrity?
+            # For now assume if it exists it's valid (immutable history)
+            return local_path
+
+        # Download if not exists
+        logger.info(f"Downloading COG {s3_key} to {local_path}")
+        success = await self.minio_client.download_file(s3_key, local_path)
+
+        if success:
+            return local_path
+
+        return None
 
     # ============== Tile Serving Methods ==============
 
@@ -314,20 +359,23 @@ class SatelliteService(BaseProductService):
         # ID format varies but usually ends with _sYYYYJJJHHMMSS...
         # We'll just sort by ID since they contain timestamps
         sorted_tilesets = sorted(tilesets, key=lambda x: x["id"], reverse=True)
-        
+
         if not sorted_tilesets:
             return None
-            
+
         # Try to extract timestamp from the ID of the latest tileset
         latest_id = sorted_tilesets[0]["id"]
         match = re.search(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})", latest_id)
-        
+
         if match:
             year, julian_day, hour, minute, second = map(int, match.groups())
             # Convert Julian day to date
-            dt = datetime.strptime(f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}", "%Y%j%H%M%S")
+            dt = datetime.strptime(
+                f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}",
+                "%Y%j%H%M%S",
+            )
             return dt.replace(tzinfo=timezone.utc)
-            
+
         return None
 
 
