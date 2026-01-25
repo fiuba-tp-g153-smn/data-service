@@ -39,6 +39,7 @@ class SyncService:
     DEFAULT_SYNC_PREFIXES = [
         "band_13/tiles",
         "band_9/tiles",
+        "band_2/tiles",
     ]
 
     def __init__(
