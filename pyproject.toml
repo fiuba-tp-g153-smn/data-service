@@ -8,7 +8,6 @@ authors = [
     { name = "Máximo Gismondi", email = "magismondi@fi.uba.ar" },
     { name = "Matías Valeriani", email = "mvaleriani@fi.uba.ar" },
 ]
-readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.13,<4.0"
 
 [tool.poetry]
@@ -16,20 +15,20 @@ packages = [{ include = "src" }]
 package-mode = false
 
 [tool.poetry.dependencies]
-fastapi = ">=0.119.1,<0.120.0"
-newrelic = ">=11.0.1,<12.0.0"
-uvicorn = ">=0.38.0,<0.39.0"
-python-dotenv = ">=1.1.1,<2.0.0"
-httpx = ">=0.28.0,<0.29.0"
-pydantic = ">=2.10.0,<3.0.0"
-aioboto3 = ">=15.0.0,<16.0.0"
-uvloop = ">=0.22.1,<0.23.0"
+fastapi = "^0.128.4"
+newrelic = "^11.4.0"
+uvicorn = "^0.40.0"
+python-dotenv = "^1.2.1"
+httpx = "^0.28.1"
+pydantic = "^2.12.5"
+aioboto3 = "^15.5.0"
+uvloop = "^0.22.1"
 
 [tool.poetry.group.dev.dependencies]
-pytest = ">=8.4.2,<9.0.0"
-pytest-cov = ">=7.0.0,<8.0.0"
-pytest-socket = ">=0.7.0,<0.8.0"
-pytest-asyncio = ">=0.25.0,<0.26.0"
+pytest = "^9.0.2"
+pytest-cov = "^7.0.0"
+pytest-socket = "^0.7.0"
+pytest-asyncio = "^1.3.0"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
