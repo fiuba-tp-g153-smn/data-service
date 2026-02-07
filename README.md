@@ -45,13 +45,11 @@ You need to have the next dependencies installed:
 3. For local development:
 
    With Docker:
-
    - Run `make dev`.
 
      The app will be available at http://localhost:8080.
 
    Without Docker:
-
    - Create a virtual environment running the following command: `python -m venv .venv`
    - Activate the virtual environment with: `source .venv/bin/activate`
    - Run `make install`
@@ -91,13 +89,16 @@ tiles-data/                              # Bucket name
 When running both services separately:
 
 1. **Start tiles-processor** (includes MinIO):
+
    ```bash
    cd ../tiles-processor
    docker compose up -d
    ```
+
    MinIO will be available at `localhost:9000` (S3 API) and `localhost:9001` (Console).
 
 2. **Configure data-service** to connect:
+
    ```bash
    # In data-service/.env
    MINIO_ENDPOINT=host.docker.internal:9000
@@ -130,7 +131,6 @@ The `Makefile` provides convenient targets for common tasks. Run them from the p
 
 - `make dev`:  
   Builds the development image (`Dockerfile.dev`) and runs the container.
-
   - Mounts `./src` for live reloading.
   - Mounts `.env` for configuration.
   - Exposes the app at http://localhost:8080.  
@@ -138,7 +138,6 @@ The `Makefile` provides convenient targets for common tasks. Run them from the p
 
 - `make test`:
   Builds the test image (`Dockerfile.run_test`) and runs all tests.
-
   - Mounts `./reports/` to persist outputs.
   - Exposes port 8080 (for any test servers).
     Test results and coverage reports are saved in `./reports/`.
@@ -157,7 +156,6 @@ Tests use pytest and are located in the `tests/` directory.
 - **With Docker (Recommended)**:  
   `make test`  
   This runs:
-
   - The tests with `pytest`.
   - Skips tests marked `@pytest.mark.skip`.
   - Generates:
@@ -175,7 +173,6 @@ The project includes three Dockerfiles for different environments:
 
 - **Dockerfile** (Production):  
   Builds a production image based on Python 3.13 slim.
-
   - Installs only runtime dependencies (skips dev/test deps).
   - Copies the source code (`./src`) into the container.
   - Runs the app with Uvicorn on port 8080.  
@@ -183,7 +180,6 @@ The project includes three Dockerfiles for different environments:
 
 - **Dockerfile.dev** (Development):  
   Similar to production but optimized for development.
-
   - Does not copy source code (mount `./src` as a volume for live code changes and hot-reloading).
   - Enables Uvicorn's `--reload` flag for automatic restarts on code changes.
   - Mount `.env` for environment variables.  
@@ -201,17 +197,17 @@ All images use Python 3.13.8-slim-trixie as the base for minimal size.
 
 ## Environment Variables
 
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `LOG_LEVEL` | Logging verbosity (DEBUG, INFO, WARNING, ERROR). | `INFO` |
-| `APP_ENV` | Application environment (development, production). | `production` |
-| `APP_HOST_PORT` | Host port for the API service. | `6006` |
-| `MINIO_ENDPOINT` | MinIO S3 endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync |
-| `MINIO_ACCESS_KEY` | MinIO access key (username). | `minioadmin` |
-| `MINIO_SECRET_KEY` | MinIO secret key (password). | `minioadmin` |
-| `MINIO_BUCKET` | S3 bucket name for tile storage. | `tiles-data` |
-| `MINIO_SECURE` | Use HTTPS for MinIO connection (`true`/`false`). | `false` |
-| `SYNC_INTERVAL_SECONDS` | Interval between sync operations (seconds). | `60` |
+| Variable                | Description                                                               | Default           |
+| :---------------------- | :------------------------------------------------------------------------ | :---------------- |
+| `LOG_LEVEL`             | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                          | `INFO`            |
+| `APP_ENV`               | Application environment (development, production).                        | `production`      |
+| `APP_HOST_PORT`         | Host port for the API service.                                            | `6006`            |
+| `MINIO_ENDPOINT`        | MinIO S3 endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync |
+| `MINIO_ACCESS_KEY`      | MinIO access key (username).                                              | `minioadmin`      |
+| `MINIO_SECRET_KEY`      | MinIO secret key (password).                                              | `minioadmin`      |
+| `MINIO_BUCKET`          | S3 bucket name for tile storage.                                          | `tiles-data`      |
+| `MINIO_SECURE`          | Use HTTPS for MinIO connection (`true`/`false`).                          | `false`           |
+| `SYNC_INTERVAL_SECONDS` | Interval between sync operations (seconds).                               | `60`              |
 
 ## API Documentation
 
