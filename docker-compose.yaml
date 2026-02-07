@@ -41,7 +41,9 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 15s
+      start_interval: 1s
     networks:
       - data_service_network
 
