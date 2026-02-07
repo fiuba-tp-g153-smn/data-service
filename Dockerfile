@@ -1,3 +1,6 @@
+################################
+# Stage 1: Builder
+################################
 FROM python:3.13.12-slim-trixie AS builder
 
 WORKDIR /app
@@ -11,6 +14,9 @@ RUN pip install --no-cache-dir "poetry" && poetry config virtualenvs.create fals
 # Re-generate lock file if it is outdated, then install all dependencies (except dev/test deps)
 RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root
 
+################################
+# Stage 2: Runtime
+################################
 FROM python:3.13.12-slim-trixie AS runner
 
 WORKDIR /app
