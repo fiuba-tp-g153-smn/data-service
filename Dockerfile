@@ -1,7 +1,7 @@
 ################################
 # Stage 1: Builder
 ################################
-FROM python:3.13.12-slim-trixie AS builder
+FROM python:3.13.12-alpine AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-ro
 ################################
 # Stage 2: Runtime
 ################################
-FROM python:3.13.12-slim-trixie AS runner
+FROM python:3.13.12-alpine AS runner
 
 WORKDIR /app
 
