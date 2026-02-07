@@ -1,7 +1,7 @@
 # Makefile for managing the Data Service application
 
 # Declare phony targets to avoid conflicts with files of the same name
-.PHONY: up dev test
+.PHONY: up prod dev test local
 
 install:
 	pip install poetry
