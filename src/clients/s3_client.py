@@ -93,12 +93,15 @@ class S3Client:
             # Filter by extension if specified
             if extensions:
                 s3_objects = [
-                    obj for obj in s3_objects
+                    obj
+                    for obj in s3_objects
                     if any(obj["Key"].endswith(ext) for ext in extensions)
                 ]
 
             # Get existing local files
-            local_files = await asyncio.to_thread(self._get_local_files, local_dir, s3_prefix)
+            local_files = await asyncio.to_thread(
+                self._get_local_files, local_dir, s3_prefix
+            )
 
             # Determine files to download (new or updated)
             files_to_download = []
@@ -176,7 +179,9 @@ class S3Client:
     async def _download_file(self, s3_client, s3_key: str, local_path: Path) -> bool:
         """Download a single file from S3."""
         try:
-            await asyncio.to_thread(local_path.parent.mkdir, parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                local_path.parent.mkdir, parents=True, exist_ok=True
+            )
 
             response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
@@ -277,7 +282,9 @@ class S3Client:
                 # List all objects under the prefix
                 objects_to_delete = []
                 paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                async for page in paginator.paginate(
+                    Bucket=self._bucket, Prefix=prefix
+                ):
                     for obj in page.get("Contents", []):
                         objects_to_delete.append({"Key": obj["Key"]})
 

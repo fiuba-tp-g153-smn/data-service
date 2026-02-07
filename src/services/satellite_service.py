@@ -11,6 +11,7 @@ from services.base_service import BaseProductService
 from dependencies import logger
 import asyncio
 
+
 class SatelliteService(BaseProductService):
     """Service to manage satellite products and tiles."""
 
@@ -206,7 +207,9 @@ class SatelliteService(BaseProductService):
     ) -> dict:
         """Get available tilesets for a channel with full metadata."""
         channel_config = self.get_channel_config(product_id, instrument_id, channel_id)
-        tilesets = await self._get_tilesets_for_channel(product_id, instrument_id, channel_id)
+        tilesets = await self._get_tilesets_for_channel(
+            product_id, instrument_id, channel_id
+        )
 
         tile_url_pattern = f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
 
@@ -314,20 +317,23 @@ class SatelliteService(BaseProductService):
         # ID format varies but usually ends with _sYYYYJJJHHMMSS...
         # We'll just sort by ID since they contain timestamps
         sorted_tilesets = sorted(tilesets, key=lambda x: x["id"], reverse=True)
-        
+
         if not sorted_tilesets:
             return None
-            
+
         # Try to extract timestamp from the ID of the latest tileset
         latest_id = sorted_tilesets[0]["id"]
         match = re.search(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})", latest_id)
-        
+
         if match:
             year, julian_day, hour, minute, second = map(int, match.groups())
             # Convert Julian day to date
-            dt = datetime.strptime(f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}", "%Y%j%H%M%S")
+            dt = datetime.strptime(
+                f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}",
+                "%Y%j%H%M%S",
+            )
             return dt.replace(tzinfo=timezone.utc)
-            
+
         return None
 
 

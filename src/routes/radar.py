@@ -1,7 +1,5 @@
 """Radar-specific endpoints for the products API."""
 
-
-
 from fastapi import APIRouter, HTTPException
 from fastapi import Path as PathParam
 from fastapi import status
@@ -10,6 +8,7 @@ from dependencies import logger
 from services.radar_service import radar_service
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
+
 
 @router.get(
     "",
@@ -24,6 +23,7 @@ async def list_radars():
     logger.info("API: Listing all radars")
     return radar_service.list_radars()
 
+
 @router.get(
     "/{radar_id}",
     status_code=status.HTTP_200_OK,
@@ -36,6 +36,7 @@ async def list_radar_variables(
     logger.info(f"API: Listing variables for radar: {radar_id}")
     return radar_service.list_radar_variables(radar_id)
 
+
 @router.get(
     "/{radar_id}/{variable_id}",
     status_code=status.HTTP_200_OK,
@@ -46,8 +47,11 @@ async def list_radar_elevations(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
 ):
-    logger.info(f"API: Listing elevations for radar: {radar_id}, variable: {variable_id}")
+    logger.info(
+        f"API: Listing elevations for radar: {radar_id}, variable: {variable_id}"
+    )
     return radar_service.list_radar_elevations(radar_id, variable_id)
+
 
 @router.get(
     "/{radar_id}/{variable_id}/{elevation_id}",
@@ -58,10 +62,15 @@ async def list_radar_elevations(
 async def list_radar_tilesets(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-    elevation_id: str = PathParam(..., description="Elevation identifier (e.g., elev0, elev1, elev2)"),
+    elevation_id: str = PathParam(
+        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+    ),
 ):
-    logger.info(f"API: Listing tilesets for radar: {radar_id}, variable: {variable_id}, elevation: {elevation_id}")
+    logger.info(
+        f"API: Listing tilesets for radar: {radar_id}, variable: {variable_id}, elevation: {elevation_id}"
+    )
     return radar_service.list_radar_tilesets(radar_id, variable_id, elevation_id)
+
 
 @router.get(
     "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp",
@@ -73,13 +82,19 @@ async def list_radar_tilesets(
 async def get_radar_tile(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-    elevation_id: str = PathParam(..., description="Elevation identifier (e.g., elev0, elev1, elev2)"),
-    tileset_id: str = PathParam(..., description="Tileset identifier (timestamp, e.g., 20260114T170328Z)"),
+    elevation_id: str = PathParam(
+        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+    ),
+    tileset_id: str = PathParam(
+        ..., description="Tileset identifier (timestamp, e.g., 20260114T170328Z)"
+    ),
     z: int = PathParam(..., description="Zoom level"),
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
 ):
-    tile_path = radar_service.get_tile_path_output_radar(radar_id, variable_id, elevation_id, tileset_id, z, x, y)
+    tile_path = radar_service.get_tile_path_output_radar(
+        radar_id, variable_id, elevation_id, tileset_id, z, x, y
+    )
     if not tile_path.exists():
         logger.warning(f"Radar tile not found: {tile_path}")
         raise HTTPException(status_code=404, detail="Tile not found")

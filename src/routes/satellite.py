@@ -112,19 +112,21 @@ async def list_channel_tilesets(
         )
 
     logger.info(f"Listing tilesets for: {product_id}/{instrument_id}/{channel_id}")
-    data = await satellite_service.get_channel_tilesets(product_id, instrument_id, channel_id)
+    data = await satellite_service.get_channel_tilesets(
+        product_id, instrument_id, channel_id
+    )
 
     # Generate ETag
     etag = f'"{satellite_service.get_config_hash(data)}"'
 
     # Get Last-Modified
     last_modified = satellite_service.get_latest_tileset_timestamp(data["tilesets"])
-    
+
     headers = {
         "Cache-Control": settings.cache_control_config,
         "ETag": etag,
     }
-    
+
     if last_modified:
         headers["Last-Modified"] = format_datetime(last_modified, usegmt=True)
 
@@ -176,7 +178,7 @@ async def get_satellite_tile(
     tile_path = satellite_service.get_tile_path(
         product_id, instrument_id, channel_id, tileset_id, z, x, y
     )
-    
+
     if not await asyncio.to_thread(tile_path.exists):
         logger.warning(f"Satellite tile not found: {tile_path}")
         raise HTTPException(
@@ -184,10 +186,10 @@ async def get_satellite_tile(
         )
 
     logger.debug(f"Serving satellite tile: {tile_path}")
-    
+
     # ETag based on unique tile identifier
     etag = f'"{tileset_id}-{z}-{x}-{y}"'
-    
+
     return FileResponse(
         tile_path,
         media_type="image/webp",

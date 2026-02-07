@@ -15,6 +15,7 @@ from typing import List, Optional
 from clients.s3_client import S3Client
 from settings import Settings
 from logging import Logger
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +55,7 @@ class SyncService:
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._client: Optional[S3Client] = None
-        
+
         # Lock file mechanism to ensure only one worker syncs
         self._lock_file_path = "/tmp/data-service-sync.lock"
         self._lock_file_handle = None
@@ -107,7 +108,7 @@ class SyncService:
             except asyncio.CancelledError:
                 pass
             self._task = None
-        
+
         # Release lock
         if self._lock_file_handle:
             try:
@@ -201,7 +202,7 @@ class SyncService:
             # 4. Prune excess
             # We want to keep the last KEEP_COUNT items.
             # Delete items from index 0 to (len - KEEP_COUNT)
-            prefixes_to_delete = tileset_prefixes[: -KEEP_COUNT]
+            prefixes_to_delete = tileset_prefixes[:-KEEP_COUNT]
 
             if prefixes_to_delete:
                 logger.info(
