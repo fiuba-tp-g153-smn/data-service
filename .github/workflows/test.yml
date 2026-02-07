@@ -3,32 +3,47 @@ name: Run tests
 on:
   push:
     branches-ignore:
-      - 'main'
+      - "main"
   pull_request:
     branches-ignore:
-      - 'main'
+      - "main"
   workflow_call:
 
 jobs:
+  secret-leak-scan:
+    name: secrets scan (gitleaks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          GITLEAKS_VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose
+
   test:
+    needs: [secret-leak-scan]
     runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.13.8'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.13.8"
 
-    - name: Setup Poetry
-      run: pip install poetry &&  poetry config virtualenvs.create false
+      - name: Setup Poetry
+        run: pip install poetry &&  poetry config virtualenvs.create false
 
-    - name: Install dependencies
-      run: poetry install
+      - name: Install dependencies
+        run: poetry install
 
-    - name: Create reports directory
-      run: mkdir -p reports
+      - name: Create reports directory
+        run: mkdir -p reports
 
-    - name: Run tests
-      run: poetry run pytest -m "not skip" --color=yes --junitxml=reports/junit_report.xml --cov=src --cov-report term --cov-report html:reports/coverage -W ignore::DeprecationWarning
+      - name: Run tests
+        run: poetry run pytest -m "not skip" --color=yes --junitxml=reports/junit_report.xml --cov=src --cov-report term --cov-report html:reports/coverage -W ignore::DeprecationWarning

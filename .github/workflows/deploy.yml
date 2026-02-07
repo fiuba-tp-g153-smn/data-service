@@ -6,12 +6,33 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     uses: ./.github/workflows/test.yml
 
+  image-scan:
+    name: vulnerabilities scan (trivy)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t data-service:scan .
+      - name: Install Trivy
+        run: |
+          TRIVY_VERSION=$(curl -s https://api.github.com/repos/aquasecurity/trivy/releases/latest | grep '"tag_name"' | sed 's/.*"v\(.*\)".*/\1/')
+          curl -sSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" | tar -xz -C /usr/local/bin trivy
+      - name: Scan image for vulnerabilities
+        run: |
+          trivy image --download-db-only
+          trivy image --format table --exit-code 0 --severity HIGH --scanners vuln,misconfig,license --skip-db-update data-service:scan
+          trivy image --format table --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,license --skip-db-update --quiet data-service:scan
+
   deploy:
-    needs: test
+    needs: [test, image-scan]
     runs-on: ubuntu-24.04
     environment:
       name: ${{ (github.ref_name == 'main' && 'prod') || 'unknown' }}
@@ -24,12 +45,12 @@ jobs:
         run: |
           echo "🚀 Deployment started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "🌍 Git branch: ${GITHUB_REF_NAME}"
-          
+
           if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
             echo "⚠️ Only 'main' branch is supported for deployments!"
             exit 1
           fi
-          
+
           echo "✅ Environment: prod"
 
       - name: Trigger Coolify deployment
@@ -39,7 +60,7 @@ jobs:
           COOLIFY_DEPLOY_TOKEN: ${{ secrets.COOLIFY_DEPLOY_TOKEN }}
         run: |
           echo "📡 Triggering deployment..."
-          
+
           if ! RESPONSE=$(curl -s -X GET \
             --max-time 30 \
             -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN" \
@@ -76,14 +97,14 @@ jobs:
           COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
           echo "⏳ Monitoring deployment $DEPLOYMENT_UUID..."
-          
+
           INTERVAL=2      # Start with 2 seconds (was 4-5)
           MAX_INTERVAL=10 # Cap at 10 seconds
           TIMEOUT=600     # 10 minutes total (was 3+3 minutes)
           ELAPSED=0
           RETRY_COUNT=0
           START_TIME=$(date +%s)
-          
+
           while [[ $ELAPSED -lt $TIMEOUT ]]; do
             
             DEPLOYMENT_STATUS=$(curl -s \
@@ -134,6 +155,10 @@ jobs:
                   echo "🔍 App status: $APP_STATUS (${HEALTH_ELAPSED}s)"
                   
                   case "$APP_STATUS" in
+                    "running:unknown")
+                      echo "⚠️ Application is running but status is unknown. Proceeding..."
+                      exit 0
+                      ;;
                     "running"|"healthy"|"running:healthy")
                       END_TIME=$(date +%s)
                       TOTAL_DURATION=$((END_TIME - START_TIME))
@@ -163,6 +188,10 @@ jobs:
                 echo "❌ Deployment failed!"
                 exit 1
                 ;;
+              "cancelled-by-user")
+                echo "❌ Deployment cancelled by user!"
+                exit 1
+                ;;
               "restart_only")
                 echo "⚠️ Restart-only deployment - skipping health checks"
                 exit 0
@@ -181,7 +210,7 @@ jobs:
             
             ELAPSED=$(( $(date +%s) - START_TIME ))
           done
-          
+
           echo "❌ Deployment timeout after ${TIMEOUT}s"
           echo "💡 This might indicate a resource issue or long deployment"
           exit 1
@@ -194,12 +223,12 @@ jobs:
           COOLIFY_READ_TOKEN: ${{ secrets.COOLIFY_READ_TOKEN }}
         run: |
           echo "📋 Fetching deployment logs for debugging..."
-          
+
           LOGS=$(curl -s \
             --max-time 15 \
             -H "Authorization: Bearer $COOLIFY_READ_TOKEN" \
             "$BASE_URL/deployments/$DEPLOYMENT_UUID/logs" | jq -r '.logs // "No logs available"')
-          
+
           echo "--- DEPLOYMENT LOGS ---"
           echo "$LOGS"
           echo "--- END LOGS ---"
