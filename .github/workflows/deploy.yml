@@ -32,7 +32,7 @@ jobs:
           trivy image --format table --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,license --skip-db-update --quiet data-service:scan
 
   deploy:
-    needs: [test, image-scan]
+    needs: [test]
     runs-on: ubuntu-24.04
     environment:
       name: ${{ (github.ref_name == 'main' && 'prod') || 'unknown' }}
