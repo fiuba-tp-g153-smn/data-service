@@ -1,16 +1,17 @@
 """
 S3 Client.
 
-Provides sync functionality to download tiles from S3 bucket to local storage.
-Used by data-service to periodically sync tiles for serving via REST API.
+Provides sync functionality to download tiles from S3 bucket and store
+them directly in Redis. Used by SyncService for periodic satellite tile sync.
 """
 
 import asyncio
 import logging
-from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional
 
 import aioboto3
+
+from clients.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +20,8 @@ class S3Client:
     """
     Async S3 client for tile downloads.
 
-    Syncs tile directories from S3 S3 bucket to local storage with
-    incremental updates (only downloads new/changed files).
+    Downloads tiles from S3 and stores them directly in Redis,
+    bypassing local filesystem entirely.
 
     Attributes:
         _endpoint: S3 endpoint URL (e.g., "minio:9000")
@@ -53,99 +54,88 @@ class S3Client:
         protocol = "https" if self._secure else "http"
         return f"{protocol}://{self._endpoint}"
 
-    async def sync_prefix(
+    async def sync_prefix_to_redis(
         self,
+        redis_client: RedisClient,
         s3_prefix: str,
-        local_dir: Path,
-        delete_orphans: bool = True,
-        extensions: Optional[List[str]] = None,
+        channel_dir: str,
+        tileset_id: str,
     ) -> int:
         """
-        Sync files from S3 prefix to local directory.
+        Download all tiles for a tileset from S3 and store directly in Redis.
 
         Args:
-            s3_prefix: S3 key prefix to sync (e.g., "band_13/tiles")
-            local_dir: Local directory to sync to
-            delete_orphans: Whether to delete local files not in S3
+            redis_client: Redis client for storing tiles
+            s3_prefix: S3 key prefix for this tileset (e.g., "band_13/tiles/OR_ABI-.../")
+            channel_dir: Channel directory name (e.g., "band_13")
+            tileset_id: Tileset identifier
 
         Returns:
-            Number of files downloaded
+            Number of tiles stored
         """
-        local_dir.mkdir(parents=True, exist_ok=True)
-
-        logger.info(
-            f"Starting sync from s3://{self._bucket}/{s3_prefix} to {local_dir}"
-        )
-
         async with self._session.client(
             "s3",
             endpoint_url=self._get_endpoint_url(),
             aws_access_key_id=self._access_key,
             aws_secret_access_key=self._secret_key,
         ) as s3_client:
-            # List all objects in S3
             s3_objects = await self._list_objects(s3_client, s3_prefix)
 
             if not s3_objects:
-                logger.info(f"No objects found under {s3_prefix}")
                 return 0
 
-            # Filter by extension if specified
-            if extensions:
-                s3_objects = [
-                    obj
-                    for obj in s3_objects
-                    if any(obj["Key"].endswith(ext) for ext in extensions)
-                ]
+            # Filter only .webp tile files
+            tile_objects = [obj for obj in s3_objects if obj["Key"].endswith(".webp")]
 
-            # Get existing local files
-            local_files = await asyncio.to_thread(
-                self._get_local_files, local_dir, s3_prefix
-            )
-
-            # Determine files to download (new or updated)
-            files_to_download = []
-            s3_keys: Set[str] = set()
-
-            for obj in s3_objects:
-                s3_key = obj["Key"]
-                s3_keys.add(s3_key)
-
-                # Calculate local path
-                relative_path = s3_key[len(s3_prefix) :].lstrip("/")
-                local_path = local_dir / relative_path
-
-                # Check if we need to download
-                if local_path not in local_files:
-                    files_to_download.append((s3_key, local_path))
-                elif obj.get("Size", 0) != local_files[local_path]:
-                    # Size mismatch - re-download
-                    files_to_download.append((s3_key, local_path))
-
-            # Download files
-            downloaded = 0
-            if files_to_download:
-                logger.info(f"Downloading {len(files_to_download)} files...")
-                tasks = [
-                    self._download_file_with_limit(s3_client, s3_key, local_path)
-                    for s3_key, local_path in files_to_download
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                downloaded = sum(1 for r in results if r is True)
-
-            # Delete orphan files if requested
-            if delete_orphans:
-                orphans_deleted = await asyncio.to_thread(
-                    self._delete_orphans, local_dir, s3_prefix, s3_keys
-                )
-                if orphans_deleted > 0:
-                    logger.info(f"Deleted {orphans_deleted} orphan files")
+            if not tile_objects:
+                return 0
 
             logger.info(
-                f"Sync completed: {downloaded} files downloaded, "
-                f"{len(s3_objects)} total objects in S3"
+                f"Downloading {len(tile_objects)} tiles for "
+                f"{channel_dir}/{tileset_id}"
             )
-            return downloaded
+
+            tasks = [
+                self._download_tile_to_redis(
+                    s3_client, redis_client, obj["Key"], channel_dir, tileset_id
+                )
+                for obj in tile_objects
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            stored = sum(1 for r in results if r is True)
+
+            return stored
+
+    async def _download_tile_to_redis(
+        self,
+        s3_client,
+        redis_client: RedisClient,
+        s3_key: str,
+        channel_dir: str,
+        tileset_id: str,
+    ) -> bool:
+        """Download a single tile from S3 and store in Redis."""
+        async with self._semaphore:
+            try:
+                # Parse z/x/y from key: .../tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp
+                parts = s3_key.split("/")
+                # Find the tiles dir and extract z/x/y
+                y_file = parts[-1]  # "{y}.webp"
+                x = parts[-2]
+                z = parts[-3]
+                y = y_file.replace(".webp", "")
+
+                response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
+                async with response["Body"] as stream:
+                    content = await stream.read()
+
+                await redis_client.store_satellite_tile(
+                    channel_dir, tileset_id, int(z), int(x), int(y), content
+                )
+                return True
+            except Exception as e:
+                logger.error(f"Failed to download {s3_key} to Redis: {e}")
+                return False
 
     async def _list_objects(self, s3_client, prefix: str) -> List[dict]:
         """List all objects under a prefix."""
@@ -159,72 +149,6 @@ class S3Client:
         except Exception as e:
             logger.error(f"Error listing objects: {e}")
         return objects
-
-    def _get_local_files(self, local_dir: Path, s3_prefix: str) -> dict:
-        """Get map of local file paths to their sizes."""
-        files = {}
-        if local_dir.exists():
-            for file_path in local_dir.rglob("*"):
-                if file_path.is_file():
-                    files[file_path] = file_path.stat().st_size
-        return files
-
-    async def _download_file_with_limit(
-        self, s3_client, s3_key: str, local_path: Path
-    ) -> bool:
-        """Download a file with semaphore-controlled concurrency."""
-        async with self._semaphore:
-            return await self._download_file(s3_client, s3_key, local_path)
-
-    async def _download_file(self, s3_client, s3_key: str, local_path: Path) -> bool:
-        """Download a single file from S3."""
-        try:
-            await asyncio.to_thread(
-                local_path.parent.mkdir, parents=True, exist_ok=True
-            )
-
-            response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
-            async with response["Body"] as stream:
-                content = await stream.read()
-
-            await asyncio.to_thread(local_path.write_bytes, content)
-            logger.info(f"Downloaded: {s3_key}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to download {s3_key}: {e}")
-            return False
-
-    def _delete_orphans(
-        self, local_dir: Path, s3_prefix: str, s3_keys: Set[str]
-    ) -> int:
-        """Delete local files that don't exist in S3 (blocking)."""
-        # This method is designed to be run in a thread executor
-        deleted = 0
-        if not local_dir.exists():
-            return deleted
-
-        for file_path in local_dir.rglob("*"):
-            if file_path.is_file():
-                relative_path = file_path.relative_to(local_dir)
-                s3_key = f"{s3_prefix}/{relative_path}".replace("\\", "/")
-
-                if s3_key not in s3_keys:
-                    try:
-                        file_path.unlink()
-                        deleted += 1
-                        logger.info(f"Deleted orphan: {file_path}")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete orphan {file_path}: {e}")
-
-        # Clean up empty directories
-        for dir_path in sorted(local_dir.rglob("*"), reverse=True):
-            if dir_path.is_dir() and not any(dir_path.iterdir()):
-                try:
-                    dir_path.rmdir()
-                except Exception:
-                    pass
-
-        return deleted
 
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""
@@ -270,7 +194,7 @@ class S3Client:
 
     async def delete_prefix(self, prefix: str) -> bool:
         """
-        recursively delete all objects under a prefix.
+        Recursively delete all objects under a prefix.
         """
         try:
             async with self._session.client(
@@ -279,7 +203,6 @@ class S3Client:
                 aws_access_key_id=self._access_key,
                 aws_secret_access_key=self._secret_key,
             ) as s3_client:
-                # List all objects under the prefix
                 objects_to_delete = []
                 paginator = s3_client.get_paginator("list_objects_v2")
                 async for page in paginator.paginate(
@@ -288,14 +211,12 @@ class S3Client:
                     for obj in page.get("Contents", []):
                         objects_to_delete.append({"Key": obj["Key"]})
 
-                        # Batch delete in chunks of 1000 (S3 limit)
                         if len(objects_to_delete) >= 1000:
                             await self._delete_objects_batch(
                                 s3_client, objects_to_delete
                             )
                             objects_to_delete = []
 
-                # Delete remaining
                 if objects_to_delete:
                     await self._delete_objects_batch(s3_client, objects_to_delete)
 

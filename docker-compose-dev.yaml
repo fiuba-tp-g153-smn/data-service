@@ -13,6 +13,23 @@
 #   3. Start data-service: docker compose up -d
 
 services:
+  redis:
+    container_name: data-service-redis-dev
+    image: redis:8.4-alpine
+    command: redis-server --maxmemory 4gb --maxmemory-policy noeviction --save "" --appendonly no
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+      start_interval: 1s
+
   data-service:
     container_name: data-service-dev-container
     build:
@@ -25,11 +42,12 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - ./src:/app
-      - ./data:/app/data
-      - ./output_radar:/output_radar 
-
+      - ./output_radar:/output_radar
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -42,6 +60,9 @@ services:
       - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY}
+      - REDIS_URL=${REDIS_URL}
+      - KEEP_COUNT=${KEEP_COUNT}
+      - RADAR_SYNC_INTERVAL_SECONDS=${RADAR_SYNC_INTERVAL_SECONDS}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s

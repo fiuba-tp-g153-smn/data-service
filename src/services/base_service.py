@@ -1,13 +1,10 @@
 """Base service with shared functionality for all products."""
 
-from pathlib import Path
 from typing import Dict
 
 
 class BaseProductService:
     """Base class for product services with shared functionality."""
-
-    TILES_BASE_PATH = Path.cwd() / "data/tmp"
 
     # All products registry
     PRODUCTS_REGISTRY: Dict[str, dict] = {}

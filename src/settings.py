@@ -22,6 +22,15 @@ class Settings:
     s3_tiles_data_secure: bool = False
     sync_interval_seconds: int = 60
 
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Sync
+    keep_count: int = 26
+    sync_lock_path: str = "/tmp/data-service-sync.lock"
+    radar_lock_path: str = "/tmp/data-service-radar-sync.lock"
+    radar_sync_interval_seconds: int = 30
+
     # Caching
     cache_control_config: str = "public, max-age=60, stale-while-revalidate=300"
     cache_control_tile: str = "public, max-age=31536000, immutable"
@@ -53,6 +62,20 @@ class Settings:
         )
         self.sync_interval_seconds = int(
             os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
+        )
+
+        # Redis
+        self.redis_url = os.getenv("REDIS_URL", self.redis_url)
+
+        # Sync
+        self.keep_count = int(os.getenv("KEEP_COUNT", str(self.keep_count)))
+        self.sync_lock_path = os.getenv("SYNC_LOCK_PATH", self.sync_lock_path)
+        self.radar_lock_path = os.getenv("RADAR_LOCK_PATH", self.radar_lock_path)
+        self.radar_sync_interval_seconds = int(
+            os.getenv(
+                "RADAR_SYNC_INTERVAL_SECONDS",
+                str(self.radar_sync_interval_seconds),
+            )
         )
 
         # Caching

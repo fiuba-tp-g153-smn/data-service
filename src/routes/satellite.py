@@ -1,8 +1,14 @@
 """Satellite-specific endpoints (GOES-19, ABI, etc.)."""
 
-from fastapi import APIRouter, HTTPException, status, Path as PathParam
-from fastapi import APIRouter, HTTPException, status, Path as PathParam, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    Request,
+    status,
+    Path as PathParam,
+    Response,
+)
+from fastapi.responses import JSONResponse
 from email.utils import format_datetime
 
 from dependencies import logger, settings
@@ -12,7 +18,6 @@ from models.satellite import (
     InstrumentResponse,
     ChannelTilesetsResponse,
 )
-import asyncio
 
 router = APIRouter(prefix="/products", tags=["Satellite"])
 
@@ -87,6 +92,7 @@ async def get_instrument(
     response_model=ChannelTilesetsResponse,
 )
 async def list_channel_tilesets(
+    request: Request,
     product_id: str = PathParam(
         ..., description="Satellite product identifier (e.g., goes-19)"
     ),
@@ -119,6 +125,11 @@ async def list_channel_tilesets(
     # Generate ETag
     etag = f'"{satellite_service.get_config_hash(data)}"'
 
+    # Check If-None-Match for 304
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
     # Get Last-Modified
     last_modified = satellite_service.get_latest_tileset_timestamp(data["tilesets"])
 
@@ -138,9 +149,9 @@ async def list_channel_tilesets(
     status_code=status.HTTP_200_OK,
     summary="Get Satellite Tile",
     response_description="Returns a specific satellite tile image",
-    response_class=FileResponse,
 )
 async def get_satellite_tile(
+    request: Request,
     product_id: str = PathParam(
         ..., description="Satellite product identifier (e.g., goes-19)"
     ),
@@ -174,24 +185,29 @@ async def get_satellite_tile(
     if not is_valid:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg)
 
-    # Get tile path
-    tile_path = satellite_service.get_tile_path(
+    # ETag based on unique tile identifier
+    etag = f'"{tileset_id}-{z}-{x}-{y}"'
+
+    # Check If-None-Match for 304
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
+    # Get tile data from Redis
+    tile_data = await satellite_service.get_tile_data(
         product_id, instrument_id, channel_id, tileset_id, z, x, y
     )
 
-    if not await asyncio.to_thread(tile_path.exists):
-        logger.warning(f"Satellite tile not found: {tile_path}")
+    if not tile_data:
+        logger.warning(f"Satellite tile not found: {tileset_id}/{z}/{x}/{y}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"
         )
 
-    logger.debug(f"Serving satellite tile: {tile_path}")
+    logger.debug(f"Serving satellite tile: {tileset_id}/{z}/{x}/{y}")
 
-    # ETag based on unique tile identifier
-    etag = f'"{tileset_id}-{z}-{x}-{y}"'
-
-    return FileResponse(
-        tile_path,
+    return Response(
+        content=tile_data,
         media_type="image/webp",
         headers={
             "Cache-Control": settings.cache_control_tile,
