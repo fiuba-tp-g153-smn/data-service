@@ -67,3 +67,4 @@ junit_report.xml
 .tmp
 data/
 output_radar/
+.agent/

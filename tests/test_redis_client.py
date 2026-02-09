@@ -66,9 +66,7 @@ async def test_satellite_tileset_index():
     """Verify add and get for satellite tileset index."""
     client = RedisClient("redis://localhost:6379/0")
     client._redis = AsyncMock()
-    client._redis.zrange = AsyncMock(
-        return_value=[b"tileset1", b"tileset2"]
-    )
+    client._redis.zrange = AsyncMock(return_value=[b"tileset1", b"tileset2"])
 
     await client.add_satellite_tileset("band_13", "tileset1", 20250141230210.0)
     client._redis.zadd.assert_awaited_once()
@@ -99,7 +97,9 @@ async def test_store_radar_tile_with_ttl():
     client = RedisClient("redis://localhost:6379/0")
     client._redis = AsyncMock()
 
-    await client.store_radar_tile("RMA1", "DBZH", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600)
+    await client.store_radar_tile(
+        "RMA1", "DBZH", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600
+    )
     client._redis.set.assert_awaited_once_with(
         "tile:radar:RMA1/DBZH/ts1_elev0/5/10/15", b"data", ex=3600
     )

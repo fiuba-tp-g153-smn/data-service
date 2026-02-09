@@ -55,8 +55,7 @@ class RadarSyncService:
 
         if not self._radar_path.exists():
             logger.info(
-                f"Radar path {self._radar_path} does not exist. "
-                "Radar sync disabled."
+                f"Radar path {self._radar_path} does not exist. " "Radar sync disabled."
             )
             return
 
@@ -65,9 +64,7 @@ class RadarSyncService:
             self._lock_file_handle = open(self._settings.radar_lock_path, "w")
             fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except IOError:
-            logger.info(
-                "Radar sync service disabled (another worker is active)."
-            )
+            logger.info("Radar sync service disabled (another worker is active).")
             if self._lock_file_handle:
                 self._lock_file_handle.close()
                 self._lock_file_handle = None
@@ -142,9 +139,7 @@ class RadarSyncService:
 
             for var_dir in variable_dirs:
                 variable_id = var_dir.name
-                tileset_dirs = await asyncio.to_thread(
-                    self._list_dirs, var_dir
-                )
+                tileset_dirs = await asyncio.to_thread(self._list_dirs, var_dir)
 
                 for ts_dir in tileset_dirs:
                     # Folder name: {TIMESTAMP}_elev{N}
@@ -204,9 +199,7 @@ class RadarSyncService:
         elevation_id: str,
     ) -> int:
         """Load all tiles from a tileset directory into Redis."""
-        tile_files = await asyncio.to_thread(
-            self._find_webp_files, tiles_dir
-        )
+        tile_files = await asyncio.to_thread(self._find_webp_files, tiles_dir)
 
         loaded = 0
         for tile_file in tile_files:
