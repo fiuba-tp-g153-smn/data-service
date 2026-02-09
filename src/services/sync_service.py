@@ -27,7 +27,8 @@ class SyncService:
     Runs periodically to ensure Redis tile store stays in sync
     with the S3 bucket populated by tiles-processor.
     Uses Redis tileset index for incremental sync (only downloads
-    new tilesets not already in Redis).
+    new tilesets not already in Redis). Tiles are stored with a TTL
+    so eviction is handled by Redis expiration.
     """
 
     # Prefixes to sync from S3 (matches tiles-processor output structure)
@@ -177,7 +178,7 @@ class SyncService:
                     await self._redis_client.get_satellite_tilesets(channel_dir)
                 )
 
-                # 3. Download only new tilesets
+                # 3. Download only new tilesets (with TTL for automatic eviction)
                 for s3_tileset_prefix in tileset_prefixes:
                     # Extract tileset_id from prefix: "band_13/tiles/OR_ABI-.../"
                     tileset_dir = s3_tileset_prefix.rstrip("/").split("/")[-1]
@@ -187,25 +188,24 @@ class SyncService:
                     if tileset_id in existing_tilesets:
                         continue
 
-                    # Download and store in Redis
+                    # Download and store in Redis with TTL
                     downloaded = await self._client.sync_prefix_to_redis(
                         self._redis_client,
                         s3_tileset_prefix,
                         channel_dir,
                         tileset_id,
+                        tile_ttl=self._settings.tile_ttl,
                     )
                     total_downloaded += downloaded
 
-                    # Add to tileset index with timestamp score
+                    # Add to tileset index with timestamp score and TTL
                     score = self._extract_timestamp_score(tileset_id)
                     await self._redis_client.add_satellite_tileset(
-                        channel_dir, tileset_id, score
+                        channel_dir,
+                        tileset_id,
+                        score,
+                        ttl=self._settings.tile_ttl,
                     )
-
-                # 4. Enforce retention: delete old tilesets from Redis first, then S3
-                await self._enforce_retention_policy(
-                    prefix, channel_dir, tileset_prefixes
-                )
 
             except Exception as e:
                 logger.error(f"Failed to sync prefix '{prefix}': {e}")
@@ -247,55 +247,6 @@ class SyncService:
             )
         else:
             logger.info(f"Sync cycle completed: no new tiles ({duration_ms}ms)")
-
-    async def _enforce_retention_policy(
-        self,
-        band_prefix: str,
-        channel_dir: str,
-        s3_tileset_prefixes: List[str],
-    ) -> None:
-        """
-        Enforce retention policy: keep only the latest keep_count tilesets.
-        Deletes from Redis first (safe), then from S3.
-        """
-        if not self._client or not self._redis_client:
-            return
-
-        keep_count = self._settings.keep_count
-
-        try:
-            # Get tilesets from Redis index (ordered by score, oldest first)
-            redis_tilesets = await self._redis_client.get_satellite_tilesets(
-                channel_dir
-            )
-
-            if len(redis_tilesets) <= keep_count:
-                return
-
-            # Tilesets to remove (oldest ones)
-            tilesets_to_remove = redis_tilesets[:-keep_count]
-
-            logger.info(
-                f"Retention policy for {channel_dir}: "
-                f"{len(redis_tilesets)} tilesets, keeping {keep_count}, "
-                f"removing {len(tilesets_to_remove)}"
-            )
-
-            for tileset_id in tilesets_to_remove:
-                # 1. Delete from Redis first (safe)
-                await self._redis_client.delete_satellite_tileset(
-                    channel_dir, tileset_id
-                )
-
-                # 2. Then delete from S3
-                # Find the matching S3 prefix
-                for s3_prefix in s3_tileset_prefixes:
-                    if tileset_id in s3_prefix:
-                        await self._client.delete_prefix(s3_prefix)
-                        break
-
-        except Exception as e:
-            logger.error(f"Error enforcing retention for {channel_dir}: {e}")
 
     @staticmethod
     def _extract_timestamp_score(tileset_id: str) -> float:

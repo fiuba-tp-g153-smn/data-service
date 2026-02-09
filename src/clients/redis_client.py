@@ -51,11 +51,21 @@ class RedisClient:
     # ============== Satellite Tile Operations ==============
 
     async def store_satellite_tile(
-        self, channel_dir: str, tileset_id: str, z: int, x: int, y: int, data: bytes
+        self,
+        channel_dir: str,
+        tileset_id: str,
+        z: int,
+        x: int,
+        y: int,
+        data: bytes,
+        ttl: Optional[int] = None,
     ) -> None:
-        """Store a satellite tile in Redis."""
+        """Store a satellite tile in Redis, optionally with TTL."""
         key = f"tile:sat:{channel_dir}/{tileset_id}/{z}/{x}/{y}"
-        await self._redis.set(key, data)
+        if ttl:
+            await self._redis.set(key, data, ex=ttl)
+        else:
+            await self._redis.set(key, data)
 
     async def get_satellite_tile(
         self, channel_dir: str, tileset_id: str, z: int, x: int, y: int
@@ -67,11 +77,17 @@ class RedisClient:
     # ============== Satellite Index Operations ==============
 
     async def add_satellite_tileset(
-        self, channel_dir: str, tileset_id: str, score: float
+        self,
+        channel_dir: str,
+        tileset_id: str,
+        score: float,
+        ttl: Optional[int] = None,
     ) -> None:
         """Add a tileset to the satellite index (sorted set, score = timestamp)."""
         key = f"idx:sat:{channel_dir}"
         await self._redis.zadd(key, {tileset_id.encode(): score})
+        if ttl:
+            await self._redis.expire(key, ttl)
 
     async def get_satellite_tilesets(self, channel_dir: str) -> List[str]:
         """Get all tileset IDs for a channel, ordered by score (oldest first)."""
@@ -189,6 +205,16 @@ class RedisClient:
             f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
         )
         return sorted((m.decode() for m in members), reverse=True)
+
+    # ============== Listing Cache Operations ==============
+
+    async def cache_listing(self, cache_key: str, data: bytes, ttl: int) -> None:
+        """Cache a JSON listing with TTL."""
+        await self._redis.set(cache_key, data, ex=ttl)
+
+    async def get_cached_listing(self, cache_key: str) -> Optional[bytes]:
+        """Get a cached JSON listing."""
+        return await self._redis.get(cache_key)
 
     # ============== Sync Status Operations ==============
 

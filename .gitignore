@@ -68,3 +68,4 @@ junit_report.xml
 data/
 output_radar/
 .agent/
+.claude

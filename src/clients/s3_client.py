@@ -60,6 +60,7 @@ class S3Client:
         s3_prefix: str,
         channel_dir: str,
         tileset_id: str,
+        tile_ttl: Optional[int] = None,
     ) -> int:
         """
         Download all tiles for a tileset from S3 and store directly in Redis.
@@ -69,6 +70,7 @@ class S3Client:
             s3_prefix: S3 key prefix for this tileset (e.g., "band_13/tiles/OR_ABI-.../")
             channel_dir: Channel directory name (e.g., "band_13")
             tileset_id: Tileset identifier
+            tile_ttl: Optional TTL in seconds for stored tiles
 
         Returns:
             Number of tiles stored
@@ -97,7 +99,12 @@ class S3Client:
 
             tasks = [
                 self._download_tile_to_redis(
-                    s3_client, redis_client, obj["Key"], channel_dir, tileset_id
+                    s3_client,
+                    redis_client,
+                    obj["Key"],
+                    channel_dir,
+                    tileset_id,
+                    tile_ttl,
                 )
                 for obj in tile_objects
             ]
@@ -113,6 +120,7 @@ class S3Client:
         s3_key: str,
         channel_dir: str,
         tileset_id: str,
+        tile_ttl: Optional[int] = None,
     ) -> bool:
         """Download a single tile from S3 and store in Redis."""
         async with self._semaphore:
@@ -130,7 +138,13 @@ class S3Client:
                     content = await stream.read()
 
                 await redis_client.store_satellite_tile(
-                    channel_dir, tileset_id, int(z), int(x), int(y), content
+                    channel_dir,
+                    tileset_id,
+                    int(z),
+                    int(x),
+                    int(y),
+                    content,
+                    ttl=tile_ttl,
                 )
                 return True
             except Exception as e:
@@ -149,6 +163,29 @@ class S3Client:
         except Exception as e:
             logger.error(f"Error listing objects: {e}")
         return objects
+
+    @staticmethod
+    def build_satellite_tile_key(
+        channel_dir: str, tileset_id: str, z: int, x: int, y: int
+    ) -> str:
+        """Build S3 key for a satellite tile."""
+        return f"{channel_dir}/tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp"
+
+    async def download_tile(self, s3_key: str) -> Optional[bytes]:
+        """Download a single tile from S3. Returns raw bytes or None."""
+        try:
+            async with self._session.client(
+                "s3",
+                endpoint_url=self._get_endpoint_url(),
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+            ) as s3_client:
+                response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
+                async with response["Body"] as stream:
+                    return await stream.read()
+        except Exception as e:
+            logger.warning(f"Failed to download tile {s3_key}: {e}")
+            return None
 
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""

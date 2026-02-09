@@ -1,4 +1,6 @@
+import json
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -7,44 +9,66 @@ load_dotenv()
 
 class Settings:
     """
-    Application settings management using Pydantic.
-    Handles configuration loading for the application from environment variables.
+    Application settings management.
+
+    Loads tunable operational settings from settings.json, then lets
+    environment variables override any value for deployment flexibility.
+    Secrets and infrastructure URLs are loaded only from env vars.
     """
 
+    # --- Env-only: secrets & infrastructure ---
     log_level: str = ""
     app_env: str = ""
-
-    # S3 Tiles Data Configuration
     s3_tiles_data_endpoint: str = ""
     s3_tiles_data_access_key: str = ""
     s3_tiles_data_secret_key: str = ""
-    s3_tiles_data_bucket_name: str = "tiles-data"
+    s3_tiles_data_bucket_name: str = ""
     s3_tiles_data_secure: bool = False
-    sync_interval_seconds: int = 60
+    redis_url: str = ""
 
-    # Redis
-    redis_url: str = "redis://localhost:6379/0"
-
-    # Sync
-    keep_count: int = 26
-    sync_lock_path: str = "/tmp/data-service-sync.lock"
-    radar_lock_path: str = "/tmp/data-service-radar-sync.lock"
-    radar_sync_interval_seconds: int = 30
-
-    # Caching
-    cache_control_config: str = "public, max-age=60, stale-while-revalidate=300"
-    cache_control_tile: str = "public, max-age=31536000, immutable"
+    # --- JSON + env override: operational tuning ---
+    sync_mode: str = ""
+    tile_ttl: int
+    tileset_listing_ttl: int
+    sync_interval_seconds: int
+    radar_sync_interval_seconds: int
+    cache_control_config: str = ""
+    cache_control_tile: str = ""
 
     def __init__(self):
-        # Load from environment variables
+        settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
+
+        self._load_from_json(settings_json_path)
         self._load_from_env()
 
+    def _load_from_json(self, settings_json_path: Path) -> None:
+        """Load operational settings from settings.json."""
+        if not settings_json_path.is_file():
+            return
+
+        with open(settings_json_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        json_keys = {
+            "sync_mode",
+            "tile_ttl",
+            "listing_ttl",
+            "sync_interval_seconds",
+            "radar_sync_interval_seconds",
+            "cache_control_config",
+            "cache_control_tile",
+        }
+
+        for key in json_keys:
+            if key in data:
+                setattr(self, key, data[key])
+
     def _load_from_env(self) -> None:
-        """Load all configuration values directly from environment variables."""
+        """Load from environment variables (overrides JSON values)."""
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
         self.app_env = os.getenv("APP_ENV", self.app_env)
 
-        # S3 Tiles Data Configuration
+        # S3
         self.s3_tiles_data_endpoint = os.getenv(
             "S3_TILES_DATA_ENDPOINT", self.s3_tiles_data_endpoint
         )
@@ -60,25 +84,25 @@ class Settings:
         self.s3_tiles_data_secure = (
             os.getenv("S3_TILES_DATA_SECURE", "false").lower() == "true"
         )
-        self.sync_interval_seconds = int(
-            os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
-        )
 
         # Redis
         self.redis_url = os.getenv("REDIS_URL", self.redis_url)
 
-        # Sync
-        self.keep_count = int(os.getenv("KEEP_COUNT", str(self.keep_count)))
-        self.sync_lock_path = os.getenv("SYNC_LOCK_PATH", self.sync_lock_path)
-        self.radar_lock_path = os.getenv("RADAR_LOCK_PATH", self.radar_lock_path)
+        # Operational (env overrides JSON)
+        self.sync_interval_seconds = int(
+            os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
+        )
         self.radar_sync_interval_seconds = int(
             os.getenv(
                 "RADAR_SYNC_INTERVAL_SECONDS",
                 str(self.radar_sync_interval_seconds),
             )
         )
-
-        # Caching
+        self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode)
+        self.tile_ttl = int(os.getenv("TILE_TTL", str(self.tile_ttl)))
+        self.tileset_listing_ttl = int(
+            os.getenv("TILESET_LISTING_TTL", str(self.tileset_listing_ttl))
+        )
         self.cache_control_config = os.getenv(
             "CACHE_CONTROL_CONFIG", self.cache_control_config
         )

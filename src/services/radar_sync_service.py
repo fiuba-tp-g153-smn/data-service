@@ -19,8 +19,6 @@ from settings import Settings
 
 logger = logging.getLogger(__name__)
 
-RADAR_TTL = 3600  # 1 hour
-
 
 class RadarSyncService:
     """
@@ -176,7 +174,7 @@ class RadarSyncService:
                             variable_id,
                             elevation_id,
                             tileset_id,
-                            ttl=RADAR_TTL,
+                            ttl=self._settings.tile_ttl,
                         )
                         self._loaded_tilesets.add(ts_key)
                         radar_count += loaded
@@ -224,7 +222,7 @@ class RadarSyncService:
                     x,
                     y,
                     content,
-                    ttl=RADAR_TTL,
+                    ttl=self._settings.tile_ttl,
                 )
                 loaded += 1
             except Exception as e:

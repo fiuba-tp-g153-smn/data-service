@@ -1,13 +1,13 @@
 """Service for satellite products (GOES-19, ABI, etc.)."""
 
-from typing import Dict, List, Optional, Tuple
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
 from services.base_service import BaseProductService
-from clients.redis_client import RedisClient
+from services.satellite_sync_strategy import SatelliteSyncStrategy
 from dependencies import logger
 
 
@@ -73,13 +73,13 @@ class SatelliteService(BaseProductService):
 
     def __init__(self):
         """Initialize and register satellite products."""
-        self._redis_client: Optional[RedisClient] = None
+        self._strategy: Optional[SatelliteSyncStrategy] = None
         for product_id, config in self.SATELLITE_PRODUCTS.items():
             self.register_product(product_id, config)
 
-    def set_redis_client(self, redis_client: RedisClient) -> None:
-        """Set the Redis client (called during app startup)."""
-        self._redis_client = redis_client
+    def set_strategy(self, strategy: SatelliteSyncStrategy) -> None:
+        """Set the sync strategy (called during app startup)."""
+        self._strategy = strategy
 
     # ============== Product Level Methods ==============
 
@@ -229,14 +229,13 @@ class SatelliteService(BaseProductService):
     async def _get_tilesets_for_channel(
         self, product_id: str, instrument_id: str, channel_id: str
     ) -> List[dict]:
-        """Get list of available tilesets for a channel from Redis."""
-        dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
-
-        if not self._redis_client:
-            logger.warning("Redis client not available for tileset listing")
+        """Get list of available tilesets for a channel via the sync strategy."""
+        if not self._strategy:
+            logger.warning("No sync strategy configured for tileset listing")
             return []
 
-        tileset_ids = await self._redis_client.get_satellite_tilesets(dir_name)
+        dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
+        tileset_ids = await self._strategy.get_tilesets(dir_name)
 
         tilesets = [
             {
@@ -263,14 +262,12 @@ class SatelliteService(BaseProductService):
         x: int,
         y: int,
     ) -> Optional[bytes]:
-        """Get tile data from Redis."""
-        if not self._redis_client:
+        """Get tile data via the sync strategy."""
+        if not self._strategy:
             return None
 
         dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
-        return await self._redis_client.get_satellite_tile(
-            dir_name, tileset_id, z, x, y
-        )
+        return await self._strategy.get_tile(dir_name, tileset_id, z, x, y)
 
     def validate_zoom_level(
         self, product_id: str, instrument_id: str, channel_id: str, z: int
