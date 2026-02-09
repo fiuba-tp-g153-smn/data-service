@@ -41,6 +41,7 @@ class S3Client:
         secure: bool = False,
         max_concurrent_downloads: int = 20,
     ):
+        # pylint: disable=too-many-arguments
         self._endpoint = endpoint
         self._access_key = access_key
         self._secret_key = secret_key
@@ -62,6 +63,7 @@ class S3Client:
         tileset_id: str,
         tile_ttl: Optional[int] = None,
     ) -> int:
+        # pylint: disable=too-many-arguments
         """
         Download all tiles for a tileset from S3 and store directly in Redis.
 
@@ -93,8 +95,10 @@ class S3Client:
                 return 0
 
             logger.info(
-                f"Downloading {len(tile_objects)} tiles for "
-                f"{channel_dir}/{tileset_id}"
+                "Downloading %d tiles for %s/%s",
+                len(tile_objects),
+                channel_dir,
+                tileset_id,
             )
 
             tasks = [
@@ -122,6 +126,7 @@ class S3Client:
         tileset_id: str,
         tile_ttl: Optional[int] = None,
     ) -> bool:
+        # pylint: disable=too-many-arguments,too-many-locals
         """Download a single tile from S3 and store in Redis."""
         async with self._semaphore:
             try:
@@ -147,8 +152,8 @@ class S3Client:
                     ttl=tile_ttl,
                 )
                 return True
-            except Exception as e:
-                logger.error(f"Failed to download {s3_key} to Redis: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to download %s to Redis: %s", s3_key, e)
                 return False
 
     async def _list_objects(self, s3_client, prefix: str) -> List[dict]:
@@ -160,8 +165,8 @@ class S3Client:
                 for obj in page.get("Contents", []):
                     if not obj["Key"].endswith("/"):
                         objects.append(obj)
-        except Exception as e:
-            logger.error(f"Error listing objects: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error listing objects: %s", e)
         return objects
 
     @staticmethod
@@ -183,8 +188,8 @@ class S3Client:
                 response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
                 async with response["Body"] as stream:
                     return await stream.read()
-        except Exception as e:
-            logger.warning(f"Failed to download tile {s3_key}: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Failed to download tile %s: %s", s3_key, e)
             return None
 
     async def check_connection(self) -> bool:
@@ -198,8 +203,8 @@ class S3Client:
             ) as s3_client:
                 await s3_client.head_bucket(Bucket=self._bucket)
                 return True
-        except Exception as e:
-            logger.warning(f"S3 connection check failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("S3 connection check failed: %s", e)
             return False
 
     async def get_subdirectories(self, prefix: str) -> List[str]:
@@ -224,8 +229,8 @@ class S3Client:
                 ):
                     for common_prefix in page.get("CommonPrefixes", []):
                         subdirs.append(common_prefix["Prefix"])
-        except Exception as e:
-            logger.error(f"Error listing subdirectories for {prefix}: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error listing subdirectories for %s: %s", prefix, e)
 
         return subdirs
 
@@ -257,10 +262,10 @@ class S3Client:
                 if objects_to_delete:
                     await self._delete_objects_batch(s3_client, objects_to_delete)
 
-            logger.info(f"Deleted prefix: {prefix}")
+            logger.info("Deleted prefix: %s", prefix)
             return True
-        except Exception as e:
-            logger.error(f"Error deleting prefix {prefix}: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error deleting prefix %s: %s", prefix, e)
             return False
 
     async def _delete_objects_batch(self, s3_client, objects: List[dict]) -> None:

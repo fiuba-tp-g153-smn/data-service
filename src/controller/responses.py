@@ -1,3 +1,5 @@
+"""Common response models and utilities."""
+
 from typing import Any, Dict
 
 # General endpoints

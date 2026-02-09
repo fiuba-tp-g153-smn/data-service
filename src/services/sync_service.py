@@ -6,16 +6,16 @@ Runs as a background task during application lifetime.
 """
 
 import asyncio
-import logging
 import fcntl
+import logging
 import re
 import time
+from logging import Logger
 from typing import List, Optional
 
-from clients.s3_client import S3Client
 from clients.redis_client import RedisClient
+from clients.s3_client import S3Client
 from settings import Settings
-from logging import Logger
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class SyncService:
             secure=self._settings.s3_tiles_data_secure,
         )
 
-    async def start(self, logger: Logger) -> None:
+    async def start(self, app_logger: Logger) -> None:
         """Start the background sync task."""
         if self._running:
             logger.warning("Sync service is already running")
@@ -82,7 +82,9 @@ class SyncService:
 
         # Attempt to acquire lock
         try:
-            self._lock_file_handle = open(self._settings.sync_lock_path, "w")
+            self._lock_file_handle = open(
+                self._settings.sync_lock_path, "w", encoding="utf-8"
+            )
             fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except IOError:
             logger.info("Sync service disabled (another worker is active).")
@@ -93,12 +95,13 @@ class SyncService:
 
         self._running = True
         self._task = asyncio.create_task(self._sync_loop())
-        logger.info(
-            f"Sync service started (Lock acquired). Interval: {self._settings.sync_interval_seconds}s, "
-            f"Prefixes: {self._sync_prefixes}"
+        app_logger.info(
+            "Sync service started (Lock acquired). Interval: %ss, Prefixes: %s",
+            self._settings.sync_interval_seconds,
+            self._sync_prefixes,
         )
 
-    async def stop(self, logger: Logger) -> None:
+    async def stop(self, app_logger: Logger) -> None:
         """Stop the background sync task."""
         if not self._running:
             return
@@ -117,11 +120,11 @@ class SyncService:
             try:
                 fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
                 self._lock_file_handle.close()
-            except Exception as e:
-                logger.error(f"Error releasing lock: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                app_logger.error("Error releasing lock: %s", e)
             self._lock_file_handle = None
 
-        logger.info("Sync service stopped")
+        app_logger.info("Sync service stopped")
 
     async def _sync_loop(self) -> None:
         """Main sync loop with fixed-interval scheduling."""
@@ -142,8 +145,8 @@ class SyncService:
 
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in sync loop: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Error in sync loop: %s", e)
                 self._consecutive_failures += 1
 
             # Fixed-interval scheduling: sleep for remaining time
@@ -167,7 +170,9 @@ class SyncService:
         errors = 0
 
         for prefix in self._sync_prefixes:
-            channel_dir = self.PREFIX_TO_CHANNEL.get(prefix, prefix.split("/")[0])
+            channel_dir = self.PREFIX_TO_CHANNEL.get(
+                prefix, prefix.split("/", maxsplit=1)[0]
+            )
             try:
                 # 1. List S3 tileset prefixes
                 tileset_prefixes = await self._client.get_subdirectories(prefix)
@@ -207,8 +212,8 @@ class SyncService:
                         ttl=self._settings.tile_ttl,
                     )
 
-            except Exception as e:
-                logger.error(f"Failed to sync prefix '{prefix}': {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to sync prefix '%s': %s", prefix, e)
                 errors += 1
 
         self._total_cycles += 1
@@ -223,7 +228,9 @@ class SyncService:
         # Count total satellite tilesets across all channels
         sat_count = 0
         for prefix in self._sync_prefixes:
-            channel_dir = self.PREFIX_TO_CHANNEL.get(prefix, prefix.split("/")[0])
+            channel_dir = self.PREFIX_TO_CHANNEL.get(
+                prefix, prefix.split("/", maxsplit=1)[0]
+            )
             tilesets = await self._redis_client.get_satellite_tilesets(channel_dir)
             sat_count += len(tilesets)
 
@@ -242,11 +249,12 @@ class SyncService:
 
         if total_downloaded > 0:
             logger.info(
-                f"Sync cycle completed: {total_downloaded} tiles downloaded "
-                f"({duration_ms}ms)"
+                "Sync cycle completed: %d tiles downloaded (%dms)",
+                total_downloaded,
+                duration_ms,
             )
         else:
-            logger.info(f"Sync cycle completed: no new tiles ({duration_ms}ms)")
+            logger.info("Sync cycle completed: no new tiles (%dms)", duration_ms)
 
     @staticmethod
     def _extract_timestamp_score(tileset_id: str) -> float:

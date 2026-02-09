@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, patch
 from main import app
 from datetime import datetime, timezone
+from dependencies import settings
 
 client = TestClient(app)
 
@@ -25,10 +26,7 @@ def test_get_channel_config_headers():
         response = client.get("/products/goes-19/abi/ch-13")
 
         assert response.status_code == 200
-        assert (
-            response.headers["Cache-Control"]
-            == "public, max-age=60, stale-while-revalidate=300"
-        )
+        assert response.headers["Cache-Control"] == settings.cache_control_config
         assert response.headers["ETag"] == '"test-hash-123"'
         assert response.headers["Last-Modified"] == "Thu, 01 Jan 2026 12:00:00 GMT"
 
@@ -46,9 +44,7 @@ def test_get_tile_headers():
 
         assert response.status_code == 200
         assert "immutable" in response.headers["Cache-Control"]
-        assert (
-            response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-        )
+        assert response.headers["Cache-Control"] == settings.cache_control_tile
         assert response.headers["ETag"] == '"t1-5-1-1"'
 
 

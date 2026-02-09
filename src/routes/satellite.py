@@ -1,23 +1,19 @@
 """Satellite-specific endpoints (GOES-19, ABI, etc.)."""
 
-from fastapi import (
-    APIRouter,
-    HTTPException,
-    Request,
-    status,
-    Path as PathParam,
-    Response,
-)
-from fastapi.responses import JSONResponse
 from email.utils import format_datetime
 
+from fastapi import APIRouter, HTTPException
+from fastapi import Path as PathParam
+from fastapi import Request, Response, status
+from fastapi.responses import JSONResponse
+
 from dependencies import logger, settings
-from services.satellite_service import satellite_service
 from models.satellite import (
-    SatelliteProductResponse,
-    InstrumentResponse,
     ChannelTilesetsResponse,
+    InstrumentResponse,
+    SatelliteProductResponse,
 )
+from services.satellite_service import satellite_service
 
 router = APIRouter(prefix="/products", tags=["Satellite"])
 
@@ -48,7 +44,7 @@ async def get_satellite_product(
             detail=f"Satellite product '{product_id}' not found",
         )
 
-    logger.info(f"Getting satellite product details: {product_id}")
+    logger.info("Getting satellite product details: %s", product_id)
     return product
 
 
@@ -80,7 +76,7 @@ async def get_instrument(
             detail=f"Instrument '{instrument_id}' not found for product '{product_id}'",
         )
 
-    logger.info(f"Getting instrument details: {product_id}/{instrument_id}")
+    logger.info("Getting instrument details: %s/%s", product_id, instrument_id)
     return satellite_service.get_instrument(product_id, instrument_id)
 
 
@@ -117,7 +113,7 @@ async def list_channel_tilesets(
             detail=f"Channel '{channel_id}' not found for {product_id}/{instrument_id}",
         )
 
-    logger.info(f"Listing tilesets for: {product_id}/{instrument_id}/{channel_id}")
+    logger.info("Listing tilesets for: %s/%s/%s", product_id, instrument_id, channel_id)
     data = await satellite_service.get_channel_tilesets(
         product_id, instrument_id, channel_id
     )
@@ -166,6 +162,7 @@ async def get_satellite_tile(
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
 ):
+    # pylint: disable=too-many-arguments
     """
     Serve a specific tile for a satellite product/instrument/channel.
 
@@ -199,12 +196,12 @@ async def get_satellite_tile(
     )
 
     if not tile_data:
-        logger.warning(f"Satellite tile not found: {tileset_id}/{z}/{x}/{y}")
+        logger.warning("Satellite tile not found: %s/%s/%s/%s", tileset_id, z, x, y)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"
         )
 
-    logger.debug(f"Serving satellite tile: {tileset_id}/{z}/{x}/{y}")
+    logger.debug("Serving satellite tile: %s/%s/%s/%s", tileset_id, z, x, y)
 
     return Response(
         content=tile_data,

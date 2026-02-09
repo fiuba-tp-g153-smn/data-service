@@ -1,8 +1,10 @@
+"""Dependency injection module."""
+
 from logging import Logger
 
+from clients.redis_client import RedisClient
 from initializers import init_logger
 from settings import Settings
-from clients.redis_client import RedisClient
 
 settings: Settings = Settings.get_settings()
 logger: Logger = init_logger(settings)

@@ -45,10 +45,10 @@ class RadarSyncService:
         """Set the Redis client (called during app startup)."""
         self._redis_client = redis_client
 
-    async def start(self, logger: Logger) -> None:
+    async def start(self, app_logger: Logger) -> None:
         """Start the background radar sync task."""
         if self._running:
-            logger.warning("Radar sync service is already running")
+            app_logger.warning("Radar sync service is already running")
             return
 
         if not self._radar_path.exists():
@@ -59,10 +59,12 @@ class RadarSyncService:
 
         # Attempt to acquire lock
         try:
-            self._lock_file_handle = open(self._settings.radar_lock_path, "w")
+            self._lock_file_handle = open(
+                self._settings.radar_lock_path, "w", encoding="utf-8"
+            )
             fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except IOError:
-            logger.info("Radar sync service disabled (another worker is active).")
+            app_logger.info("Radar sync service disabled (another worker is active).")
             if self._lock_file_handle:
                 self._lock_file_handle.close()
                 self._lock_file_handle = None
@@ -70,13 +72,13 @@ class RadarSyncService:
 
         self._running = True
         self._task = asyncio.create_task(self._sync_loop())
-        logger.info(
-            f"Radar sync service started. Interval: "
-            f"{self._settings.radar_sync_interval_seconds}s, "
-            f"Path: {self._radar_path}"
+        app_logger.info(
+            "Radar sync service started. Interval: %ss, Path: %s",
+            self._settings.radar_sync_interval_seconds,
+            self._radar_path,
         )
 
-    async def stop(self, logger: Logger) -> None:
+    async def stop(self, app_logger: Logger) -> None:
         """Stop the background radar sync task."""
         if not self._running:
             return
@@ -95,11 +97,11 @@ class RadarSyncService:
             try:
                 fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
                 self._lock_file_handle.close()
-            except Exception as e:
-                logger.error(f"Error releasing radar lock: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                app_logger.error("Error releasing radar lock: %s", e)
             self._lock_file_handle = None
 
-        logger.info("Radar sync service stopped")
+        app_logger.info("Radar sync service stopped")
 
     async def _sync_loop(self) -> None:
         """Main sync loop with fixed-interval scheduling."""
@@ -109,8 +111,8 @@ class RadarSyncService:
                 await self._run_sync()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                logger.error(f"Error in radar sync loop: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Error in radar sync loop: %s", e)
 
             if self._running:
                 elapsed = time.monotonic() - cycle_start
@@ -121,6 +123,7 @@ class RadarSyncService:
                 await asyncio.sleep(sleep_time)
 
     async def _run_sync(self) -> None:
+        # pylint: disable=too-many-locals
         """Execute a single radar sync cycle."""
         if not self._redis_client:
             return
@@ -181,7 +184,7 @@ class RadarSyncService:
 
         # Update sync status with radar count
         if radar_count > 0:
-            logger.info(f"Radar sync: loaded {radar_count} new tiles")
+            logger.info("Radar sync: loaded %d new tiles", radar_count)
 
         # Update radar tilesets count in sync status
         await self._redis_client.update_sync_status(
@@ -225,8 +228,8 @@ class RadarSyncService:
                     ttl=self._settings.tile_ttl,
                 )
                 loaded += 1
-            except Exception as e:
-                logger.error(f"Failed to load radar tile {tile_file}: {e}")
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to load radar tile %s: %s", tile_file, e)
 
         return loaded
 

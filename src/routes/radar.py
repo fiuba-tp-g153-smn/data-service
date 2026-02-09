@@ -1,8 +1,9 @@
 """Radar-specific endpoints for the products API."""
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 from fastapi import Path as PathParam
-from fastapi import Response, status
+from fastapi import Request, Response, status
+
 from dependencies import logger, settings
 from services.radar_service import radar_service
 
@@ -32,7 +33,8 @@ async def list_radars():
 async def list_radar_variables(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1, RMA2)")
 ):
-    logger.info(f"API: Listing variables for radar: {radar_id}")
+    """List all variables for a given radar."""
+    logger.info("API: Listing variables for radar: %s", radar_id)
     return await radar_service.list_radar_variables(radar_id)
 
 
@@ -46,8 +48,9 @@ async def list_radar_elevations(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
 ):
+    """List all elevations for a given radar variable."""
     logger.info(
-        f"API: Listing elevations for radar: {radar_id}, variable: {variable_id}"
+        "API: Listing elevations for radar: %s, variable: %s", radar_id, variable_id
     )
     return await radar_service.list_radar_elevations(radar_id, variable_id)
 
@@ -65,8 +68,12 @@ async def list_radar_tilesets(
         ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
     ),
 ):
+    """List all tilesets for a radar variable and elevation."""
     logger.info(
-        f"API: Listing tilesets for radar: {radar_id}, variable: {variable_id}, elevation: {elevation_id}"
+        "API: Listing tilesets for radar: %s, variable: %s, elevation: %s",
+        radar_id,
+        variable_id,
+        elevation_id,
     )
     return await radar_service.list_radar_tilesets(radar_id, variable_id, elevation_id)
 
@@ -91,6 +98,8 @@ async def get_radar_tile(
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
 ):
+    # pylint: disable=too-many-arguments
+    """Get Radar Tile."""
     # ETag based on unique tile identifier
     etag = f'"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"'
 
@@ -104,11 +113,18 @@ async def get_radar_tile(
     )
     if not tile_data:
         logger.warning(
-            f"Radar tile not found: {radar_id}/{variable_id}/{elevation_id}/{tileset_id}/{z}/{x}/{y}"
+            "Radar tile not found: %s/%s/%s/%s/%s/%s/%s",
+            radar_id,
+            variable_id,
+            elevation_id,
+            tileset_id,
+            z,
+            x,
+            y,
         )
         raise HTTPException(status_code=404, detail="Tile not found")
 
-    logger.debug(f"Serving radar tile: {radar_id}/{tileset_id}/{z}/{x}/{y}")
+    logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 
     return Response(
         content=tile_data,

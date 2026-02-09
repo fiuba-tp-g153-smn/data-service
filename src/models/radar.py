@@ -1,8 +1,10 @@
 """Radar-specific models."""
 
-from typing import Dict, List, Optional
+from typing import Dict, List
+
 from pydantic import BaseModel
-from models.base import ZoomLevels, TilesetInfo
+
+from models.base import TilesetInfo, ZoomLevels
 
 
 class ElevationInfo(BaseModel):

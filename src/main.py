@@ -1,3 +1,5 @@
+"""Main entrypoint for the data-service application."""
+
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -29,15 +31,15 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 
 async def configure_strategies(
-    redis_client: RedisClient,
+    client_redis: RedisClient,
 ) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy]:
     """Configure and return sync strategies based on settings."""
     if settings.sync_mode == "full":
         # Background sync mode (default)
-        sat_strategy = SatelliteFullSyncStrategy(redis_client)
-        radar_strategy = RadarFullSyncStrategy(redis_client)
+        sat_strategy = SatelliteFullSyncStrategy(client_redis)
+        radar_strategy = RadarFullSyncStrategy(client_redis)
 
-        sync_service.set_redis_client(redis_client)
+        sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)
         await radar_sync_service.start(logger)
     else:
@@ -54,13 +56,13 @@ async def configure_strategies(
             )
 
         sat_strategy = SatelliteOnDemandStrategy(
-            redis_client,
+            client_redis,
             s3_client,
             settings.tile_ttl,
             settings.tileset_listing_ttl,
         )
         radar_strategy = RadarOnDemandStrategy(
-            redis_client,
+            client_redis,
             RadarService.OUTPUT_RADAR_PATH,
             settings.tile_ttl,
             settings.tileset_listing_ttl,
@@ -77,7 +79,7 @@ async def shutdown_services():
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
     # Startup
     logger.info("Starting data-service...")

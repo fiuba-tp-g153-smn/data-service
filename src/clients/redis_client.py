@@ -30,7 +30,7 @@ class RedisClient:
     async def connect(self) -> None:
         """Connect to Redis."""
         self._redis = aioredis.from_url(self._redis_url, decode_responses=False)
-        logger.info(f"Connected to Redis at {self._redis_url}")
+        logger.info("Connected to Redis at %s", self._redis_url)
 
     async def close(self) -> None:
         """Close the Redis connection."""
@@ -44,8 +44,8 @@ class RedisClient:
             if self._redis:
                 await self._redis.ping()
                 return True
-        except Exception as e:
-            logger.warning(f"Redis health check failed: {e}")
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning("Redis health check failed: %s", e)
         return False
 
     # ============== Satellite Tile Operations ==============
@@ -60,6 +60,7 @@ class RedisClient:
         data: bytes,
         ttl: Optional[int] = None,
     ) -> None:
+        # pylint: disable=too-many-arguments
         """Store a satellite tile in Redis, optionally with TTL."""
         key = f"tile:sat:{channel_dir}/{tileset_id}/{z}/{x}/{y}"
         if ttl:
@@ -131,6 +132,7 @@ class RedisClient:
         data: bytes,
         ttl: int = 3600,
     ) -> None:
+        # pylint: disable=too-many-arguments
         """Store a radar tile in Redis with TTL."""
         key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
         await self._redis.set(key, data, ex=ttl)
@@ -145,6 +147,7 @@ class RedisClient:
         x: int,
         y: int,
     ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments
         """Get a radar tile from Redis."""
         key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
         return await self._redis.get(key)

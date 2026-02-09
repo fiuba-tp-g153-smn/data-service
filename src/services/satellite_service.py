@@ -6,9 +6,9 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+from dependencies import logger
 from services.base_service import BaseProductService
 from services.satellite_sync_strategy import SatelliteSyncStrategy
-from dependencies import logger
 
 
 class SatelliteService(BaseProductService):
@@ -215,7 +215,10 @@ class SatelliteService(BaseProductService):
             product_id, instrument_id, channel_id
         )
 
-        tile_url_pattern = f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+        tile_url_pattern = (
+            f"/products/{product_id}/{instrument_id}/{channel_id}"
+            "/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+        )
 
         return {
             "product": product_id,
@@ -240,13 +243,17 @@ class SatelliteService(BaseProductService):
         tilesets = [
             {
                 "id": tileset_id,
-                "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/{{z}}/{{x}}/{{y}}.webp",
+                "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp",
             }
             for tileset_id in tileset_ids
         ]
 
         logger.info(
-            f"Found {len(tilesets)} tilesets for {product_id}/{instrument_id}/{channel_id}"
+            "Found %d tilesets for %s/%s/%s",
+            len(tilesets),
+            product_id,
+            instrument_id,
+            channel_id,
         )
         return tilesets
 
@@ -262,6 +269,7 @@ class SatelliteService(BaseProductService):
         x: int,
         y: int,
     ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,unused-argument
         """Get tile data via the sync strategy."""
         if not self._strategy:
             return None
@@ -281,7 +289,8 @@ class SatelliteService(BaseProductService):
         if z < zoom_levels["min"] or z > zoom_levels["max"]:
             return (
                 False,
-                f"Zoom level {z} not available. Valid range: {zoom_levels['min']}-{zoom_levels['max']}",
+                f"Zoom level {z} not available. "
+                f"Valid range: {zoom_levels['min']}-{zoom_levels['max']}",
             )
 
         return True, ""

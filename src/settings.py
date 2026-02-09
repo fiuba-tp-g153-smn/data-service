@@ -1,3 +1,5 @@
+"""Configuration settings for the application."""
+
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ load_dotenv()
 
 
 class Settings:
+    # pylint: disable=too-many-instance-attributes
     """
     Application settings management.
 
@@ -27,13 +30,13 @@ class Settings:
     redis_url: str = ""
 
     # --- JSON + env override: operational tuning ---
-    sync_mode: str = ""
-    tile_ttl: int
-    tileset_listing_ttl: int
-    sync_interval_seconds: int
-    radar_sync_interval_seconds: int
-    cache_control_config: str = ""
-    cache_control_tile: str = ""
+    sync_mode: str = "full"
+    tile_ttl: int = 21600
+    tileset_listing_ttl: int = 30
+    sync_interval_seconds: int = 60
+    radar_sync_interval_seconds: int = 30
+    cache_control_config: str = "public, max-age=60, stale-while-revalidate=120"
+    cache_control_tile: str = "public, max-age=43200, immutable"
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -52,7 +55,7 @@ class Settings:
         json_keys = {
             "sync_mode",
             "tile_ttl",
-            "listing_ttl",
+            "tileset_listing_ttl",
             "sync_interval_seconds",
             "radar_sync_interval_seconds",
             "cache_control_config",

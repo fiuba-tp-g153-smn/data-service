@@ -1,3 +1,5 @@
+"""General controller endpoints."""
+
 from fastapi import APIRouter, status
 
 from controller.responses import HEALTH_RESPONSES, ROOT_RESPONSES
