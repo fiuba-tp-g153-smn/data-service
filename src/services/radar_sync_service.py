@@ -7,20 +7,19 @@ access from the request path.
 """
 
 import asyncio
-import fcntl
 import logging
-import time
 from logging import Logger
 from pathlib import Path
 from typing import Optional, Set
 
 from clients.redis_client import RedisClient
+from services.base_sync_service import BaseSyncService
 from settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-class RadarSyncService:
+class RadarSyncService(BaseSyncService):
     """
     Background service that preloads radar tiles from the filesystem into Redis.
 
@@ -33,94 +32,41 @@ class RadarSyncService:
         settings: Optional[Settings] = None,
         radar_path: Optional[Path] = None,
     ):
-        self._settings = settings or Settings.get_settings()
+        resolved_settings = settings or Settings.get_settings()
         self._radar_path = radar_path or Path.cwd().parent / "output_radar"
+        super().__init__(
+            settings=resolved_settings,
+            sync_interval=resolved_settings.radar_sync_interval_seconds,
+            service_name="Radar sync service",
+        )
         self._redis_client: Optional[RedisClient] = None
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
-        self._lock_file_handle = None
         self._loaded_tilesets: Set[str] = set()
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
         """Set the Redis client (called during app startup)."""
         self._redis_client = redis_client
 
-    async def start(self, app_logger: Logger) -> None:
-        """Start the background radar sync task."""
-        if self._running:
-            app_logger.warning("Radar sync service is already running")
-            return
+    def _get_lock_path(self) -> str:
+        """Return the radar sync lock file path."""
+        return self._settings.radar_lock_path
 
+    def _pre_start_check(self, app_logger: Logger) -> bool:
+        """Check that the radar output directory exists before starting."""
         if not self._radar_path.exists():
             logger.info(
-                f"Radar path {self._radar_path} does not exist. " "Radar sync disabled."
+                "Radar path %s does not exist. Radar sync disabled.",
+                self._radar_path,
             )
-            return
+            return False
+        return True
 
-        # Attempt to acquire lock
-        try:
-            self._lock_file_handle = open(
-                self._settings.radar_lock_path, "w", encoding="utf-8"
-            )
-            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            app_logger.info("Radar sync service disabled (another worker is active).")
-            if self._lock_file_handle:
-                self._lock_file_handle.close()
-                self._lock_file_handle = None
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._sync_loop())
+    def _log_started(self, app_logger: Logger) -> None:
+        """Log radar-specific start message."""
         app_logger.info(
             "Radar sync service started. Interval: %ss, Path: %s",
-            self._settings.radar_sync_interval_seconds,
+            self._sync_interval,
             self._radar_path,
         )
-
-    async def stop(self, app_logger: Logger) -> None:
-        """Stop the background radar sync task."""
-        if not self._running:
-            return
-
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-        # Release lock
-        if self._lock_file_handle:
-            try:
-                fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
-                self._lock_file_handle.close()
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                app_logger.error("Error releasing radar lock: %s", e)
-            self._lock_file_handle = None
-
-        app_logger.info("Radar sync service stopped")
-
-    async def _sync_loop(self) -> None:
-        """Main sync loop with fixed-interval scheduling."""
-        while self._running:
-            cycle_start = time.monotonic()
-            try:
-                await self._run_sync()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Error in radar sync loop: %s", e)
-
-            if self._running:
-                elapsed = time.monotonic() - cycle_start
-                sleep_time = max(
-                    0,
-                    self._settings.radar_sync_interval_seconds - elapsed,
-                )
-                await asyncio.sleep(sleep_time)
 
     async def _run_sync(self) -> None:
         # pylint: disable=too-many-locals
@@ -191,7 +137,7 @@ class RadarSyncService:
             {"radar_tilesets_count": str(len(self._loaded_tilesets))}
         )
 
-    async def _load_tileset(
+    async def _load_tileset(  # pylint: disable=too-many-positional-arguments
         self,
         tiles_dir: Path,
         radar_id: str,

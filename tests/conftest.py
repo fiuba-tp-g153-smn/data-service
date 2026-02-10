@@ -1,5 +1,8 @@
-import pytest
+"""Shared test fixtures for the data-service test suite."""
+
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 
 @pytest.fixture

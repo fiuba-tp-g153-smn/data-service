@@ -243,7 +243,10 @@ class SatelliteService(BaseProductService):
         tilesets = [
             {
                 "id": tileset_id,
-                "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp",
+                "url_pattern": (
+                    f"/products/{product_id}/{instrument_id}/{channel_id}"
+                    "/{tileset_id}/{z}/{x}/{y}.webp"
+                ),
             }
             for tileset_id in tileset_ids
         ]
@@ -259,7 +262,7 @@ class SatelliteService(BaseProductService):
 
     # ============== Tile Serving Methods ==============
 
-    async def get_tile_data(
+    async def get_tile_data(  # pylint: disable=too-many-positional-arguments
         self,
         product_id: str,
         instrument_id: str,

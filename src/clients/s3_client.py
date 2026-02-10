@@ -16,7 +16,7 @@ from clients.redis_client import RedisClient
 logger = logging.getLogger(__name__)
 
 
-class S3Client:
+class S3Client:  # pylint: disable=too-many-positional-arguments
     """
     Async S3 client for tile downloads.
 

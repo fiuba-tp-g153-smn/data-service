@@ -8,6 +8,7 @@ from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
+from routes.utils import create_tile_response
 from models.satellite import (
     ChannelTilesetsResponse,
     InstrumentResponse,
@@ -162,7 +163,7 @@ async def get_satellite_tile(
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
 ):
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
     """
     Serve a specific tile for a satellite product/instrument/channel.
 
@@ -203,12 +204,4 @@ async def get_satellite_tile(
 
     logger.debug("Serving satellite tile: %s/%s/%s/%s", tileset_id, z, x, y)
 
-    return Response(
-        content=tile_data,
-        media_type="image/webp",
-        headers={
-            "Cache-Control": settings.cache_control_tile,
-            "ETag": etag,
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
+    return create_tile_response(tile_data, etag, settings.cache_control_tile)

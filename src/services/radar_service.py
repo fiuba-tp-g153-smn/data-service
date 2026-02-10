@@ -80,7 +80,7 @@ class RadarService(BaseProductService):
     async def get_tile_data(
         self, radar_id, variable_id, elevation_id, tileset_id, z, x, y
     ) -> Optional[bytes]:
-        # pylint: disable=too-many-arguments
+        # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
         """Get radar tile data via the sync strategy."""
         if not self._strategy:
             return None

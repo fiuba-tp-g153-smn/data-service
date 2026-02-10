@@ -14,7 +14,7 @@ import redis.asyncio as aioredis
 logger = logging.getLogger(__name__)
 
 
-class RedisClient:
+class RedisClient:  # pylint: disable=too-many-positional-arguments
     """
     Async Redis client for tile storage and sync metadata.
 

@@ -37,6 +37,10 @@ class Settings:
     radar_sync_interval_seconds: int = 30
     cache_control_config: str = "public, max-age=60, stale-while-revalidate=120"
     cache_control_tile: str = "public, max-age=43200, immutable"
+    # File locks used by sync services so that only one uvicorn worker
+    # runs the background sync task (fcntl exclusive lock).
+    sync_lock_path: str = "/tmp/sync.lock"
+    radar_lock_path: str = "/tmp/radar_sync.lock"
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -66,6 +70,12 @@ class Settings:
             if key in data:
                 setattr(self, key, data[key])
 
+    @staticmethod
+    def _env_int(key: str, default: int) -> int:
+        """Read an env var as int, falling back to default if unset or empty."""
+        value = os.getenv(key, "")
+        return int(value) if value else default
+
     def _load_from_env(self) -> None:
         """Load from environment variables (overrides JSON values)."""
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
@@ -92,19 +102,16 @@ class Settings:
         self.redis_url = os.getenv("REDIS_URL", self.redis_url)
 
         # Operational (env overrides JSON)
-        self.sync_interval_seconds = int(
-            os.getenv("SYNC_INTERVAL_SECONDS", str(self.sync_interval_seconds))
+        self.sync_interval_seconds = self._env_int(
+            "SYNC_INTERVAL_SECONDS", self.sync_interval_seconds
         )
-        self.radar_sync_interval_seconds = int(
-            os.getenv(
-                "RADAR_SYNC_INTERVAL_SECONDS",
-                str(self.radar_sync_interval_seconds),
-            )
+        self.radar_sync_interval_seconds = self._env_int(
+            "RADAR_SYNC_INTERVAL_SECONDS", self.radar_sync_interval_seconds
         )
-        self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode)
-        self.tile_ttl = int(os.getenv("TILE_TTL", str(self.tile_ttl)))
-        self.tileset_listing_ttl = int(
-            os.getenv("TILESET_LISTING_TTL", str(self.tileset_listing_ttl))
+        self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
+        self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
+        self.tileset_listing_ttl = self._env_int(
+            "TILESET_LISTING_TTL", self.tileset_listing_ttl
         )
         self.cache_control_config = os.getenv(
             "CACHE_CONTROL_CONFIG", self.cache_control_config

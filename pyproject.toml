@@ -46,6 +46,11 @@ addopts = "--disable-socket --allow-hosts=127.0.0.1"
 [tool.pylint.main]
 init-hook = "import sys; sys.path.insert(0, 'src')"
 
+[tool.pylint.similarities]
+min-similarity-lines = 8
+
 [tool.pylint.design]
 max-attributes = 10
 max-args = 10
+max-positional-arguments = 8
+max-locals = 20

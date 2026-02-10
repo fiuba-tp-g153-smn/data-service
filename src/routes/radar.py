@@ -5,6 +5,7 @@ from fastapi import Path as PathParam
 from fastapi import Request, Response, status
 
 from dependencies import logger, settings
+from routes.utils import create_tile_response
 from services.radar_service import radar_service
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
@@ -98,7 +99,7 @@ async def get_radar_tile(
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
 ):
-    # pylint: disable=too-many-arguments
+    # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
     """Get Radar Tile."""
     # ETag based on unique tile identifier
     etag = f'"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"'
@@ -126,12 +127,4 @@ async def get_radar_tile(
 
     logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 
-    return Response(
-        content=tile_data,
-        media_type="image/webp",
-        headers={
-            "Cache-Control": settings.cache_control_tile,
-            "ETag": etag,
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
+    return create_tile_response(tile_data, etag, settings.cache_control_tile)

@@ -5,8 +5,6 @@ Periodically syncs tile data from MinIO S3 bucket directly to Redis.
 Runs as a background task during application lifetime.
 """
 
-import asyncio
-import fcntl
 import logging
 import re
 import time
@@ -15,12 +13,13 @@ from typing import List, Optional
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
+from services.base_sync_service import BaseSyncService
 from settings import Settings
 
 logger = logging.getLogger(__name__)
 
 
-class SyncService:
+class SyncService(BaseSyncService):
     """
     Background service that syncs tiles from S3 to Redis.
 
@@ -50,19 +49,25 @@ class SyncService:
         settings: Optional[Settings] = None,
         sync_prefixes: Optional[List[str]] = None,
     ):
-        self._settings = settings or Settings.get_settings()
+        resolved_settings = settings or Settings.get_settings()
         self._sync_prefixes = sync_prefixes or self.DEFAULT_SYNC_PREFIXES
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
+        super().__init__(
+            settings=resolved_settings,
+            sync_interval=resolved_settings.sync_interval_seconds,
+            service_name="Sync service",
+        )
         self._client: Optional[S3Client] = None
         self._redis_client: Optional[RedisClient] = None
-        self._lock_file_handle = None
         self._consecutive_failures = 0
         self._total_cycles = 0
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
         """Set the Redis client (called during app startup)."""
         self._redis_client = redis_client
+
+    def _get_lock_path(self) -> str:
+        """Return the S3 sync lock file path."""
+        return self._settings.sync_lock_path
 
     def _create_client(self) -> S3Client:
         """Create S3 client from settings."""
@@ -74,90 +79,35 @@ class SyncService:
             secure=self._settings.s3_tiles_data_secure,
         )
 
-    async def start(self, app_logger: Logger) -> None:
-        """Start the background sync task."""
-        if self._running:
-            logger.warning("Sync service is already running")
-            return
-
-        # Attempt to acquire lock
-        try:
-            self._lock_file_handle = open(
-                self._settings.sync_lock_path, "w", encoding="utf-8"
-            )
-            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            logger.info("Sync service disabled (another worker is active).")
-            if self._lock_file_handle:
-                self._lock_file_handle.close()
-                self._lock_file_handle = None
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._sync_loop())
+    def _log_started(self, app_logger: Logger) -> None:
+        """Log S3 sync-specific start message."""
         app_logger.info(
             "Sync service started (Lock acquired). Interval: %ss, Prefixes: %s",
-            self._settings.sync_interval_seconds,
+            self._sync_interval,
             self._sync_prefixes,
         )
 
-    async def stop(self, app_logger: Logger) -> None:
-        """Stop the background sync task."""
-        if not self._running:
-            return
-
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-        # Release lock
-        if self._lock_file_handle:
-            try:
-                fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
-                self._lock_file_handle.close()
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                app_logger.error("Error releasing lock: %s", e)
-            self._lock_file_handle = None
-
-        app_logger.info("Sync service stopped")
-
-    async def _sync_loop(self) -> None:
-        """Main sync loop with fixed-interval scheduling."""
-        while self._running:
-            cycle_start = time.monotonic()
-            try:
-                if not self._settings.is_s3_configured():
-                    logger.warning(
-                        "S3 not configured. "
-                        "Set S3_TILES_DATA_ENDPOINT, S3_TILES_DATA_ACCESS_KEY, and S3_TILES_DATA_SECRET_KEY. "
-                        "Retrying in next cycle..."
-                    )
-                else:
-                    if not self._client:
-                        self._client = self._create_client()
-
-                    await self._run_sync()
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Error in sync loop: %s", e)
-                self._consecutive_failures += 1
-
-            # Fixed-interval scheduling: sleep for remaining time
-            if self._running:
-                elapsed = time.monotonic() - cycle_start
-                sleep_time = max(0, self._settings.sync_interval_seconds - elapsed)
-                await asyncio.sleep(sleep_time)
+    def _on_sync_error(self, error: Exception) -> None:
+        """Track consecutive failures for sync status reporting."""
+        self._consecutive_failures += 1
 
     async def _run_sync(self) -> None:
+        # pylint: disable=too-many-locals
         """Execute a single sync cycle for all prefixes."""
-        if not self._client or not self._redis_client:
+        if not self._settings.is_s3_configured():
+            logger.warning(
+                "S3 not configured. "
+                "Set S3_TILES_DATA_ENDPOINT, "
+                "S3_TILES_DATA_ACCESS_KEY, "
+                "and S3_TILES_DATA_SECRET_KEY. "
+                "Retrying in next cycle..."
+            )
+            return
+
+        if not self._client:
+            self._client = self._create_client()
+
+        if not self._redis_client:
             return
 
         sync_start = time.time()
