@@ -1,7 +1,7 @@
 # Makefile for managing the Data Service application
 
 # Declare phony targets to avoid conflicts with files of the same name
-.PHONY: up prod dev test local
+.PHONY: up prod dev test local down
 
 install:
 	pip install poetry
@@ -23,3 +23,11 @@ test:
 # - Mounts ./reports to /app/reports to persist test reports and coverage HTML.
 # - Port 8080 is exposed but primarily used for any test server needs; reports are generated in ./reports.
 	docker build . -f Dockerfile.run_test -t data-service && docker run -p 8080:8080 -v ./reports/:/app/reports data-service
+
+down:
+	docker compose down
+	docker compose -f docker-compose-dev.yaml down --remove-orphans
+
+clean:
+	docker volume rm data-service_redis_data || true
+	docker volume rm data-service_redis_dev_data

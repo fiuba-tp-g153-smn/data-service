@@ -16,12 +16,14 @@ services:
   redis:
     container_name: data-service-redis-dev
     image: redis:8.4-alpine
-    command: redis-server --maxmemory 4gb --maxmemory-policy noeviction --save "" --appendonly no
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru --save 300 1 --appendonly no
     restart: unless-stopped
     ports:
       - "6379:6379"
     expose:
       - 6379
+    volumes:
+      - redis_dev_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -61,8 +63,6 @@ services:
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY}
       - REDIS_URL=${REDIS_URL}
-      - KEEP_COUNT=${KEEP_COUNT}
-      - RADAR_SYNC_INTERVAL_SECONDS=${RADAR_SYNC_INTERVAL_SECONDS}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -70,3 +70,6 @@ services:
       retries: 3
       start_period: 15s
       start_interval: 1s
+
+volumes:
+  redis_dev_data:
