@@ -1,39 +1,33 @@
 """
 Background Sync Service.
 
-Periodically syncs tile data from MinIO S3 bucket to local storage.
+Periodically syncs tile data from MinIO S3 bucket directly to Redis.
 Runs as a background task during application lifetime.
 """
 
-import asyncio
 import logging
-import fcntl
-import os
-from pathlib import Path
+import re
+import time
+from logging import Logger
 from typing import List, Optional
 
+from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
+from services.base_sync_service import BaseSyncService
 from settings import Settings
-from logging import Logger
 
 logger = logging.getLogger(__name__)
 
 
-class SyncService:
+class SyncService(BaseSyncService):
     """
-    Background service that syncs tiles from S3 to local storage.
+    Background service that syncs tiles from S3 to Redis.
 
-    Runs periodically (default: every 60 seconds) to ensure local tile
-    storage stays in sync with the S3 bucket populated by tiles-processor.
-
-    Attributes:
-        _settings: Application settings with S3 configuration
-        _client: S3 client
-
-        _sync_prefixes: List of S3 prefixes to sync
-        _local_base_path: Local base directory for synced files
-        _task: Background asyncio task
-        _running: Flag indicating if sync is active
+    Runs periodically to ensure Redis tile store stays in sync
+    with the S3 bucket populated by tiles-processor.
+    Uses Redis tileset index for incremental sync (only downloads
+    new tilesets not already in Redis). Tiles are stored with a TTL
+    so eviction is handled by Redis expiration.
     """
 
     # Prefixes to sync from S3 (matches tiles-processor output structure)
@@ -43,22 +37,37 @@ class SyncService:
         "band_2/tiles",
     ]
 
+    # Maps S3 prefix to channel_dir for Redis key construction
+    PREFIX_TO_CHANNEL = {
+        "band_13/tiles": "band_13",
+        "band_9/tiles": "band_9",
+        "band_2/tiles": "band_2",
+    }
+
     def __init__(
         self,
         settings: Optional[Settings] = None,
-        local_base_path: Optional[Path] = None,
         sync_prefixes: Optional[List[str]] = None,
     ):
-        self._settings = settings or Settings.get_settings()
-        self._local_base_path = local_base_path or Path.cwd() / "data/tmp"
+        resolved_settings = settings or Settings.get_settings()
         self._sync_prefixes = sync_prefixes or self.DEFAULT_SYNC_PREFIXES
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
+        super().__init__(
+            settings=resolved_settings,
+            sync_interval=resolved_settings.sync_interval_seconds,
+            service_name="Sync service",
+        )
         self._client: Optional[S3Client] = None
+        self._redis_client: Optional[RedisClient] = None
+        self._consecutive_failures = 0
+        self._total_cycles = 0
 
-        # Lock file mechanism to ensure only one worker syncs
-        self._lock_file_path = "/tmp/data-service-sync.lock"
-        self._lock_file_handle = None
+    def set_redis_client(self, redis_client: RedisClient) -> None:
+        """Set the Redis client (called during app startup)."""
+        self._redis_client = redis_client
+
+    def _get_lock_path(self) -> str:
+        """Return the S3 sync lock file path."""
+        return self._settings.sync_lock_path
 
     def _create_client(self) -> S3Client:
         """Create S3 client from settings."""
@@ -70,152 +79,142 @@ class SyncService:
             secure=self._settings.s3_tiles_data_secure,
         )
 
-    async def start(self, logger: Logger) -> None:
-        """Start the background sync task."""
-        if self._running:
-            logger.warning("Sync service is already running")
-            return
-
-        # Attempt to acquire lock
-        try:
-            self._lock_file_handle = open(self._lock_file_path, "w")
-            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            # Lock is held by another process
-            logger.info("Sync service disabled (another worker is active).")
-            if self._lock_file_handle:
-                self._lock_file_handle.close()
-                self._lock_file_handle = None
-            return
-
-        self._running = True
-        self._task = asyncio.create_task(self._sync_loop())
-        logger.info(
-            f"Sync service started (Lock acquired). Interval: {self._settings.sync_interval_seconds}s, "
-            f"Prefixes: {self._sync_prefixes}"
+    def _log_started(self, app_logger: Logger) -> None:
+        """Log S3 sync-specific start message."""
+        app_logger.info(
+            "Sync service started (Lock acquired). Interval: %ss, Prefixes: %s",
+            self._sync_interval,
+            self._sync_prefixes,
         )
 
-    async def stop(self, logger: Logger) -> None:
-        """Stop the background sync task."""
-        if not self._running:
-            return
-
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
-
-        # Release lock
-        if self._lock_file_handle:
-            try:
-                fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
-                self._lock_file_handle.close()
-            except Exception as e:
-                logger.error(f"Error releasing lock: {e}")
-            self._lock_file_handle = None
-
-        logger.info("Sync service stopped")
-
-    async def _sync_loop(self) -> None:
-        """Main sync loop that runs periodically."""
-        while self._running:
-            try:
-                if not self._settings.is_s3_configured():
-                    logger.warning(
-                        "S3 not configured. "
-                        "Set S3_TILES_DATA_ENDPOINT, S3_TILES_DATA_ACCESS_KEY, and S3_TILES_DATA_SECRET_KEY. "
-                        "Retrying in next cycle..."
-                    )
-                else:
-                    if not self._client:
-                        self._client = self._create_client()
-
-                    # Execute sync cycle
-                    await self._run_sync()
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in sync loop: {e}")
-
-            # Wait for next interval
-            if self._running:
-                await asyncio.sleep(self._settings.sync_interval_seconds)
+    def _on_sync_error(self, error: Exception) -> None:
+        """Track consecutive failures for sync status reporting."""
+        self._consecutive_failures += 1
 
     async def _run_sync(self) -> None:
+        # pylint: disable=too-many-locals
         """Execute a single sync cycle for all prefixes."""
-        if not self._client:
+        if not self._settings.is_s3_configured():
+            logger.warning(
+                "S3 not configured. "
+                "Set S3_TILES_DATA_ENDPOINT, "
+                "S3_TILES_DATA_ACCESS_KEY, "
+                "and S3_TILES_DATA_SECRET_KEY. "
+                "Retrying in next cycle..."
+            )
             return
+
+        if not self._client:
+            self._client = self._create_client()
+
+        if not self._redis_client:
+            return
+
+        sync_start = time.time()
+        await self._redis_client.update_sync_status(
+            {"is_running": "true", "last_sync_start": str(sync_start)}
+        )
 
         logger.info("Starting sync cycle...")
         total_downloaded = 0
+        errors = 0
 
         for prefix in self._sync_prefixes:
+            channel_dir = self.PREFIX_TO_CHANNEL.get(
+                prefix, prefix.split("/", maxsplit=1)[0]
+            )
             try:
-                # 1. Enforce retention policy before sync
-                await self._enforce_retention_policy(prefix)
+                # 1. List S3 tileset prefixes
+                tileset_prefixes = await self._client.get_subdirectories(prefix)
+                tileset_prefixes.sort()
 
-                # 2. Map S3 prefix to local directory
-                # e.g., "band_13/tiles" -> local_base_path/band_13/tiles
-                local_dir = self._local_base_path / prefix
-
-                downloaded = await self._client.sync_prefix(
-                    s3_prefix=prefix,
-                    local_dir=local_dir,
-                    delete_orphans=True,
+                # 2. Get tilesets already in Redis
+                existing_tilesets = set(
+                    await self._redis_client.get_satellite_tilesets(channel_dir)
                 )
-                total_downloaded += downloaded
-            except Exception as e:
-                logger.error(f"Failed to sync prefix '{prefix}': {e}")
+
+                # 3. Download only new tilesets (with TTL for automatic eviction)
+                for s3_tileset_prefix in tileset_prefixes:
+                    # Extract tileset_id from prefix: "band_13/tiles/OR_ABI-.../"
+                    tileset_dir = s3_tileset_prefix.rstrip("/").split("/")[-1]
+                    # Remove "_tiles" suffix if present
+                    tileset_id = tileset_dir.replace("_tiles", "")
+
+                    if tileset_id in existing_tilesets:
+                        continue
+
+                    # Download and store in Redis with TTL
+                    downloaded = await self._client.sync_prefix_to_redis(
+                        self._redis_client,
+                        s3_tileset_prefix,
+                        channel_dir,
+                        tileset_id,
+                        tile_ttl=self._settings.tile_ttl,
+                    )
+                    total_downloaded += downloaded
+
+                    # Add to tileset index with timestamp score and TTL
+                    score = self._extract_timestamp_score(tileset_id)
+                    await self._redis_client.add_satellite_tileset(
+                        channel_dir,
+                        tileset_id,
+                        score,
+                        ttl=self._settings.tile_ttl,
+                    )
+
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to sync prefix '%s': %s", prefix, e)
+                errors += 1
+
+        self._total_cycles += 1
+        if errors == 0:
+            self._consecutive_failures = 0
+        else:
+            self._consecutive_failures += 1
+
+        sync_end = time.time()
+        duration_ms = int((sync_end - sync_start) * 1000)
+
+        # Count total satellite tilesets across all channels
+        sat_count = 0
+        for prefix in self._sync_prefixes:
+            channel_dir = self.PREFIX_TO_CHANNEL.get(
+                prefix, prefix.split("/", maxsplit=1)[0]
+            )
+            tilesets = await self._redis_client.get_satellite_tilesets(channel_dir)
+            sat_count += len(tilesets)
+
+        await self._redis_client.update_sync_status(
+            {
+                "is_running": "false",
+                "last_sync_end": str(sync_end),
+                "last_sync_duration_ms": str(duration_ms),
+                "last_sync_downloaded": str(total_downloaded),
+                "last_sync_errors": str(errors),
+                "consecutive_failures": str(self._consecutive_failures),
+                "total_cycles": str(self._total_cycles),
+                "satellite_tilesets_count": str(sat_count),
+            }
+        )
 
         if total_downloaded > 0:
-            logger.info(f"Sync cycle completed: {total_downloaded} files downloaded")
+            logger.info(
+                "Sync cycle completed: %d tiles downloaded (%dms)",
+                total_downloaded,
+                duration_ms,
+            )
         else:
-            logger.info("Sync cycle completed: no new files")
+            logger.info("Sync cycle completed: no new tiles (%dms)", duration_ms)
 
-    async def _enforce_retention_policy(self, band_prefix: str) -> None:
-        """
-        Enforce retention policy: keep only the latest 26 tilesets (prefixes).
-        Oldest prefixes are deleted from S3.
-        """
-        if not self._client:
-            return
-
-        KEEP_COUNT = 26
-
-        try:
-            # 1. List tileset prefixes (subdirectories)
-            # keys look like: band_13/tiles/OR_ABI-L1b-RadF-M6C13_G19_s20250141230210.../
-            tileset_prefixes = await self._client.get_subdirectories(band_prefix)
-
-            # 2. Sort lexicographically (effectively chronological due to filename format: sYYYYJJJHHMMSSS)
-            tileset_prefixes.sort()
-
-            # 3. Check threshold
-            if len(tileset_prefixes) <= KEEP_COUNT:
-                return
-
-            # 4. Prune excess
-            # We want to keep the last KEEP_COUNT items.
-            # Delete items from index 0 to (len - KEEP_COUNT)
-            prefixes_to_delete = tileset_prefixes[:-KEEP_COUNT]
-
-            if prefixes_to_delete:
-                logger.info(
-                    f"Retention policy triggered for {band_prefix}. "
-                    f"Found {len(tileset_prefixes)} tilesets, limit is {KEEP_COUNT}. "
-                    f"Deleting {len(prefixes_to_delete)} old tilesets."
-                )
-
-                for prefix_to_delete in prefixes_to_delete:
-                    await self._client.delete_prefix(prefix_to_delete)
-
-        except Exception as e:
-            logger.error(f"Error enforcing retention policy for {band_prefix}: {e}")
+    @staticmethod
+    def _extract_timestamp_score(tileset_id: str) -> float:
+        """Extract a numeric timestamp score from a tileset ID for sorted set ordering."""
+        # Format: OR_ABI-L1b-RadF-M6C13_G19_s20250141230210...
+        match = re.search(r"_s(\d{14})", tileset_id)
+        if match:
+            return float(match.group(1))
+        # Fallback: use current time
+        return time.time()
 
 
 # Singleton instance for use across the application

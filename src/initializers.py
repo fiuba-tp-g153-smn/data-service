@@ -1,3 +1,5 @@
+"""Application initializers."""
+
 import logging
 from logging import Logger
 
@@ -10,6 +12,7 @@ APP_ENV_DEVELOPMENT: str = "development"
 
 
 def init_logger(settings: Settings) -> Logger:
+    """Initialize the application logger."""
     handler = logging.StreamHandler()
     if settings.app_env == APP_ENV_DEVELOPMENT:
         formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")

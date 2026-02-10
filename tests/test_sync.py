@@ -1,68 +1,68 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
-from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 from clients.s3_client import S3Client
 
 
 @pytest.mark.asyncio
-async def test_sync_prefix_filtering():
-    """Verify that sync_prefix filters files by extension."""
+async def test_sync_prefix_to_redis(mock_redis_client):
+    """Verify that sync_prefix_to_redis downloads tiles and stores them in Redis."""
     client = S3Client("endpoint", "access", "secret", "bucket")
 
-    # Mock internal methods
+    # Mock S3 listing
     client._list_objects = AsyncMock(
         return_value=[
-            {"Key": "path/tile.webp", "Size": 100},
-            {"Key": "path/metadata.json", "Size": 200},
-            {"Key": "path/other.txt", "Size": 50},
+            {"Key": "band_13/tiles/tileset1_tiles/5/10/15.webp", "Size": 100},
+            {"Key": "band_13/tiles/tileset1_tiles/5/10/16.webp", "Size": 200},
+            {"Key": "band_13/tiles/tileset1_tiles/metadata.json", "Size": 50},
         ]
     )
-    client._get_local_files = MagicMock(return_value={})
-    client._download_file_with_limit = AsyncMock(return_value=True)
-    client._delete_orphans = MagicMock(return_value=0)
 
-    # Mock session and s3 client context manager
-    mock_s3 = AsyncMock()
+    # Mock S3 get_object
+    mock_body = AsyncMock()
+    mock_body.read = AsyncMock(return_value=b"fake-tile-data")
+    mock_s3_client = AsyncMock()
+    mock_s3_client.get_object = AsyncMock(return_value={"Body": mock_body})
+
+    # Mock session context manager
     client._session.client = MagicMock()
-    client._session.client.return_value.__aenter__.return_value = mock_s3
+    client._session.client.return_value.__aenter__ = AsyncMock(
+        return_value=mock_s3_client
+    )
+    client._session.client.return_value.__aexit__ = AsyncMock(return_value=False)
 
-    # Run sync with filtering
-    downloaded = await client.sync_prefix("path", Path("/tmp"), extensions=[".webp"])
+    # Run sync
+    downloaded = await client.sync_prefix_to_redis(
+        mock_redis_client,
+        "band_13/tiles/tileset1_tiles/",
+        "band_13",
+        "tileset1",
+    )
 
-    # Verify results
-    assert downloaded == 1
-
-    # Check that only .webp file was downloaded
-    client._download_file_with_limit.assert_called_once()
-    args = client._download_file_with_limit.call_args[0]
-    # args: (s3_client, s3_key, local_path)
-    assert args[1] == "path/tile.webp"
+    # Should have downloaded 2 .webp files (not the .json)
+    assert downloaded == 2
+    assert mock_redis_client.store_satellite_tile.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_sync_prefix_no_filtering():
-    """Verify that sync_prefix downloads all files if no extensions provided."""
+async def test_sync_prefix_to_redis_no_objects(mock_redis_client):
+    """Verify that sync returns 0 when no objects found."""
     client = S3Client("endpoint", "access", "secret", "bucket")
 
-    # Mock internal methods
-    client._list_objects = AsyncMock(
-        return_value=[
-            {"Key": "path/tile.webp", "Size": 100},
-            {"Key": "path/metadata.json", "Size": 200},
-        ]
-    )
-    client._get_local_files = MagicMock(return_value={})
-    client._download_file_with_limit = AsyncMock(return_value=True)
-    client._delete_orphans = MagicMock(return_value=0)
+    client._list_objects = AsyncMock(return_value=[])
 
-    # Mock session
-    mock_s3 = AsyncMock()
+    mock_s3_client = AsyncMock()
     client._session.client = MagicMock()
-    client._session.client.return_value.__aenter__.return_value = mock_s3
+    client._session.client.return_value.__aenter__ = AsyncMock(
+        return_value=mock_s3_client
+    )
+    client._session.client.return_value.__aexit__ = AsyncMock(return_value=False)
 
-    # Run sync without filtering
-    downloaded = await client.sync_prefix("path", Path("/tmp"))
+    downloaded = await client.sync_prefix_to_redis(
+        mock_redis_client,
+        "band_13/tiles/tileset1_tiles/",
+        "band_13",
+        "tileset1",
+    )
 
-    # Verify results
-    assert downloaded == 2
-    assert client._download_file_with_limit.call_count == 2
+    assert downloaded == 0
+    mock_redis_client.store_satellite_tile.assert_not_called()

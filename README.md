@@ -21,6 +21,7 @@ The Data Service is a Python-based microservice built with FastAPI for managing 
 1. [Makefile Commands](#Makefile-Commands)
 1. [Running Tests](#Running-Tests)
 1. [Dockerfiles](#Dockerfiles)
+1. [Configuration (`settings.json`)](#configuration-settingsjson)
 1. [Environment Variables](#environment-variables)
 1. [API Documentation](#API-Documentation)
 
@@ -195,19 +196,60 @@ The project includes three Dockerfiles for different environments:
 
 All images use Python 3.13.8-slim-trixie as the base for minimal size.
 
+## Configuration (`settings.json`)
+
+Operational tuning settings live in `settings.json` at the project root. Edit this file to adjust sync behavior, caching, and retention without touching environment variables.
+
+```json
+{
+  "sync_mode": "full",
+  "tile_ttl": 21600, // 6 hours
+  "tileset_listing_ttl": 30,
+  "sync_interval_seconds": 60,
+  "radar_sync_interval_seconds": 30,
+  "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
+  "cache_control_tile": "public, max-age=43200, immutable" // 12 hours
+}
+```
+
+| Key                           | Description                                                              |
+| :---------------------------- | :----------------------------------------------------------------------- |
+| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache).        |
+| `tile_ttl`                    | Redis TTL in seconds for cached tiles (both modes).                      |
+| `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes). |
+| `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).          |
+| `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).              |
+| `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.              |
+| `cache_control_tile`          | `Cache-Control` header for tile endpoints.                               |
+
+Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`).
+
+About cache-control headers:
+
+- **`public`** — Response may be cached by shared caches (CDNs, reverse proxies), not just browsers. If `public` is not used, caching can be restricted or disabled in several ways: `private` allows caching only in the end user’s browser and prevents CDN or proxy storage; leaving it unspecified is usually treated as private with inconsistent shared-cache behavior; `no-cache` allows storage but forces revalidation on every request; `no-store` disables caching entirely; `must-revalidate` requires expired responses to be revalidated before use; and `proxy-revalidate` applies the same rule specifically to shared caches.
+
+- **`max-age=<seconds>`** — Time the response is considered fresh and can be served without revalidation.
+
+- **`stale-while-revalidate=<seconds>`** — After expiration, caches may serve a stale response while revalidating in the background for up to the given time.
+
+- **`immutable`** — Resource will never change; clients skip revalidation entirely and reuse cached content for its full lifetime.
+
 ## Environment Variables
 
-| Variable                | Description                                                               | Default           |
-| :---------------------- | :------------------------------------------------------------------------ | :---------------- |
-| `LOG_LEVEL`             | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                          | `INFO`            |
-| `APP_ENV`               | Application environment (development, production).                        | `production`      |
-| `APP_HOST_PORT`         | Host port for the API service.                                            | `6006`            |
-| `MINIO_ENDPOINT`        | MinIO S3 endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync |
-| `MINIO_ACCESS_KEY`      | MinIO access key (username).                                              | `minioadmin`      |
-| `MINIO_SECRET_KEY`      | MinIO secret key (password).                                              | `minioadmin`      |
-| `MINIO_BUCKET`          | S3 bucket name for tile storage.                                          | `tiles-data`      |
-| `MINIO_SECURE`          | Use HTTPS for MinIO connection (`true`/`false`).                          | `false`           |
-| `SYNC_INTERVAL_SECONDS` | Interval between sync operations (seconds).                               | `60`              |
+Environment variables configure secrets, infrastructure, and runtime params. Set them in `.env` (see `.env.example`).
+
+| Variable                    | Description                                                               | Default                    |
+| :-------------------------- | :------------------------------------------------------------------------ | :------------------------- |
+| `LOG_LEVEL`                 | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                          | `INFO`                     |
+| `APP_ENV`                   | Application environment (development, production).                        | `production`               |
+| `APP_HOST_PORT`             | Host port for the API service.                                            | `6006`                     |
+| `S3_TILES_DATA_ENDPOINT`    | S3/MinIO endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
+| `S3_TILES_DATA_ACCESS_KEY`  | S3/MinIO access key.                                                      | Required for sync          |
+| `S3_TILES_DATA_SECRET_KEY`  | S3/MinIO secret key.                                                      | Required for sync          |
+| `S3_TILES_DATA_BUCKET_NAME` | S3 bucket name for tile storage.                                          | `tiles-data`               |
+| `S3_TILES_DATA_SECURE`      | Use HTTPS for S3 connection (`true`/`false`).                             | `false`                    |
+| `REDIS_URL`                 | Redis connection URL.                                                     | `redis://localhost:6379/0` |
+| `WEB_CONCURRENCY`           | Number of Uvicorn workers.                                                | `1`                        |
 
 ## API Documentation
 

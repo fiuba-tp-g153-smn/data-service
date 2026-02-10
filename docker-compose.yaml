@@ -13,6 +13,23 @@
 #   3. Start data-service: docker compose up -d
 
 services:
+  redis:
+    container_name: data-service-redis-dev
+    image: redis:8.4-alpine
+    command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru --save 300 1 --appendonly no
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+      start_interval: 1s
+    networks:
+      - data_service_network
+
   data-service:
     container_name: data-service-container
     image: data-service
@@ -23,8 +40,9 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
-    volumes:
-      - data_service_data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -37,6 +55,7 @@ services:
       - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY}
+      - REDIS_URL=${REDIS_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -47,9 +66,9 @@ services:
     networks:
       - data_service_network
 
+volumes:
+  redis_data:
+
 networks:
   data_service_network:
     external: true
-
-volumes:
-  data_service_data:

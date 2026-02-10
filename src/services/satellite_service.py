@@ -1,15 +1,14 @@
 """Service for satellite products (GOES-19, ABI, etc.)."""
 
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 import hashlib
 import json
 import re
 from datetime import datetime, timezone
+from typing import Dict, List, Optional, Tuple
 
-from services.base_service import BaseProductService
 from dependencies import logger
-import asyncio
+from services.base_service import BaseProductService
+from services.satellite_sync_strategy import SatelliteSyncStrategy
 
 
 class SatelliteService(BaseProductService):
@@ -74,8 +73,13 @@ class SatelliteService(BaseProductService):
 
     def __init__(self):
         """Initialize and register satellite products."""
+        self._strategy: Optional[SatelliteSyncStrategy] = None
         for product_id, config in self.SATELLITE_PRODUCTS.items():
             self.register_product(product_id, config)
+
+    def set_strategy(self, strategy: SatelliteSyncStrategy) -> None:
+        """Set the sync strategy (called during app startup)."""
+        self._strategy = strategy
 
     # ============== Product Level Methods ==============
 
@@ -211,7 +215,10 @@ class SatelliteService(BaseProductService):
             product_id, instrument_id, channel_id
         )
 
-        tile_url_pattern = f"/products/{product_id}/{instrument_id}/{channel_id}/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+        tile_url_pattern = (
+            f"/products/{product_id}/{instrument_id}/{channel_id}"
+            "/{tileset_id}/{z}/{x}/{y}.webp"
+        )
 
         return {
             "product": product_id,
@@ -225,43 +232,37 @@ class SatelliteService(BaseProductService):
     async def _get_tilesets_for_channel(
         self, product_id: str, instrument_id: str, channel_id: str
     ) -> List[dict]:
-        """Get list of available tilesets for a channel (async)."""
-        return await asyncio.to_thread(
-            self._get_tilesets_for_channel_sync, product_id, instrument_id, channel_id
-        )
-
-    def _get_tilesets_for_channel_sync(
-        self, product_id: str, instrument_id: str, channel_id: str
-    ) -> List[dict]:
-        """Get list of available tilesets for a channel (sync)."""
-        dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
-        tiles_dir = self.TILES_BASE_PATH / dir_name / "tiles"
-
-        logger.info(f"Looking for tilesets in: {tiles_dir}")
-
-        if not tiles_dir.exists():
-            logger.info(f"Tiles directory does not exist: {tiles_dir}")
+        """Get list of available tilesets for a channel via the sync strategy."""
+        if not self._strategy:
+            logger.warning("No sync strategy configured for tileset listing")
             return []
 
-        tilesets = []
-        for item in tiles_dir.iterdir():
-            if item.is_dir() and item.name.endswith("_tiles"):
-                tileset_id = item.name.replace("_tiles", "")
-                tilesets.append(
-                    {
-                        "id": tileset_id,
-                        "url_pattern": f"/products/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/{{z}}/{{x}}/{{y}}.webp",
-                    }
-                )
+        dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
+        tileset_ids = await self._strategy.get_tilesets(dir_name)
+
+        tilesets = [
+            {
+                "id": tileset_id,
+                "url_pattern": (
+                    f"/products/{product_id}/{instrument_id}/{channel_id}"
+                    "/{tileset_id}/{z}/{x}/{y}.webp"
+                ),
+            }
+            for tileset_id in tileset_ids
+        ]
 
         logger.info(
-            f"Found {len(tilesets)} tilesets for {product_id}/{instrument_id}/{channel_id}"
+            "Found %d tilesets for %s/%s/%s",
+            len(tilesets),
+            product_id,
+            instrument_id,
+            channel_id,
         )
         return tilesets
 
     # ============== Tile Serving Methods ==============
 
-    def get_tile_path(
+    async def get_tile_data(  # pylint: disable=too-many-positional-arguments
         self,
         product_id: str,
         instrument_id: str,
@@ -270,18 +271,14 @@ class SatelliteService(BaseProductService):
         z: int,
         x: int,
         y: int,
-    ) -> Path:
-        """Build the full path to a tile file."""
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,unused-argument
+        """Get tile data via the sync strategy."""
+        if not self._strategy:
+            return None
+
         dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
-        return (
-            self.TILES_BASE_PATH
-            / dir_name
-            / "tiles"
-            / f"{tileset_id}_tiles"
-            / str(z)
-            / str(x)
-            / f"{y}.webp"
-        )
+        return await self._strategy.get_tile(dir_name, tileset_id, z, x, y)
 
     def validate_zoom_level(
         self, product_id: str, instrument_id: str, channel_id: str, z: int
@@ -295,7 +292,8 @@ class SatelliteService(BaseProductService):
         if z < zoom_levels["min"] or z > zoom_levels["max"]:
             return (
                 False,
-                f"Zoom level {z} not available. Valid range: {zoom_levels['min']}-{zoom_levels['max']}",
+                f"Zoom level {z} not available. "
+                f"Valid range: {zoom_levels['min']}-{zoom_levels['max']}",
             )
 
         return True, ""
@@ -304,7 +302,6 @@ class SatelliteService(BaseProductService):
 
     def get_config_hash(self, config: dict) -> str:
         """Generate a stable hash for a configuration dictionary."""
-        # Sort keys to ensure stability
         config_str = json.dumps(config, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()
 
@@ -313,21 +310,16 @@ class SatelliteService(BaseProductService):
         if not tilesets:
             return None
 
-        # Extract timestamps from IDs and find max
-        # ID format varies but usually ends with _sYYYYJJJHHMMSS...
-        # We'll just sort by ID since they contain timestamps
         sorted_tilesets = sorted(tilesets, key=lambda x: x["id"], reverse=True)
 
         if not sorted_tilesets:
             return None
 
-        # Try to extract timestamp from the ID of the latest tileset
         latest_id = sorted_tilesets[0]["id"]
         match = re.search(r"_s(\d{4})(\d{3})(\d{2})(\d{2})(\d{2})", latest_id)
 
         if match:
             year, julian_day, hour, minute, second = map(int, match.groups())
-            # Convert Julian day to date
             dt = datetime.strptime(
                 f"{year}{julian_day:03d}{hour:02d}{minute:02d}{second:02d}",
                 "%Y%j%H%M%S",
