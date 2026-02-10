@@ -47,7 +47,9 @@ class BaseSyncService:
         """Return the lock file path. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def _pre_start_check(self, app_logger: Logger) -> bool:  # pylint: disable=unused-argument
+    def _pre_start_check(  # pylint: disable=unused-argument
+        self, app_logger: Logger
+    ) -> bool:
         """Override to run checks before starting. Return False to abort."""
         return True
 
@@ -106,9 +108,7 @@ class BaseSyncService:
                 fcntl.lockf(self._lock_file_handle, fcntl.LOCK_UN)
                 self._lock_file_handle.close()
             except Exception as e:  # pylint: disable=broad-exception-caught
-                app_logger.error(
-                    "Error releasing %s lock: %s", self._service_name, e
-                )
+                app_logger.error("Error releasing %s lock: %s", self._service_name, e)
             self._lock_file_handle = None
 
         app_logger.info("%s stopped", self._service_name)
@@ -122,9 +122,7 @@ class BaseSyncService:
             except asyncio.CancelledError:
                 break
             except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error(
-                    "Error in %s sync loop: %s", self._service_name, e
-                )
+                logger.error("Error in %s sync loop: %s", self._service_name, e)
                 self._on_sync_error(e)
 
             if self._running:

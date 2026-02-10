@@ -3,9 +3,7 @@
 from fastapi import Response
 
 
-def create_tile_response(
-    tile_data: bytes, etag: str, cache_control: str
-) -> Response:
+def create_tile_response(tile_data: bytes, etag: str, cache_control: str) -> Response:
     """Create a standard WebP tile response with caching headers."""
     return Response(
         content=tile_data,

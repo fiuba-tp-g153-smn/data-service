@@ -7,6 +7,7 @@ them directly in Redis. Used by SyncService for periodic satellite tile sync.
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from typing import List, Optional
 
 import aioboto3
@@ -20,16 +21,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
     """
     Async S3 client for tile downloads.
 
-    Downloads tiles from S3 and stores them directly in Redis,
-    bypassing local filesystem entirely.
-
-    Attributes:
-        _endpoint: S3 endpoint URL (e.g., "minio:9000")
-        _access_key: S3 access key
-        _secret_key: S3 secret key
-        _bucket: Source bucket name
-        _secure: Whether to use HTTPS
-        _max_concurrent_downloads: Maximum parallel downloads
+    Maintains a persistent connection to S3 to avoid per-request
+    connection overhead. Call connect() before use and close() on shutdown.
     """
 
     def __init__(
@@ -50,10 +43,40 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         self._max_concurrent_downloads = max_concurrent_downloads
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
         self._session = aioboto3.Session()
+        self._exit_stack: Optional[AsyncExitStack] = None
+        self._client = None
 
     def _get_endpoint_url(self) -> str:
         protocol = "https" if self._secure else "http"
         return f"{protocol}://{self._endpoint}"
+
+    async def connect(self) -> None:
+        """Create persistent S3 client connection."""
+        if self._client:
+            return
+        self._exit_stack = AsyncExitStack()
+        self._client = await self._exit_stack.enter_async_context(
+            self._session.client(
+                "s3",
+                endpoint_url=self._get_endpoint_url(),
+                aws_access_key_id=self._access_key,
+                aws_secret_access_key=self._secret_key,
+            )
+        )
+        logger.info("S3 client connected to %s", self._get_endpoint_url())
+
+    async def close(self) -> None:
+        """Close the S3 client connection."""
+        if self._exit_stack:
+            await self._exit_stack.aclose()
+            self._client = None
+            self._exit_stack = None
+            logger.info("S3 client closed")
+
+    async def _ensure_connected(self) -> None:
+        """Auto-connect if not already connected."""
+        if not self._client:
+            await self.connect()
 
     async def sync_prefix_to_redis(
         self,
@@ -77,68 +100,62 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         Returns:
             Number of tiles stored
         """
-        async with self._session.client(
-            "s3",
-            endpoint_url=self._get_endpoint_url(),
-            aws_access_key_id=self._access_key,
-            aws_secret_access_key=self._secret_key,
-        ) as s3_client:
-            s3_objects = await self._list_objects(s3_client, s3_prefix)
+        await self._ensure_connected()
+        s3_objects = await self._list_objects(s3_prefix)
 
-            if not s3_objects:
-                return 0
+        if not s3_objects:
+            return 0
 
-            # Filter only .webp tile files
-            tile_objects = [obj for obj in s3_objects if obj["Key"].endswith(".webp")]
+        # Filter only .webp tile files
+        tile_objects = [obj for obj in s3_objects if obj["Key"].endswith(".webp")]
 
-            if not tile_objects:
-                return 0
+        if not tile_objects:
+            return 0
 
-            logger.info(
-                "Downloading %d tiles for %s/%s",
-                len(tile_objects),
+        logger.info(
+            "Downloading %d tiles for %s/%s",
+            len(tile_objects),
+            channel_dir,
+            tileset_id,
+        )
+
+        tasks = [
+            self._download_tile_to_redis(
+                redis_client,
+                obj["Key"],
                 channel_dir,
                 tileset_id,
+                tile_ttl,
             )
+            for obj in tile_objects
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        stored = sum(1 for r in results if r is True)
 
-            tasks = [
-                self._download_tile_to_redis(
-                    s3_client,
-                    redis_client,
-                    obj["Key"],
-                    channel_dir,
-                    tileset_id,
-                    tile_ttl,
-                )
-                for obj in tile_objects
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            stored = sum(1 for r in results if r is True)
-
-            return stored
+        return stored
 
     async def _download_tile_to_redis(
         self,
-        s3_client,
         redis_client: RedisClient,
         s3_key: str,
         channel_dir: str,
         tileset_id: str,
         tile_ttl: Optional[int] = None,
     ) -> bool:
-        # pylint: disable=too-many-arguments,too-many-locals
+        # pylint: disable=too-many-arguments
         """Download a single tile from S3 and store in Redis."""
         async with self._semaphore:
             try:
                 # Parse z/x/y from key: .../tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp
                 parts = s3_key.split("/")
-                # Find the tiles dir and extract z/x/y
                 y_file = parts[-1]  # "{y}.webp"
                 x = parts[-2]
                 z = parts[-3]
                 y = y_file.replace(".webp", "")
 
-                response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
+                response = await self._client.get_object(
+                    Bucket=self._bucket, Key=s3_key
+                )
                 async with response["Body"] as stream:
                     content = await stream.read()
 
@@ -156,11 +173,11 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 logger.error("Failed to download %s to Redis: %s", s3_key, e)
                 return False
 
-    async def _list_objects(self, s3_client, prefix: str) -> List[dict]:
+    async def _list_objects(self, prefix: str) -> List[dict]:
         """List all objects under a prefix."""
         objects = []
         try:
-            paginator = s3_client.get_paginator("list_objects_v2")
+            paginator = self._client.get_paginator("list_objects_v2")
             async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     if not obj["Key"].endswith("/"):
@@ -178,16 +195,11 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
 
     async def download_tile(self, s3_key: str) -> Optional[bytes]:
         """Download a single tile from S3. Returns raw bytes or None."""
+        await self._ensure_connected()
         try:
-            async with self._session.client(
-                "s3",
-                endpoint_url=self._get_endpoint_url(),
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
-            ) as s3_client:
-                response = await s3_client.get_object(Bucket=self._bucket, Key=s3_key)
-                async with response["Body"] as stream:
-                    return await stream.read()
+            response = await self._client.get_object(Bucket=self._bucket, Key=s3_key)
+            async with response["Body"] as stream:
+                return await stream.read()
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Failed to download tile %s: %s", s3_key, e)
             return None
@@ -195,14 +207,9 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""
         try:
-            async with self._session.client(
-                "s3",
-                endpoint_url=self._get_endpoint_url(),
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
-            ) as s3_client:
-                await s3_client.head_bucket(Bucket=self._bucket)
-                return True
+            await self._ensure_connected()
+            await self._client.head_bucket(Bucket=self._bucket)
+            return True
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("S3 connection check failed: %s", e)
             return False
@@ -212,55 +219,39 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         List immediate subdirectories (prefixes) under a given prefix.
         Uses '/' as a delimiter.
         """
+        await self._ensure_connected()
         subdirs = []
         if not prefix.endswith("/"):
             prefix += "/"
 
         try:
-            async with self._session.client(
-                "s3",
-                endpoint_url=self._get_endpoint_url(),
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
-            ) as s3_client:
-                paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(
-                    Bucket=self._bucket, Prefix=prefix, Delimiter="/"
-                ):
-                    for common_prefix in page.get("CommonPrefixes", []):
-                        subdirs.append(common_prefix["Prefix"])
+            paginator = self._client.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(
+                Bucket=self._bucket, Prefix=prefix, Delimiter="/"
+            ):
+                for common_prefix in page.get("CommonPrefixes", []):
+                    subdirs.append(common_prefix["Prefix"])
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
 
         return subdirs
 
     async def delete_prefix(self, prefix: str) -> bool:
-        """
-        Recursively delete all objects under a prefix.
-        """
+        """Recursively delete all objects under a prefix."""
+        await self._ensure_connected()
         try:
-            async with self._session.client(
-                "s3",
-                endpoint_url=self._get_endpoint_url(),
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
-            ) as s3_client:
-                objects_to_delete = []
-                paginator = s3_client.get_paginator("list_objects_v2")
-                async for page in paginator.paginate(
-                    Bucket=self._bucket, Prefix=prefix
-                ):
-                    for obj in page.get("Contents", []):
-                        objects_to_delete.append({"Key": obj["Key"]})
+            objects_to_delete = []
+            paginator = self._client.get_paginator("list_objects_v2")
+            async for page in paginator.paginate(Bucket=self._bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    objects_to_delete.append({"Key": obj["Key"]})
 
-                        if len(objects_to_delete) >= 1000:
-                            await self._delete_objects_batch(
-                                s3_client, objects_to_delete
-                            )
-                            objects_to_delete = []
+                    if len(objects_to_delete) >= 1000:
+                        await self._delete_objects_batch(objects_to_delete)
+                        objects_to_delete = []
 
-                if objects_to_delete:
-                    await self._delete_objects_batch(s3_client, objects_to_delete)
+            if objects_to_delete:
+                await self._delete_objects_batch(objects_to_delete)
 
             logger.info("Deleted prefix: %s", prefix)
             return True
@@ -268,10 +259,10 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Error deleting prefix %s: %s", prefix, e)
             return False
 
-    async def _delete_objects_batch(self, s3_client, objects: List[dict]) -> None:
+    async def _delete_objects_batch(self, objects: List[dict]) -> None:
         """Helper to delete a batch of objects."""
         if not objects:
             return
-        await s3_client.delete_objects(
+        await self._client.delete_objects(
             Bucket=self._bucket, Delete={"Objects": objects, "Quiet": True}
         )

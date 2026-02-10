@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import uvloop
 from fastapi import FastAPI
@@ -32,8 +33,10 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 async def configure_strategies(
     client_redis: RedisClient,
-) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy]:
+) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, Optional[S3Client]]:
     """Configure and return sync strategies based on settings."""
+    s3_client = None
+
     if settings.sync_mode == "full":
         # Background sync mode (default)
         sat_strategy = SatelliteFullSyncStrategy(client_redis)
@@ -45,7 +48,6 @@ async def configure_strategies(
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
-        s3_client = None
         if settings.is_s3_configured():
             s3_client = S3Client(
                 endpoint=settings.s3_tiles_data_endpoint,
@@ -54,6 +56,7 @@ async def configure_strategies(
                 bucket=settings.s3_tiles_data_bucket_name,
                 secure=settings.s3_tiles_data_secure,
             )
+            await s3_client.connect()
 
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
@@ -68,7 +71,7 @@ async def configure_strategies(
             settings.tileset_listing_ttl,
         )
 
-    return sat_strategy, radar_strategy
+    return sat_strategy, radar_strategy, s3_client
 
 
 async def shutdown_services():
@@ -85,7 +88,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Starting data-service...")
     await redis_client.connect()
 
-    sat_strategy, radar_strategy = await configure_strategies(redis_client)
+    sat_strategy, radar_strategy, s3_client = await configure_strategies(redis_client)
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
@@ -96,6 +99,8 @@ async def lifespan(_app: FastAPI):
     logger.info("Shutting down data-service...")
     await shutdown_services()
 
+    if s3_client:
+        await s3_client.close()
     await redis_client.close()
 
 
