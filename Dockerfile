@@ -30,6 +30,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy the actual application code into /app
 COPY ./src /app
+COPY settings.json /settings.json
 
 EXPOSE 8080
 

@@ -49,6 +49,7 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app
+      - ./settings.json:/settings.json:ro
       - ./output_radar:/output_radar
     environment:
       - LOG_LEVEL=${LOG_LEVEL}

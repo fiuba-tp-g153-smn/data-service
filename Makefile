@@ -29,5 +29,6 @@ down:
 	docker compose -f docker-compose-dev.yaml down --remove-orphans
 
 clean:
+	docker volume rm data-service_redis_dev_data || true
 	docker volume rm data-service_redis_data || true
-	docker volume rm data-service_redis_dev_data
+	docker volume rm data-service_data_service_data

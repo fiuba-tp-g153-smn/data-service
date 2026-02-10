@@ -29,14 +29,14 @@ class Settings:
     s3_tiles_data_secure: bool = False
     redis_url: str = ""
 
-    # --- JSON + env override: operational tuning ---
-    sync_mode: str = "full"
-    tile_ttl: int = 21600
-    tileset_listing_ttl: int = 30
-    sync_interval_seconds: int = 60
-    radar_sync_interval_seconds: int = 30
-    cache_control_config: str = "public, max-age=60, stale-while-revalidate=120"
-    cache_control_tile: str = "public, max-age=43200, immutable"
+    # --- Operational tuning (loaded from settings.json, env overrides) ---
+    sync_mode: str
+    tile_ttl: int
+    tileset_listing_ttl: int
+    sync_interval_seconds: int
+    radar_sync_interval_seconds: int
+    cache_control_config: str
+    cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
