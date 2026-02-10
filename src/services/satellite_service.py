@@ -217,7 +217,7 @@ class SatelliteService(BaseProductService):
 
         tile_url_pattern = (
             f"/products/{product_id}/{instrument_id}/{channel_id}"
-            "/{{tileset_id}}/{{z}}/{{x}}/{{y}}.webp"
+            "/{tileset_id}/{z}/{x}/{y}.webp"
         )
 
         return {
