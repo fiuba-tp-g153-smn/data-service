@@ -57,8 +57,14 @@ class SatelliteService(BaseProductService):
                 "glm": {
                     "name": "GLM",
                     "description": "Geostationary Lightning Mapper",
-                    "available": False,
-                    "channels": {},
+                    "available": True,
+                    "channels": {
+                        "glm-fed": {
+                            "name": "Flash Extent Density",
+                            "description": "GLM Flash Extent Density (FED) - Lightning Activity",
+                            "available": True,
+                        },
+                    },
                 },
             },
         }
@@ -69,6 +75,7 @@ class SatelliteService(BaseProductService):
         "ch-2": "band_2",
         "ch-9": "band_9",
         "ch-13": "band_13",
+        "glm-fed": "glm_fed",
     }
 
     def __init__(self):
@@ -187,8 +194,8 @@ class SatelliteService(BaseProductService):
         if not channel:
             return None
 
-        # For GOES-19 ABI, use the predefined bounding box and zoom levels
-        if product_id == "goes-19" and instrument_id == "abi":
+        # For GOES-19 ABI and GLM, use the predefined bounding box and zoom levels
+        if product_id == "goes-19" and instrument_id in ("abi", "glm"):
             return {
                 "name": channel["name"],
                 "description": channel["description"],
