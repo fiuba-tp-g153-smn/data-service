@@ -193,6 +193,110 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         """Build S3 key for a satellite tile."""
         return f"{channel_dir}/tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp"
 
+    @staticmethod
+    def build_radar_tile_key(
+        radar_id: str,
+        variable_id: str,
+        tileset_id: str,
+        elevation_id: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> str:
+        """Build S3 key for a radar tile."""
+        return (
+            f"radar/{radar_id}/{variable_id}/"
+            f"{tileset_id}_{elevation_id}/{z}/{x}/{y}.webp"
+        )
+
+    async def sync_radar_prefix_to_redis(
+        self,
+        redis_client: RedisClient,
+        s3_prefix: str,
+        radar_id: str,
+        variable_id: str,
+        tileset_id: str,
+        elevation_id: str,
+        tile_ttl: Optional[int] = None,
+    ) -> int:
+        # pylint: disable=too-many-arguments
+        """Download all radar tiles for a tileset from S3 and store in Redis."""
+        await self._ensure_connected()
+        s3_objects = await self._list_objects(s3_prefix)
+
+        if not s3_objects:
+            return 0
+
+        tile_objects = [obj for obj in s3_objects if obj["Key"].endswith(".webp")]
+        if not tile_objects:
+            return 0
+
+        logger.info(
+            "Downloading %d radar tiles for %s/%s/%s_%s",
+            len(tile_objects),
+            radar_id,
+            variable_id,
+            tileset_id,
+            elevation_id,
+        )
+
+        tasks = [
+            self._download_radar_tile_to_redis(
+                redis_client,
+                obj["Key"],
+                radar_id,
+                variable_id,
+                tileset_id,
+                elevation_id,
+                tile_ttl,
+            )
+            for obj in tile_objects
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return sum(1 for r in results if r is True)
+
+    async def _download_radar_tile_to_redis(
+        self,
+        redis_client: RedisClient,
+        s3_key: str,
+        radar_id: str,
+        variable_id: str,
+        tileset_id: str,
+        elevation_id: str,
+        tile_ttl: Optional[int] = None,
+    ) -> bool:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Download a single radar tile from S3 and store in Redis."""
+        async with self._semaphore:
+            try:
+                parts = s3_key.split("/")
+                y_file = parts[-1]
+                x = parts[-2]
+                z = parts[-3]
+                y = y_file.replace(".webp", "")
+
+                response = await self._client.get_object(
+                    Bucket=self._bucket, Key=s3_key
+                )
+                async with response["Body"] as stream:
+                    content = await stream.read()
+
+                await redis_client.store_radar_tile(
+                    radar_id,
+                    variable_id,
+                    tileset_id,
+                    elevation_id,
+                    int(z),
+                    int(x),
+                    int(y),
+                    content,
+                    ttl=tile_ttl,
+                )
+                return True
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to download radar tile %s: %s", s3_key, e)
+                return False
+
     async def download_tile(self, s3_key: str) -> Optional[bytes]:
         """Download a single tile from S3. Returns raw bytes or None."""
         await self._ensure_connected()

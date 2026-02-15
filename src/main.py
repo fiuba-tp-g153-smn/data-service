@@ -13,8 +13,7 @@ from clients.s3_client import S3Client
 from controller import general
 from dependencies import logger, redis_client, settings
 from routes import radar, satellite, sync
-from services.radar_service import RadarService, radar_service
-from services.radar_sync_service import radar_sync_service
+from services.radar_service import radar_service
 from services.radar_sync_strategy import (
     RadarFullSyncStrategy,
     RadarOnDemandStrategy,
@@ -44,7 +43,6 @@ async def configure_strategies(
 
         sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)
-        await radar_sync_service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
@@ -66,7 +64,7 @@ async def configure_strategies(
         )
         radar_strategy = RadarOnDemandStrategy(
             client_redis,
-            RadarService.OUTPUT_RADAR_PATH,
+            s3_client,
             settings.tile_ttl,
             settings.tileset_listing_ttl,
         )
@@ -77,7 +75,6 @@ async def configure_strategies(
 async def shutdown_services():
     """Stop background services if sync mode is full."""
     if settings.sync_mode == "full":
-        await radar_sync_service.stop(logger)
         await sync_service.stop(logger)
 
 

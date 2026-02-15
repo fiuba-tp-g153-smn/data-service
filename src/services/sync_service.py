@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from logging import Logger
-from typing import List, Optional
+from typing import List, Optional, Set
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
@@ -17,6 +17,9 @@ from services.base_sync_service import BaseSyncService
 from settings import Settings
 
 logger = logging.getLogger(__name__)
+
+# S3 prefix where radar data lives
+RADAR_S3_PREFIX = "radar"
 
 
 class SyncService(BaseSyncService):
@@ -62,6 +65,7 @@ class SyncService(BaseSyncService):
         self._redis_client: Optional[RedisClient] = None
         self._consecutive_failures = 0
         self._total_cycles = 0
+        self._loaded_radar_tilesets: Set[str] = set()
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
         """Set the Redis client (called during app startup)."""
@@ -168,6 +172,11 @@ class SyncService(BaseSyncService):
                 logger.error("Failed to sync prefix '%s': %s", prefix, e)
                 errors += 1
 
+        # ── Radar sync ──
+        radar_downloaded, radar_errors = await self._sync_radar()
+        total_downloaded += radar_downloaded
+        errors += radar_errors
+
         self._total_cycles += 1
         if errors == 0:
             self._consecutive_failures = 0
@@ -196,6 +205,7 @@ class SyncService(BaseSyncService):
                 "consecutive_failures": str(self._consecutive_failures),
                 "total_cycles": str(self._total_cycles),
                 "satellite_tilesets_count": str(sat_count),
+                "radar_tilesets_count": str(len(self._loaded_radar_tilesets)),
             }
         )
 
@@ -207,6 +217,75 @@ class SyncService(BaseSyncService):
             )
         else:
             logger.info("Sync cycle completed: no new tiles (%dms)", duration_ms)
+
+    async def _sync_radar(self) -> tuple:
+        """Sync radar tilesets from S3 to Redis. Returns (downloaded, errors)."""
+        total_downloaded = 0
+        errors = 0
+
+        try:
+            # 1. List radar IDs: radar/{radar_id}/
+            radar_prefixes = await self._client.get_subdirectories(RADAR_S3_PREFIX)
+
+            for radar_prefix in radar_prefixes:
+                radar_id = radar_prefix.rstrip("/").split("/")[-1]
+
+                # 2. List variables: radar/{radar_id}/{variable_id}/
+                var_prefixes = await self._client.get_subdirectories(radar_prefix)
+
+                for var_prefix in var_prefixes:
+                    variable_id = var_prefix.rstrip("/").split("/")[-1]
+
+                    # 3. List tileset dirs: radar/{radar_id}/{variable_id}/{ts}_elev{N}/
+                    ts_prefixes = await self._client.get_subdirectories(var_prefix)
+
+                    for ts_prefix in ts_prefixes:
+                        folder_name = ts_prefix.rstrip("/").split("/")[-1]
+                        parts = folder_name.split("_elev")
+                        if len(parts) != 2:
+                            continue
+
+                        tileset_id = parts[0]
+                        elevation_id = f"elev{parts[1]}"
+
+                        ts_key = (
+                            f"{radar_id}/{variable_id}/{tileset_id}/{elevation_id}"
+                        )
+                        if ts_key in self._loaded_radar_tilesets:
+                            continue
+
+                        # 4. Download tiles under tileset prefix
+                        downloaded = await self._client.sync_radar_prefix_to_redis(
+                            self._redis_client,
+                            ts_prefix,
+                            radar_id,
+                            variable_id,
+                            tileset_id,
+                            elevation_id,
+                            tile_ttl=self._settings.tile_ttl,
+                        )
+
+                        if downloaded > 0:
+                            await self._redis_client.add_radar_index(
+                                radar_id,
+                                variable_id,
+                                elevation_id,
+                                tileset_id,
+                                ttl=self._settings.tile_ttl,
+                            )
+                            self._loaded_radar_tilesets.add(ts_key)
+                            total_downloaded += downloaded
+                            logger.info(
+                                "Radar sync: %d tiles for %s",
+                                downloaded,
+                                ts_key,
+                            )
+
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Radar sync error: %s", e)
+            errors += 1
+
+        return total_downloaded, errors
 
     @staticmethod
     def _extract_timestamp_score(tileset_id: str) -> float:

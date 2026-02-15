@@ -1,6 +1,5 @@
 """Service for radar products."""
 
-from pathlib import Path
 from typing import Optional
 
 from services.base_service import BaseProductService
@@ -9,8 +8,6 @@ from services.radar_sync_strategy import RadarSyncStrategy
 
 class RadarService(BaseProductService):
     """Service to manage radar products and tiles via sync strategy."""
-
-    OUTPUT_RADAR_PATH = Path.cwd().parent / "output_radar"
 
     def __init__(self):
         self._strategy: Optional[RadarSyncStrategy] = None
