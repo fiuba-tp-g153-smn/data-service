@@ -9,7 +9,7 @@ import logging
 import re
 import time
 from logging import Logger
-from typing import List, Optional, Set
+from typing import List, Optional
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
@@ -65,7 +65,6 @@ class SyncService(BaseSyncService):
         self._redis_client: Optional[RedisClient] = None
         self._consecutive_failures = 0
         self._total_cycles = 0
-        self._loaded_radar_tilesets: Set[str] = set()
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
         """Set the Redis client (called during app startup)."""
@@ -195,6 +194,9 @@ class SyncService(BaseSyncService):
             tilesets = await self._redis_client.get_satellite_tilesets(channel_dir)
             sat_count += len(tilesets)
 
+        # Count radar tilesets from Redis (same pattern as satellite)
+        radar_count = await self._count_radar_tilesets()
+
         await self._redis_client.update_sync_status(
             {
                 "is_running": "false",
@@ -205,7 +207,7 @@ class SyncService(BaseSyncService):
                 "consecutive_failures": str(self._consecutive_failures),
                 "total_cycles": str(self._total_cycles),
                 "satellite_tilesets_count": str(sat_count),
-                "radar_tilesets_count": str(len(self._loaded_radar_tilesets)),
+                "radar_tilesets_count": str(radar_count),
             }
         )
 
@@ -239,6 +241,9 @@ class SyncService(BaseSyncService):
                     # 3. List tileset dirs: radar/{radar_id}/{variable_id}/{ts}_elev{N}/
                     ts_prefixes = await self._client.get_subdirectories(var_prefix)
 
+                    # Cache existing tilesets per elevation from Redis
+                    existing_by_elevation = {}
+
                     for ts_prefix in ts_prefixes:
                         folder_name = ts_prefix.rstrip("/").split("/")[-1]
                         parts = folder_name.split("_elev")
@@ -248,10 +253,15 @@ class SyncService(BaseSyncService):
                         tileset_id = parts[0]
                         elevation_id = f"elev{parts[1]}"
 
-                        ts_key = (
-                            f"{radar_id}/{variable_id}/{tileset_id}/{elevation_id}"
-                        )
-                        if ts_key in self._loaded_radar_tilesets:
+                        # Query Redis once per elevation (same pattern as satellite)
+                        if elevation_id not in existing_by_elevation:
+                            existing_by_elevation[elevation_id] = set(
+                                await self._redis_client.get_radar_tilesets(
+                                    radar_id, variable_id, elevation_id
+                                )
+                            )
+
+                        if tileset_id in existing_by_elevation[elevation_id]:
                             continue
 
                         # 4. Download tiles under tileset prefix
@@ -273,12 +283,14 @@ class SyncService(BaseSyncService):
                                 tileset_id,
                                 ttl=self._settings.tile_ttl,
                             )
-                            self._loaded_radar_tilesets.add(ts_key)
                             total_downloaded += downloaded
                             logger.info(
-                                "Radar sync: %d tiles for %s",
+                                "Radar sync: %d tiles for %s/%s/%s/%s",
                                 downloaded,
-                                ts_key,
+                                radar_id,
+                                variable_id,
+                                tileset_id,
+                                elevation_id,
                             )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
@@ -286,6 +298,21 @@ class SyncService(BaseSyncService):
             errors += 1
 
         return total_downloaded, errors
+
+    async def _count_radar_tilesets(self) -> int:
+        """Count total radar tilesets from Redis index."""
+        count = 0
+        radar_ids = await self._redis_client.get_radar_radars()
+        for rid in radar_ids:
+            variables = await self._redis_client.get_radar_variables(rid)
+            for vid in variables:
+                elevations = await self._redis_client.get_radar_elevations(rid, vid)
+                for eid in elevations:
+                    tilesets = await self._redis_client.get_radar_tilesets(
+                        rid, vid, eid
+                    )
+                    count += len(tilesets)
+        return count
 
     @staticmethod
     def _extract_timestamp_score(tileset_id: str) -> float:
