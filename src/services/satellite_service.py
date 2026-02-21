@@ -16,10 +16,10 @@ class SatelliteService(BaseProductService):
 
     # Bounding box for Argentina/South America region (from GOES-19 ABI)
     GOES19_ABI_BOUNDING_BOX = {
-        "minx": -75.00696140269579,
-        "miny": -56.00753990703775,
-        "maxx": -52.97746988314092,
-        "maxy": -20.98391841407633,
+        "minx": -110.0,
+        "miny": -60.0, 
+        "maxx": -30.0, 
+        "maxy": -15.0
     }
 
     # Default zoom levels for GOES-19 ABI

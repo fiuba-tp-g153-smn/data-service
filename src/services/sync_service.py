@@ -140,10 +140,8 @@ class SyncService(BaseSyncService):
 
                 # 3. Download only new tilesets (with TTL for automatic eviction)
                 for s3_tileset_prefix in tileset_prefixes:
-                    # Extract tileset_id from prefix: "band_13/tiles/OR_ABI-.../"
-                    tileset_dir = s3_tileset_prefix.rstrip("/").split("/")[-1]
-                    # Remove "_tiles" suffix if present
-                    tileset_id = tileset_dir.replace("_tiles", "")
+                    # Extract tileset_id from prefix: "band_13/tiles/20260521320209/"
+                    tileset_id = s3_tileset_prefix.rstrip("/").split("/")[-1]
 
                     if tileset_id in existing_tilesets:
                         continue

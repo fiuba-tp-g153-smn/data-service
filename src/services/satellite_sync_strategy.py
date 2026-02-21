@@ -95,12 +95,12 @@ class SatelliteOnDemandStrategy:
         prefix = f"{channel_dir}/tiles/"
         subdirs = await self._s3.get_subdirectories(prefix)
 
-        # Extract tileset IDs from subdirectory prefixes
+        # Extract tileset IDs from subdirectory prefixes (now just timestamps)
         tileset_ids = []
         for subdir in subdirs:
             name = subdir.rstrip("/").split("/")[-1]
-            if name.endswith("_tiles"):
-                tileset_ids.append(name[: -len("_tiles")])
+            if name:  # Filter out empty names
+                tileset_ids.append(name)
 
         tileset_ids.sort()
 

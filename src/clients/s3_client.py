@@ -191,7 +191,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         channel_dir: str, tileset_id: str, z: int, x: int, y: int
     ) -> str:
         """Build S3 key for a satellite tile."""
-        return f"{channel_dir}/tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp"
+        return f"{channel_dir}/tiles/{tileset_id}/{z}/{x}/{y}.webp"
 
     @staticmethod
     def build_radar_tile_key(
