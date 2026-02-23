@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles, weather station data, and radar data. It syncs tile data from a MinIO S3 bucket (populated by a separate `tiles-processor` service) to local storage and serves them via REST API. Built as a university TFI project (FIUBA).
+Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles, weather station data, and radar data. It syncs tile data from a Seaweedfs S3 bucket (populated by a separate `tiles-processor` service) to local storage and serves them via REST API. Built as a university TFI project (FIUBA).
 
 ## AI Collaboration Rules
 
@@ -106,7 +106,7 @@ controller/   -> General endpoints (health, root)
 
 Environment variables loaded from `.env` (see `.env.example`). Key vars:
 
-- `S3_TILES_DATA_ENDPOINT`, `S3_TILES_DATA_ACCESS_KEY`, `S3_TILES_DATA_SECRET_KEY` - S3/MinIO connection
+- `S3_TILES_DATA_ENDPOINT`, `S3_TILES_DATA_ACCESS_KEY`, `S3_TILES_DATA_SECRET_KEY` - S3/Seaweedfs connection
 - `SYNC_INTERVAL_SECONDS` - Background sync frequency (default 60s)
 - `WEB_CONCURRENCY` - Uvicorn worker count
 - `APP_ENV` - `development` uses human-readable logs; production uses NewRelic formatter

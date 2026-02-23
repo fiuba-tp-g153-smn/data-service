@@ -1,7 +1,7 @@
 """
 Background Sync Service.
 
-Periodically syncs tile data from MinIO S3 bucket directly to Redis.
+Periodically syncs tile data from Seaweedfs S3 bucket directly to Redis.
 Runs as a background task during application lifetime.
 """
 
