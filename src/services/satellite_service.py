@@ -69,6 +69,11 @@ class SatelliteService(BaseProductService):
                             "description": "GLM Total Optical Energy (TOE) - Radiated Energy Sum per Cell",
                             "available": True,
                         },
+                        "glm-mfa": {
+                            "name": "Minimum Flash Area",
+                            "description": "GLM Minimum Flash Area (MFA) - Smallest flash footprint per cell",
+                            "available": True,
+                        },
                     },
                 },
             },
@@ -82,6 +87,7 @@ class SatelliteService(BaseProductService):
         "ch-13": "band_13",
         "glm-fed": "glm_fed",
         "glm-toe": "glm_toe",
+        "glm-mfa": "glm_mfa",
     }
 
     def __init__(self):
