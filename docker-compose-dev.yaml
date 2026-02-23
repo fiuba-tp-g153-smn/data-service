@@ -1,13 +1,13 @@
 # Data Service - Tile Serving via REST API
 #
-# This service syncs tiles from an external Seaweedfs S3 bucket and serves them via REST API.
-# The Seaweedfs instance is typically provided by tiles-processor running separately.
+# This service syncs tiles from an external S3 bucket and serves them via REST API.
+# The S3 instance is typically provided by tiles-processor running separately.
 #
 # Configuration:
-#   S3_TILES_DATA_ENDPOINT: Set to the S3/Seaweedfs host:port (e.g., "host.docker.internal:9000" for local,
-#                   or "seaweedfs.example.com:9000" for remote)
+#   S3_TILES_DATA_ENDPOINT: Set to the S3 host:port (e.g., "host.docker.internal:9000" for local,
+#                   or "s3.example.com:9000" for remote)
 #
-# Usage with tiles-processor Seaweedfs:
+# Usage with tiles-processor S3:
 #   1. Start tiles-processor: cd ../tiles-processor && docker compose up -d
 #   2. Set S3_TILES_DATA_ENDPOINT=host.docker.internal:9000 in .env
 #   3. Start data-service: docker compose up -d
@@ -49,13 +49,12 @@ services:
         condition: service_healthy
     volumes:
       - ./src:/app
-      - ./settings.json:/settings.json:ro
       - ./output_radar:/output_radar
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
-      # S3 Configuration - connect to external S3 (e.g., Seaweedfs from tiles-processor)
-      # Use host.docker.internal:9000 to connect to Seaweedfs running on the host
+      # S3 Configuration - connect to external S3 (e.g., S3 from tiles-processor)
+      # Use host.docker.internal:9000 to connect to S3 running on the host
       - S3_TILES_DATA_ENDPOINT=${S3_TILES_DATA_ENDPOINT}
       - S3_TILES_DATA_ACCESS_KEY=${S3_TILES_DATA_ACCESS_KEY}
       - S3_TILES_DATA_SECRET_KEY=${S3_TILES_DATA_SECRET_KEY}
