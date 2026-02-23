@@ -39,6 +39,7 @@ class SyncService(BaseSyncService):
         "band_9/tiles",
         "band_2/tiles",
         "glm_fed/tiles",
+        "glm_toe/tiles",
     ]
 
     # Maps S3 prefix to channel_dir for Redis key construction
@@ -47,6 +48,7 @@ class SyncService(BaseSyncService):
         "band_9/tiles": "band_9",
         "band_2/tiles": "band_2",
         "glm_fed/tiles": "glm_fed",
+        "glm_toe/tiles": "glm_toe",
     }
 
     def __init__(
