@@ -17,9 +17,9 @@ class SatelliteService(BaseProductService):
     # Bounding box for Argentina/South America region (from GOES-19 ABI)
     GOES19_ABI_BOUNDING_BOX = {
         "minx": -110.0,
-        "miny": -60.0, 
-        "maxx": -30.0, 
-        "maxy": -15.0
+        "miny": -60.0,
+        "maxx": -30.0,
+        "maxy": -15.0,
     }
 
     # Default zoom levels for GOES-19 ABI
@@ -64,6 +64,11 @@ class SatelliteService(BaseProductService):
                             "description": "GLM Flash Extent Density (FED) - Lightning Activity",
                             "available": True,
                         },
+                        "glm-toe": {
+                            "name": "Total Optical Energy",
+                            "description": "GLM Total Optical Energy (TOE) - Radiated Energy Sum per Cell",
+                            "available": True,
+                        },
                     },
                 },
             },
@@ -76,6 +81,7 @@ class SatelliteService(BaseProductService):
         "ch-9": "band_9",
         "ch-13": "band_13",
         "glm-fed": "glm_fed",
+        "glm-toe": "glm_toe",
     }
 
     def __init__(self):
