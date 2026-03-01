@@ -42,11 +42,19 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         """Check if Redis is reachable."""
         try:
             if self._redis:
-                await self._redis.ping()
+                await self._redis.ping()  # type: ignore[misc]
                 return True
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Redis health check failed: %s", e)
         return False
+
+    @property
+    def _conn(self) -> aioredis.Redis:
+        """Return the Redis connection, raising if not connected."""
+        if self._redis is None:
+            raise RuntimeError("Redis not connected")
+
+        return self._redis
 
     # ============== Satellite Tile Operations ==============
 
@@ -64,16 +72,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         """Store a satellite tile in Redis, optionally with TTL."""
         key = f"tile:sat:{channel_dir}/{tileset_id}/{z}/{x}/{y}"
         if ttl:
-            await self._redis.set(key, data, ex=ttl)
+            await self._conn.set(key, data, ex=ttl)
         else:
-            await self._redis.set(key, data)
+            await self._conn.set(key, data)
 
     async def get_satellite_tile(
         self, channel_dir: str, tileset_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
         """Get a satellite tile from Redis."""
         key = f"tile:sat:{channel_dir}/{tileset_id}/{z}/{x}/{y}"
-        return await self._redis.get(key)
+        return await self._conn.get(key)
 
     # ============== Satellite Index Operations ==============
 
@@ -86,36 +94,36 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
     ) -> None:
         """Add a tileset to the satellite index (sorted set, score = timestamp)."""
         key = f"idx:sat:{channel_dir}"
-        await self._redis.zadd(key, {tileset_id.encode(): score})
+        await self._conn.zadd(key, {tileset_id.encode(): score})
         if ttl:
-            await self._redis.expire(key, ttl)
+            await self._conn.expire(key, ttl)
 
     async def get_satellite_tilesets(self, channel_dir: str) -> List[str]:
         """Get all tileset IDs for a channel, ordered by score (oldest first)."""
         key = f"idx:sat:{channel_dir}"
-        members = await self._redis.zrange(key, 0, -1)
+        members = await self._conn.zrange(key, 0, -1)
         return [m.decode() for m in members]
 
     async def delete_satellite_tileset(self, channel_dir: str, tileset_id: str) -> None:
         """Delete a tileset from Redis: remove index entry and all tile keys."""
         # Remove from index
         idx_key = f"idx:sat:{channel_dir}"
-        await self._redis.zrem(idx_key, tileset_id.encode())
+        await self._conn.zrem(idx_key, tileset_id.encode())
 
         # Delete all tile keys for this tileset
         pattern = f"tile:sat:{channel_dir}/{tileset_id}/*"
         cursor = 0
         while True:
-            cursor, keys = await self._redis.scan(cursor, match=pattern, count=500)
+            cursor, keys = await self._conn.scan(cursor, match=pattern, count=500)
             if keys:
-                await self._redis.delete(*keys)
+                await self._conn.delete(*keys)
             if cursor == 0:
                 break
 
     async def satellite_tileset_exists(self, channel_dir: str, tileset_id: str) -> bool:
         """Check if a tileset exists in the satellite index."""
         key = f"idx:sat:{channel_dir}"
-        score = await self._redis.zscore(key, tileset_id.encode())
+        score = await self._conn.zscore(key, tileset_id.encode())
         return score is not None
 
     # ============== Radar Tile Operations ==============
@@ -135,7 +143,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         # pylint: disable=too-many-arguments
         """Store a radar tile in Redis with TTL."""
         key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
-        await self._redis.set(key, data, ex=ttl)
+        await self._conn.set(key, data, ex=ttl)
 
     async def get_radar_tile(
         self,
@@ -150,7 +158,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         # pylint: disable=too-many-arguments
         """Get a radar tile from Redis."""
         key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
-        return await self._redis.get(key)
+        return await self._conn.get(key)
 
     # ============== Radar Index Operations ==============
 
@@ -163,7 +171,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         ttl: int = 3600,
     ) -> None:
         """Add entries to radar index sets with TTL."""
-        pipe = await self._redis.pipeline()
+        pipe = await self._conn.pipeline()
 
         radars_key = "idx:radar:radars"
         pipe.sadd(radars_key, radar_id.encode())
@@ -185,17 +193,17 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
 
     async def get_radar_radars(self) -> List[str]:
         """Get all radar IDs."""
-        members = await self._redis.smembers("idx:radar:radars")
+        members = await self._conn.smembers("idx:radar:radars")  # type: ignore[misc]
         return sorted(m.decode() for m in members)
 
     async def get_radar_variables(self, radar_id: str) -> List[str]:
         """Get all variable IDs for a radar."""
-        members = await self._redis.smembers(f"idx:radar:{radar_id}:variables")
+        members = await self._conn.smembers(f"idx:radar:{radar_id}:variables")  # type: ignore[misc]
         return sorted(m.decode() for m in members)
 
     async def get_radar_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """Get all elevation IDs for a radar/variable."""
-        members = await self._redis.smembers(
+        members = await self._conn.smembers(  # type: ignore[misc]
             f"idx:radar:{radar_id}:{variable_id}:elevations"
         )
         return sorted(m.decode() for m in members)
@@ -204,7 +212,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         self, radar_id: str, variable_id: str, elevation_id: str
     ) -> List[str]:
         """Get all tileset IDs for a radar/variable/elevation."""
-        members = await self._redis.smembers(
+        members = await self._conn.smembers(  # type: ignore[misc]
             f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
         )
         return sorted((m.decode() for m in members), reverse=True)
@@ -213,11 +221,11 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
 
     async def cache_listing(self, cache_key: str, data: bytes, ttl: int) -> None:
         """Cache a JSON listing with TTL."""
-        await self._redis.set(cache_key, data, ex=ttl)
+        await self._conn.set(cache_key, data, ex=ttl)
 
     async def get_cached_listing(self, cache_key: str) -> Optional[bytes]:
         """Get a cached JSON listing."""
-        return await self._redis.get(cache_key)
+        return await self._conn.get(cache_key)
 
     # ============== Sync Status Operations ==============
 
@@ -225,9 +233,9 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         """Update sync status hash fields."""
         if fields:
             encoded = {k.encode(): str(v).encode() for k, v in fields.items()}
-            await self._redis.hset("sync:status", mapping=encoded)
+            await self._conn.hset("sync:status", mapping=encoded)  # type: ignore[misc]
 
     async def get_sync_status(self) -> Dict[str, str]:
         """Get all sync status fields."""
-        raw = await self._redis.hgetall("sync:status")
+        raw = await self._conn.hgetall("sync:status")  # type: ignore[misc]
         return {k.decode(): v.decode() for k, v in raw.items()}

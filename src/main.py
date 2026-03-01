@@ -35,6 +35,8 @@ async def configure_strategies(
 ) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, Optional[S3Client]]:
     """Configure and return sync strategies based on settings."""
     s3_client = None
+    sat_strategy: SatelliteSyncStrategy
+    radar_strategy: RadarSyncStrategy
 
     if settings.sync_mode == "full":
         # Background sync mode (default)

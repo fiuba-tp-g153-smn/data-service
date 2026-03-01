@@ -224,6 +224,12 @@ class SyncService(BaseSyncService):
 
     async def _sync_radar(self) -> tuple:
         """Sync radar tilesets from S3 to Redis. Returns (downloaded, errors)."""
+        if self._client is None:
+            raise RuntimeError("S3 client is not initialized")
+
+        if self._redis_client is None:
+            raise RuntimeError("Redis client is not initialized")
+
         total_downloaded = 0
         errors = 0
 
@@ -303,6 +309,9 @@ class SyncService(BaseSyncService):
 
     async def _count_radar_tilesets(self) -> int:
         """Count total radar tilesets from Redis index."""
+        if self._redis_client is None:
+            raise RuntimeError("Redis client is not initialized")
+
         count = 0
         radar_ids = await self._redis_client.get_radar_radars()
         for rid in radar_ids:

@@ -10,7 +10,7 @@ import fcntl
 import logging
 import time
 from logging import Logger
-from typing import Optional
+from typing import IO, Optional
 
 from settings import Settings
 
@@ -41,7 +41,7 @@ class BaseSyncService:
         self._service_name = service_name
         self._task: Optional[asyncio.Task] = None
         self._running = False
-        self._lock_file_handle = None
+        self._lock_file_handle: Optional[IO[str]] = None
 
     def _get_lock_path(self) -> str:
         """Return the lock file path. Must be implemented by subclasses."""

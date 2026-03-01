@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from typing import List, Optional
 
 import aioboto3
+from aiobotocore.client import AioBaseClient
 
 from clients.redis_client import RedisClient
 
@@ -44,7 +45,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
         self._session = aioboto3.Session()
         self._exit_stack: Optional[AsyncExitStack] = None
-        self._client = None
+        self._client: Optional[AioBaseClient] = None
 
     def _get_endpoint_url(self) -> str:
         protocol = "https" if self._secure else "http"
@@ -55,14 +56,14 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         if self._client:
             return
         self._exit_stack = AsyncExitStack()
-        self._client = await self._exit_stack.enter_async_context(
-            self._session.client(
-                "s3",
-                endpoint_url=self._get_endpoint_url(),
-                aws_access_key_id=self._access_key,
-                aws_secret_access_key=self._secret_key,
-            )
+        ctx = self._session.client(
+            "s3",
+            endpoint_url=self._get_endpoint_url(),
+            aws_access_key_id=self._access_key,
+            aws_secret_access_key=self._secret_key,
         )
+
+        self._client = await self._exit_stack.enter_async_context(ctx)
         logger.info("S3 client connected to %s", self._get_endpoint_url())
 
     async def close(self) -> None:
@@ -217,7 +218,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         variable_id: str,
         tileset_id: str,
         elevation_id: str,
-        tile_ttl: Optional[int] = None,
+        tile_ttl: int,
     ) -> int:
         # pylint: disable=too-many-arguments
         """Download all radar tiles for a tileset from S3 and store in Redis."""
@@ -263,7 +264,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         variable_id: str,
         tileset_id: str,
         elevation_id: str,
-        tile_ttl: Optional[int] = None,
+        tile_ttl: int,
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Download a single radar tile from S3 and store in Redis."""
