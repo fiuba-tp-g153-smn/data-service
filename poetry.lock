@@ -3128,7 +3128,7 @@ version = "3.2.0"
 description = "Type annotations for aiobotocore S3 3.2.0 service generated with mypy-boto3-builder 8.12.0"
 optional = false
 python-versions = ">=3.9"
-groups = ["dev"]
+groups = ["main"]
 files = [
     {file = "types_aiobotocore_s3-3.2.0-py3-none-any.whl", hash = "sha256:07e6093b776e1c4e6801b02bea550a556ecc22f044219d60d57b72b4b2c8b74f"},
     {file = "types_aiobotocore_s3-3.2.0.tar.gz", hash = "sha256:23d03c3f468f47191eb74f0052d6c1ec6a9b49c1b5765fcd5a93b3c06d78e621"},
@@ -3546,4 +3546,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "1e824fa0cdfa552c545b966730cf677120826e9e636aab2df1eeef2e09910926"
+content-hash = "482d5930418a9a003ecd52988c7eeb5f7c321a92dd7ec08092de064f1625ecc4"
