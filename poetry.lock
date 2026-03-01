@@ -3123,6 +3123,18 @@ workspaces-web = ["types-aiobotocore-workspaces-web (>=3.2.0,<3.3.0)"]
 xray = ["types-aiobotocore-xray (>=3.2.0,<3.3.0)"]
 
 [[package]]
+name = "types-aiobotocore-s3"
+version = "3.2.0"
+description = "Type annotations for aiobotocore S3 3.2.0 service generated with mypy-boto3-builder 8.12.0"
+optional = false
+python-versions = ">=3.9"
+groups = ["dev"]
+files = [
+    {file = "types_aiobotocore_s3-3.2.0-py3-none-any.whl", hash = "sha256:07e6093b776e1c4e6801b02bea550a556ecc22f044219d60d57b72b4b2c8b74f"},
+    {file = "types_aiobotocore_s3-3.2.0.tar.gz", hash = "sha256:23d03c3f468f47191eb74f0052d6c1ec6a9b49c1b5765fcd5a93b3c06d78e621"},
+]
+
+[[package]]
 name = "types-awscrt"
 version = "0.31.2"
 description = "Type annotations and code completion for awscrt"
@@ -3534,4 +3546,4 @@ propcache = ">=0.2.1"
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<4.0"
-content-hash = "d1c98955c346526bf596120a2c986dd3448cc5e2658848709796809961bfc75b"
+content-hash = "1e824fa0cdfa552c545b966730cf677120826e9e636aab2df1eeef2e09910926"
