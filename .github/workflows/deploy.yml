@@ -17,6 +17,8 @@ jobs:
   image-scan:
     name: vulnerabilities scan (trivy)
     runs-on: ubuntu-24.04
+    # Temporarily disable because trivy is not currently available
+    if: false
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
