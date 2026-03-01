@@ -17,13 +17,12 @@ repos:
         types: [python]
         verbose: true
 
-
-  # - repo: local
-  #   hooks:
-  #     - id: mypy
-  #       name: "Static Type Checker (mypy)"
-  #       entry: mypy src
-  #       language: system
-  #       types: [python]
-  #       pass_filenames: false
-  #       verbose: true
+  - repo: local
+    hooks:
+      - id: mypy
+        name: "Static Type Checker (mypy)"
+        entry: mypy src --check-untyped-defs
+        language: system
+        types: [python]
+        pass_filenames: false
+        verbose: true

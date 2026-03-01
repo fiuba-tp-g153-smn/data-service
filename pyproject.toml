@@ -24,6 +24,7 @@ pydantic = "^2.12.5"
 aioboto3 = "^15.5.0"
 uvloop = "^0.22.1"
 redis = { version = "^7.1.0", extras = ["hiredis"] }
+pillow = "^12.1.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"

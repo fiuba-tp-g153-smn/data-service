@@ -66,12 +66,14 @@ class SatelliteService(BaseProductService):
                         },
                         "glm-toe": {
                             "name": "Total Optical Energy",
-                            "description": "GLM Total Optical Energy (TOE) - Radiated Energy Sum per Cell",
+                            "description": "GLM Total Optical Energy (TOE) - "
+                            "Radiated Energy Sum per Cell",
                             "available": True,
                         },
                         "glm-mfa": {
                             "name": "Minimum Flash Area",
-                            "description": "GLM Minimum Flash Area (MFA) - Smallest flash footprint per cell",
+                            "description": "GLM Minimum Flash Area (MFA) - "
+                            "Smallest flash footprint per cell",
                             "available": True,
                         },
                     },

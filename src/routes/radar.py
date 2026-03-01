@@ -1,11 +1,11 @@
 """Radar-specific endpoints for the products API."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
 
 from dependencies import logger, settings
-from routes.utils import create_tile_response
+from routes.utils import create_tile_response, make_transparent_tile_response
 from services.radar_service import radar_service
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
@@ -114,7 +114,7 @@ async def get_radar_tile(
     )
     if not tile_data:
         logger.warning(
-            "Radar tile not found: %s/%s/%s/%s/%s/%s/%s",
+            "Radar tile not found, returning transparent fallback: %s/%s/%s/%s/%s/%s/%s",
             radar_id,
             variable_id,
             elevation_id,
@@ -123,7 +123,7 @@ async def get_radar_tile(
             x,
             y,
         )
-        raise HTTPException(status_code=404, detail="Tile not found")
+        return make_transparent_tile_response(etag, settings.cache_control_tile)
 
     logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 
