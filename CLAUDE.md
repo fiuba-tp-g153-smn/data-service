@@ -113,7 +113,7 @@ Environment variables loaded from `.env` (see `.env.example`). Key vars:
 
 ## CI/CD
 
-- **test.yml**: Runs on push/PR to non-main branches. Python 3.13.8, Poetry, pytest with coverage.
+- **test.yml**: Runs on push/PR to non-main branches. Python 3.13.12, Poetry, pytest with coverage.
 - **deploy.yml**: Runs on push to main. Runs tests first, then triggers Coolify deployment via webhook.
 
 ## Engineering Standards

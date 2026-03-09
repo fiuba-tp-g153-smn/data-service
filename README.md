@@ -194,7 +194,7 @@ The project includes three Dockerfiles for different environments:
   - Generates reports in `/app/reports` (mounted to `./reports` on host).  
     Use this to execute **tests in an isolated environment** in a production-like environment.
 
-All images use Python 3.13.8-slim-trixie as the base for minimal size.
+All images use Python 3.13.12-alpine as the base for minimal size.
 
 ## Configuration (`settings.json`)
 
