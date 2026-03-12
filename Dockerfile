@@ -12,7 +12,7 @@ COPY pyproject.toml poetry.lock /app/
 RUN pip install --no-cache-dir "poetry" && poetry config virtualenvs.create false
 
 # Re-generate lock file if it is outdated, then install all dependencies (except dev/test deps)
-RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root
+RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root --no-ansi
 
 ################################
 # Stage 2: Runtime
