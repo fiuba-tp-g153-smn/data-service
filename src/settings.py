@@ -41,6 +41,7 @@ class Settings:
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
     radar_lock_path: str = "/tmp/radar_sync.lock"
+    s3_max_concurrent_downloads: int = 5
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -64,6 +65,7 @@ class Settings:
             "radar_sync_interval_seconds",
             "cache_control_config",
             "cache_control_tile",
+            "s3_max_concurrent_downloads",
         }
 
         for key in json_keys:
@@ -118,6 +120,9 @@ class Settings:
         )
         self.cache_control_tile = os.getenv(
             "CACHE_CONTROL_TILE", self.cache_control_tile
+        )
+        self.s3_max_concurrent_downloads = self._env_int(
+            "S3_MAX_CONCURRENT_DOWNLOADS", self.s3_max_concurrent_downloads
         )
 
     def is_s3_configured(self) -> bool:

@@ -55,6 +55,7 @@ async def configure_strategies(
                 secret_key=settings.s3_tiles_data_secret_key,
                 bucket=settings.s3_tiles_data_bucket_name,
                 secure=settings.s3_tiles_data_secure,
+                max_concurrent_downloads=settings.s3_max_concurrent_downloads,
             )
             await s3_client.connect()
 

@@ -85,6 +85,7 @@ class SyncService(BaseSyncService):
             access_key=self._settings.s3_tiles_data_access_key,
             secret_key=self._settings.s3_tiles_data_secret_key,
             bucket=self._settings.s3_tiles_data_bucket_name,
+            max_concurrent_downloads=self._settings.s3_max_concurrent_downloads,
             secure=self._settings.s3_tiles_data_secure,
         )
 

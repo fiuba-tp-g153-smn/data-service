@@ -33,8 +33,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         access_key: str,
         secret_key: str,
         bucket: str,
+        max_concurrent_downloads: int,
         secure: bool = False,
-        max_concurrent_downloads: int = 20,
     ):
         # pylint: disable=too-many-arguments
         self._endpoint = endpoint

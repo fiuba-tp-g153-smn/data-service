@@ -5,5 +5,6 @@
   "sync_interval_seconds": 60,
   "radar_sync_interval_seconds": 30,
   "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
-  "cache_control_tile": "public, max-age=43200, immutable"
+  "cache_control_tile": "public, max-age=43200, immutable",
+  "s3_max_concurrent_downloads": 5
 }
