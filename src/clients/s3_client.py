@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, List, Optional, cast
 
 import aioboto3
+import botocore.exceptions
 from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
@@ -26,6 +27,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
     Maintains a persistent connection to S3 to avoid per-request
     connection overhead. Call connect() before use and close() on shutdown.
     """
+
+    _DOWNLOAD_RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0)
 
     def __init__(
         self,
@@ -84,6 +87,28 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             raise RuntimeError("S3 client failed to connect")
 
         return self._client
+
+    async def _get_object_with_retry(self, client: S3ClientType, s3_key: str) -> dict:
+        """GetObject with exponential backoff on Seaweedfs InternalError."""
+        last_exc: Exception = RuntimeError("unreachable")
+        for attempt, delay in enumerate((None,) + self._DOWNLOAD_RETRY_DELAYS, start=1):
+            if delay is not None:
+                logger.warning(
+                    "Retrying %s (attempt %d/%d) after %.0fs — InternalError",
+                    s3_key,
+                    attempt,
+                    1 + len(self._DOWNLOAD_RETRY_DELAYS),
+                    delay,
+                )
+                await asyncio.sleep(delay)
+            try:
+                return await client.get_object(Bucket=self._bucket, Key=s3_key)
+            except botocore.exceptions.ClientError as e:
+                if e.response["Error"]["Code"] == "InternalError":
+                    last_exc = e
+                    continue
+                raise
+        raise last_exc
 
     async def sync_prefix_to_redis(
         self,
@@ -164,7 +189,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 z = parts[-3]
                 y = y_file.replace(".webp", "")
 
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+                response = await self._get_object_with_retry(client, s3_key)
                 async with response["Body"] as stream:
                     content = await stream.read()
 
@@ -295,7 +320,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 z = parts[-3]
                 y = y_file.replace(".webp", "")
 
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+                response = await self._get_object_with_retry(client, s3_key)
                 async with response["Body"] as stream:
                     content = await stream.read()
 
