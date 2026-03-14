@@ -6,7 +6,9 @@ from clients.s3_client import S3Client
 @pytest.mark.asyncio
 async def test_sync_prefix_to_redis(mock_redis_client):
     """Verify that sync_prefix_to_redis downloads tiles and stores them in Redis."""
-    client = S3Client("endpoint", "access", "secret", "bucket")
+    client = S3Client(
+        "endpoint", "access", "secret", "bucket", max_concurrent_downloads=5
+    )
 
     # Mock S3 listing
     client._list_objects = AsyncMock(
@@ -46,7 +48,9 @@ async def test_sync_prefix_to_redis(mock_redis_client):
 @pytest.mark.asyncio
 async def test_sync_prefix_to_redis_no_objects(mock_redis_client):
     """Verify that sync returns 0 when no objects found."""
-    client = S3Client("endpoint", "access", "secret", "bucket")
+    client = S3Client(
+        "endpoint", "access", "secret", "bucket", max_concurrent_downloads=5
+    )
 
     client._list_objects = AsyncMock(return_value=[])
 
