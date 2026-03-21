@@ -1,151 +1,160 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## Collaboration Protocol
 
-## Project Overview
-
-Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles, radar data, and weather station information. It syncs tile data from an S3/SeaweedFS bucket (populated by a separate `tiles-processor` service) to local storage and serves them via REST API. Built as a university TFI project (FIUBA).
-
-## AI Collaboration Rules
-
-When assisting with this repository, **always follow these rules**:
-
-1. **Before writing any code**, describe your proposed approach and **wait for explicit approval**.
-   - If requirements are ambiguous or underspecified, **ask clarifying questions first**.
-
-2. If a task requires changes to **more than 3 files**, **stop** and break the work into smaller, clearly defined tasks before proceeding.
-
-3. **After writing code**, explicitly list:
-   - What could break as a result of the change
-   - Which tests should be added or updated to cover those risks
+1. **Before coding**: Describe approach → wait for approval. Ask clarifying questions if requirements are ambiguous.
+2. **>3 file changes**: Stop. Break into smaller tasks first.
+3. **After coding**: List what could break and which tests need adding/updating.
 
 ## Commands
 
-### Development
-
 ```bash
-make install     # Install Poetry + all deps (including dev)
+make install     # Poetry + all deps (including dev)
 make up          # Docker dev (hot-reload, mounts ./src)
-make local       # Native dev (requires `make install` first, runs uvicorn with --reload on :8080)
-```
-
-### Testing
-
-```bash
-make test        # Run tests in Docker (builds Dockerfile.run_test, outputs to ./reports/)
-
-# Local test run:
-poetry run pytest -m "not skip" --cov=src --cov-report=html:reports/coverage
-
-# Single test:
-poetry run pytest tests/application/test_basic_endpoints.py::test_root_ok
-```
-
-### Linting
-
-```bash
-make precommit   # Run pre-commit hooks (black, pylint, mypy)
-black src/       # Formatter only
-pylint src/      # Static analysis only
-```
-
-### Production
-
-```bash
+make local       # Native dev (uvicorn --reload on :8080, requires make install)
+make test        # Tests in Docker (outputs to ./reports/)
+make precommit   # Pre-commit hooks (black, pylint, mypy)
 make prod        # Docker production build
+
+# Local testing:
+poetry run pytest -m "not skip" --cov=src --cov-report=html:reports/coverage
+poetry run pytest tests/application/test_basic_endpoints.py::test_root_ok
 ```
 
 Bare commands require `source .venv/bin/activate && cmd`.
 
 ## Architecture
 
+FastAPI microservice (Python 3.13) serving satellite tiles, radar data, and weather station info. Syncs tiles from S3/SeaweedFS to local storage via background task.
+
 ### Entrypoint & Lifecycle
 
-- `src/main.py` — FastAPI app with CORS middleware. Uses `lifespan` context manager to start/stop `SyncService` on startup/shutdown. Uses `uvloop` as the event loop.
-- `src/dependencies.py` — Module-level singletons (`settings`, `logger`, `redis_client`) imported throughout.
-- `src/settings.py` — Plain class (not Pydantic BaseSettings) that reads env vars via `os.getenv` + `python-dotenv`, and merges with `settings.json`.
+- `src/main.py` — FastAPI app, CORS middleware, `lifespan` context manager for `SyncService` start/stop, `uvloop` event loop.
+- `src/dependencies.py` — Module-level singletons (`settings`, `logger`, `redis_client`).
+- `src/settings.py` — Plain class reading env vars via `os.getenv` + `python-dotenv`, merged with `settings.json`.
 
 ### Layered Structure
 
 ```
-routes/       -> API endpoints (FastAPI routers)
-services/     -> Business logic (singleton instances)
-models/       -> Pydantic response models
-clients/      -> External service clients (S3, Redis)
-controller/   -> General endpoints (health, root)
+routes/       → API endpoints (FastAPI routers)
+services/     → Business logic (singleton instances)
+models/       → Pydantic response models
+clients/      → External service clients (S3, Redis)
+controller/   → General endpoints (health, root)
 ```
 
-### Three Data Domains
+### Data Domains
 
-1. **Satellite** (`/products/{product_id}/{instrument_id}/{channel_id}/...`)
-   - `SatelliteService` manages GOES-19 ABI satellite products.
-   - Tiles stored at `data/tmp/band_{N}/tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp`
-   - Channel mapping: `ch-2` → `band_2`, `ch-9` → `band_9`, `ch-13` → `band_13`
+| Domain | Route prefix | Service | Storage |
+|---|---|---|---|
+| **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...` | `SatelliteService` (GOES-19 ABI) | `data/tmp/band_{N}/tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp` |
+| **Radar** | `/products/radar/{radar_id}/{variable_id}/{elevation_id}/...` | `RadarService` | `../output_radar/{radar_id}/{variable_id}/{timestamp}_elev{N}/tiles/{z}/{x}/{y}.webp` |
 
-2. **Radar** (`/products/radar/{radar_id}/{variable_id}/{elevation_id}/...`)
-   - `RadarService` reads from `../output_radar/` (parent directory volume mount).
-   - Structure: `output_radar/{radar_id}/{variable_id}/{timestamp}_elev{N}/tiles/{z}/{x}/{y}.webp`
-
-3. **Weather** (`/weather/emas`)
-   - `WeatherService` proxies Weather.com vector API (product 614) for weather station data.
+Channel mapping: `ch-2` → `band_2`, `ch-9` → `band_9`, `ch-13` → `band_13`.
 
 ### Background Sync (SyncService)
 
-- Singleton asyncio background task started in `lifespan`.
-- Uses file locking (`fcntl`) so only one Uvicorn worker syncs when running multiple workers.
+- Singleton asyncio task started in `lifespan`.
+- File locking (`fcntl`) ensures only one Uvicorn worker syncs.
 - Syncs S3 prefixes (`band_13/tiles`, `band_9/tiles`, `band_2/tiles`) to `data/tmp/`.
-- Retention policy: keeps only the latest 26 tilesets per band, deletes older ones.
-- `S3Client` (`clients/s3_client.py`) uses `aioboto3` with semaphore-limited concurrent downloads (default: 5, configurable via `s3_max_concurrent_downloads` in `settings.json`).
-- Two sync strategies: `SatelliteFullSyncStrategy` (background) and `SatelliteOnDemandStrategy` (lazy fetch). Controlled by `sync_mode` in `settings.json`.
+- Retention: keeps latest 26 tilesets per band, deletes older.
+- `S3Client` uses `aioboto3` with semaphore-limited concurrency (default 5, configurable via `s3_max_concurrent_downloads`).
+- Two strategies: `SatelliteFullSyncStrategy` (background) and `SatelliteOnDemandStrategy` (lazy fetch). Controlled by `sync_mode` in `settings.json`.
 
 ### Key Patterns
 
-- Services are module-level singletons (e.g., `satellite_service = SatelliteService()`).
-- Blocking I/O is offloaded via `asyncio.to_thread()`.
-- Tiles served as `FileResponse` with `image/webp` media type and aggressive cache headers.
+- Services are module-level singletons.
+- Blocking I/O offloaded via `asyncio.to_thread()`.
+- Tiles served as `FileResponse` with `image/webp` and aggressive cache headers.
 - Tests use `pytest-socket` — network disabled by default, only `127.0.0.1` allowed.
 
 ## Configuration
 
-Environment variables from `.env` (see `.env.example`). Key vars:
+**Env vars** (`.env`, see `.env.example`):
 
-- `S3_TILES_DATA_ENDPOINT`, `S3_TILES_DATA_ACCESS_KEY`, `S3_TILES_DATA_SECRET_KEY` — S3/SeaweedFS connection
-- `REDIS_URL` — Redis connection (default: `redis://localhost:6379/0`)
-- `SYNC_MODE` — `full` or `on_demand` (default: `full`)
-- `WEB_CONCURRENCY` — Uvicorn worker count
-- `APP_ENV` — `development` uses human-readable logs; `production` uses NewRelic formatter
+| Variable | Purpose |
+|---|---|
+| `S3_TILES_DATA_ENDPOINT/ACCESS_KEY/SECRET_KEY` | S3/SeaweedFS connection |
+| `REDIS_URL` | Redis (default: `redis://localhost:6379/0`) |
+| `SYNC_MODE` | `full` or `on_demand` (default: `full`) |
+| `WEB_CONCURRENCY` | Uvicorn worker count |
+| `APP_ENV` | `development` = human logs; `production` = NewRelic formatter |
 
-Runtime tuning in `settings.json` (overrides env vars):
+**Runtime tuning** (`settings.json`, overrides env vars): `sync_interval_seconds`, `radar_sync_interval_seconds`, `tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads` (default 5), `cache_control_tile`, `cache_control_config`.
 
-- `sync_interval_seconds`, `radar_sync_interval_seconds` — Background sync frequencies
-- `tile_ttl`, `tileset_listing_ttl` — Redis TTLs
-- `s3_max_concurrent_downloads` — S3 download concurrency cap (default: 5)
-- `cache_control_tile`, `cache_control_config` — Cache-Control headers
+## Engineering Rules
 
-## CI/CD
+### FastAPI Conventions
 
-- **test.yml** — Runs on push/PR to non-main branches. Python 3.13.12, Poetry, pytest with coverage.
-- **deploy.yml** — Runs on push to main. Runs tests first, then triggers Coolify deployment via webhook.
+- All route handlers must be `async def`. Wrap blocking I/O with `asyncio.to_thread()`.
+- Use `Depends()` for shared logic — prefer `Depends(get_settings)` over importing module-level singletons in routes.
+- Type all endpoints: `response_model`, status codes, Pydantic models. Never return raw dicts.
+- Services return `None` or raise domain exceptions — **never `HTTPException`**. Routes translate to HTTP status codes.
+- Use `lifespan` pattern only — never deprecated `@app.on_event`.
 
-## Engineering Standards
+### Code Style
 
-### SOLID Principles
+- Early returns; functions <20 lines; one class per file.
+- `handle_` prefix for event handlers; verb-noun naming.
+- Routes handle HTTP concerns only — no business logic.
+- Immutable by default: `frozen=True`, `slots=True` dataclasses for data containers.
+- Fail fast: validate early, domain-specific exceptions, no bare `except`.
+- **Minimal changes**: only modify code directly related to the task.
 
-- **Single Responsibility**: Each service owns one domain. Routes handle only HTTP concerns — never business logic. If writing domain logic in a route, move it to the service.
-- **Open/Closed**: Add new data domains by creating a new service inheriting `BaseProductService` and registering it. Avoid adding conditionals to existing services.
-- **Liskov Substitution**: `BaseProductService` subclasses must honor the base contract.
-- **Dependency Inversion**: Accept external clients via constructor injection (as `SyncService` does with `S3Client`). Don't hard-import and instantiate them internally.
+### Design Principles
 
-### FastAPI Best Practices
-
-- **`Depends()` for shared logic**: Inject settings, logger, and auth via FastAPI DI. Prefer `Depends(get_settings)` over importing module-level singletons in routes.
-- **Type all endpoints**: Declare `response_model`, status codes, and use Pydantic models. Never return raw dicts when a model exists.
-- **Async discipline**: All route handlers must be `async def`. Wrap blocking I/O with `asyncio.to_thread()`.
-- **HTTPException at the route level**: Services return `None` or raise domain exceptions — never `HTTPException`. Routes translate to HTTP status codes.
-- **Lifespan for startup/shutdown**: Use the `lifespan` pattern in `main.py`. Never use deprecated `@app.on_event`.
+- **Dependency Injection (DI) via constructor**: Pass deps through `__init__` (as `SyncService` does with `S3Client`). Don't hard-import and instantiate clients internally. No service locator pattern.
+- **Abstractions**: Depend on ABC (shared impl) or Protocol (structural typing). Keep interfaces small (ISP).
+- **Composition over inheritance**: Prefer has-a over is-a.
+- **Open/Closed**: New data domains → new service inheriting `BaseProductService` + register. Don't add conditionals to existing services.
+- **Liskov**: `BaseProductService` subclasses must honor the base contract.
+- **Typed registries**: `Generic[T]`, validate on registration, scoped not global.
 
 ### Extending the Codebase
 
-- **New data domain**: Create `services/{domain}_service.py` (inherit `BaseProductService`), `models/{domain}.py`, `routes/{domain}.py`, and include the router in `main.py`.
-- **New external client**: Add to `clients/` following `S3Client`'s async pattern. Accept connection params via constructor; no business logic in clients.
-- **New config**: Add to `Settings` with a sensible default. Don't scatter `os.getenv()` calls — centralize in `settings.py`.
+| Addition | Steps |
+|---|---|
+| **New data domain** | Create `services/{domain}_service.py` (inherit `BaseProductService`), `models/{domain}.py`, `routes/{domain}.py`, include router in `main.py`. |
+| **New external client** | Add to `clients/` following `S3Client`'s async pattern. Connection params via constructor; no business logic. |
+| **New config** | Add to `Settings` with sensible default. Centralize in `settings.py` — no scattered `os.getenv()`. |
+
+### Testing
+
+- Test interfaces, not implementations — tests should work with any conforming impl.
+- Use DI to make mocking/stubbing easy.
+- Mock external services (S3, Redis, Weather.com) — never call them in unit tests.
+- Use Protocol for lightweight test doubles.
+
+## Resource Management
+
+### Memory
+- Stream large files (generators / async iteration); context managers (`with`/`async with`) for all cleanup.
+- Bounded buffers: `asyncio.Queue(maxsize=N)`. Chunk-process large datasets.
+- `weakref` for caches that shouldn't prevent GC. `memory_profiler` for suspected leaks.
+
+### Concurrency
+- `asyncio` for I/O-bound; `concurrent.futures.ThreadPoolExecutor` for blocking I/O in async context.
+- `asyncio.Semaphore(N)` to bound concurrent ops — no unbounded task creation.
+- Never use blocking I/O in async functions (use `asyncio.to_thread`).
+- Connection pooling for HTTP sessions and Redis.
+- Batch small operations to reduce overhead; lazy evaluation for expensive computations.
+
+### Infrastructure
+- Docker: `mem_limit`, `cpus`, `--memory-swap=0`. Monitor with `docker stats`.
+- S3: multipart uploads >5MB, aioboto3 async, exponential backoff retries, stream to disk.
+- Monitoring: structured logging with timing (`logger.info("msg", extra={...})`), track queue depth / processing time / error rates, `time.perf_counter()` for measurements.
+
+## Anti-Patterns
+
+- ❌ God objects, circular deps, global mutable state, tight framework coupling
+- ❌ Mixing business logic with infrastructure (routes, clients)
+- ❌ Unbounded async task creation (use semaphores)
+- ❌ Blocking I/O in async functions (use `asyncio.to_thread`)
+- ❌ Catching `Exception` without re-raise or proper handling
+- ❌ Not cleaning up resources in error paths
+- ❌ Ignoring backpressure signals from queues
+
+## CI/CD
+
+- **test.yml** — Push/PR to non-main: Python 3.13.12, Poetry, pytest + coverage.
+- **deploy.yml** — Push to main: tests → Coolify webhook deployment.
