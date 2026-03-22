@@ -1,11 +1,13 @@
 """Radar-specific endpoints for the products API."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
 
 from dependencies import logger, settings
+from models.radar import RadarPointValueResponse
 from routes.utils import create_tile_response, make_transparent_tile_response
+from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
 from services.radar_service import radar_service
 
 router = APIRouter(prefix="/products/radar", tags=["Radar"])
@@ -128,3 +130,69 @@ async def get_radar_tile(
     logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)
+
+
+@router.get(
+    "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/point",
+    status_code=status.HTTP_200_OK,
+    summary="Get Radar Point Value",
+    response_description="Returns nearest sampled value for a lat/lon from radar COG",
+    response_model=RadarPointValueResponse,
+)
+async def get_radar_point_value(
+    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
+    variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
+    elevation_id: str = PathParam(
+        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+    ),
+    tileset_id: str = PathParam(..., description="Tileset identifier"),
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
+):
+    """Query nearest point value for a radar COG by geographic coordinate."""
+    try:
+        sample = await radar_service.get_point_value(
+            radar_id=radar_id,
+            variable_id=variable_id,
+            elevation_id=elevation_id,
+            tileset_id=tileset_id,
+            lat=lat,
+            lon=lon,
+        )
+    except CogNotFoundError as exc:
+        logger.warning(
+            "Radar COG not found for point query: %s/%s/%s/%s",
+            radar_id,
+            variable_id,
+            elevation_id,
+            tileset_id,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="cog_not_found",
+        ) from exc
+    except NoDataOrOutsideError as exc:
+        logger.warning(
+            "Radar point query returned nodata/outside: %s/%s/%s/%s lat=%s lon=%s",
+            radar_id,
+            variable_id,
+            elevation_id,
+            tileset_id,
+            lat,
+            lon,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="nodata_or_outside",
+        ) from exc
+
+    return {
+        "radar": radar_id,
+        "variable": variable_id,
+        "elevation": elevation_id,
+        "tileset_id": tileset_id,
+        "lat": lat,
+        "lon": lon,
+        "value": sample.value,
+        "unit": sample.unit,
+    }

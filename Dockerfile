@@ -1,9 +1,13 @@
 ################################
 # Stage 1: Builder
 ################################
-FROM python:3.13.12-alpine AS builder
+FROM python:3.13.12-slim-trixie AS builder
 
 WORKDIR /app
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends libexpat1 \
+	&& rm -rf /var/lib/apt/lists/*
 
 # Copy only dependency manifests first (to leverage Docker build cache for faster builds)
 COPY pyproject.toml poetry.lock /app/
@@ -17,9 +21,13 @@ RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-ro
 ################################
 # Stage 2: Runtime
 ################################
-FROM python:3.13.12-alpine AS runner
+FROM python:3.13.12-slim-trixie AS runner
 
 WORKDIR /app
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends libexpat1 \
+	&& rm -rf /var/lib/apt/lists/*
 
 # Use python implementation of protobuf instead of binary
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python

@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import re
 from typing import List, Optional, Protocol
 
 from clients.redis_client import RedisClient
@@ -11,7 +10,7 @@ from clients.s3_client import S3Client
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
 # S3 prefix where radar data lives
-RADAR_S3_PREFIX = "radar"
+RADAR_S3_PREFIX = "tiles/radar"
 
 
 class RadarSyncStrategy(Protocol):
@@ -190,13 +189,12 @@ class RadarOnDemandStrategy:
 
         prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}"
         subdirs = await self._s3.get_subdirectories(prefix)
-        elevations = set()
+        elevations = []
         for subdir in subdirs:
             name = subdir.rstrip("/").split("/")[-1]
-            match = re.search(r"_(elev\d+)$", name)
-            if match:
-                elevations.add(match.group(1))
-        result = sorted(elevations)
+            if name.startswith("elev"):
+                elevations.append(name)
+        result = sorted(set(elevations))
 
         await self._redis.cache_listing(
             cache_key, json.dumps(result).encode(), self._listing_ttl
@@ -217,15 +215,13 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}"
+        prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}/{elevation_id}"
         subdirs = await self._s3.get_subdirectories(prefix)
         tilesets = []
-        suffix = f"_{elevation_id}"
         for subdir in subdirs:
             name = subdir.rstrip("/").split("/")[-1]
-            if name.endswith(suffix):
-                tileset_id = name[: -len(suffix)]
-                tilesets.append(tileset_id)
+            if name:
+                tilesets.append(name)
         tilesets.sort(reverse=True)
 
         await self._redis.cache_listing(

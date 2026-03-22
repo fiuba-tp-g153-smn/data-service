@@ -74,3 +74,16 @@ class SatelliteProductResponse(BaseModel):
     product_id: str
     product_info: SatelliteProductConfig
     endpoints: Dict[str, str]
+
+
+class SatellitePointValueResponse(BaseModel):
+    """Response payload for point-value queries on satellite COGs."""
+
+    product: str
+    instrument: str
+    channel: str
+    tileset_id: str
+    lat: float
+    lon: float
+    value: float
+    unit: str
