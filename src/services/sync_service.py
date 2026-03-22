@@ -125,8 +125,8 @@ class SyncService(BaseSyncService):
             {"is_running": "true", "last_sync_start": str(sync_start)}
         )
 
-        logger.info("Starting sync cycle...")
-        total_downloaded = 0
+        logger.info("Sync cycle #%d starting", self._total_cycles + 1)
+        sat_downloaded = 0
         errors = 0
 
         for prefix in self._sync_prefixes:
@@ -144,12 +144,16 @@ class SyncService(BaseSyncService):
                 )
 
                 # 3. Download only new tilesets (with TTL for automatic eviction)
+                prefix_downloaded = 0
+                new_tilesets = 0
                 for s3_tileset_prefix in tileset_prefixes:
                     # Extract tileset_id from prefix: "band_13/tiles/20260521320209/"
                     tileset_id = s3_tileset_prefix.rstrip("/").split("/")[-1]
 
                     if tileset_id in existing_tilesets:
                         continue
+
+                    new_tilesets += 1
 
                     # Download and store in Redis with TTL
                     downloaded = await self._client.sync_prefix_to_redis(
@@ -159,7 +163,8 @@ class SyncService(BaseSyncService):
                         tileset_id,
                         tile_ttl=self._settings.tile_ttl,
                     )
-                    total_downloaded += downloaded
+                    sat_downloaded += downloaded
+                    prefix_downloaded += downloaded
 
                     # Add to tileset index with timestamp score and TTL
                     score = self._extract_timestamp_score(tileset_id)
@@ -170,13 +175,22 @@ class SyncService(BaseSyncService):
                         ttl=self._settings.tile_ttl,
                     )
 
+                logger.info(
+                    "[%s] %d in S3 | %d cached | %d new tilesets | %d tiles downloaded",
+                    channel_dir,
+                    len(tileset_prefixes),
+                    len(existing_tilesets),
+                    new_tilesets,
+                    prefix_downloaded,
+                )
+
             except Exception as e:  # pylint: disable=broad-exception-caught
                 logger.error("Failed to sync prefix '%s': %s", prefix, e)
                 errors += 1
 
         # ── Radar sync ──
         radar_downloaded, radar_errors = await self._sync_radar()
-        total_downloaded += radar_downloaded
+        total_downloaded = sat_downloaded + radar_downloaded
         errors += radar_errors
 
         self._total_cycles += 1
@@ -214,14 +228,21 @@ class SyncService(BaseSyncService):
             }
         )
 
-        if total_downloaded > 0:
-            logger.info(
-                "Sync cycle completed: %d tiles downloaded (%dms)",
-                total_downloaded,
-                duration_ms,
+        logger.info(
+            "Sync cycle #%d done in %dms | sat: %d new tiles / %d tilesets"
+            " | radar: %d new tiles / %d tilesets | errors: %d",
+            self._total_cycles,
+            duration_ms,
+            sat_downloaded,
+            sat_count,
+            radar_downloaded,
+            radar_count,
+            errors,
+        )
+        if self._consecutive_failures > 0:
+            logger.warning(
+                "Sync has %d consecutive failure(s)", self._consecutive_failures
             )
-        else:
-            logger.info("Sync cycle completed: no new tiles (%dms)", duration_ms)
 
     async def _sync_radar(self) -> tuple:
         """Sync radar tilesets from S3 to Redis. Returns (downloaded, errors)."""
@@ -233,6 +254,8 @@ class SyncService(BaseSyncService):
 
         total_downloaded = 0
         errors = 0
+        new_tilesets = 0
+        radar_ids_seen: set = set()
 
         try:
             # 1. List radar IDs: radar/{radar_id}/
@@ -240,6 +263,7 @@ class SyncService(BaseSyncService):
 
             for radar_prefix in radar_prefixes:
                 radar_id = radar_prefix.rstrip("/").split("/")[-1]
+                radar_ids_seen.add(radar_id)
 
                 # 2. List variables: radar/{radar_id}/{variable_id}/
                 var_prefixes = await self._client.get_subdirectories(radar_prefix)
@@ -293,19 +317,18 @@ class SyncService(BaseSyncService):
                                 ttl=self._settings.radar_tile_ttl,
                             )
                             total_downloaded += downloaded
-                            logger.info(
-                                "Radar sync: %d tiles for %s/%s/%s/%s",
-                                downloaded,
-                                radar_id,
-                                variable_id,
-                                tileset_id,
-                                elevation_id,
-                            )
+                            new_tilesets += 1
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Radar sync error: %s", e)
             errors += 1
 
+        logger.info(
+            "[radar] %d radar(s) scanned | %d new tilesets | %d tiles downloaded",
+            len(radar_ids_seen),
+            new_tilesets,
+            total_downloaded,
+        )
         return total_downloaded, errors
 
     async def _count_radar_tilesets(self) -> int:
