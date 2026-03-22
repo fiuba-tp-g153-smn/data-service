@@ -12,6 +12,10 @@ from clients.s3_client import S3Client
 from dependencies import logger, settings
 
 
+class NoS3ClientConfiguredError(Exception):
+    """Raised when point-value strategy is created without an S3 client."""
+
+
 class CogObjectNotFoundError(Exception):
     """Raised when the target COG object does not exist in S3."""
 
@@ -30,7 +34,11 @@ class PointValueStrategy(Protocol):
 class S3CogPointValueStrategy:
     """Point-value strategy backed by S3 object checks and rasterio VSI reads."""
 
-    def __init__(self, s3_client: S3Client):
+    def __init__(self, s3_client: Optional[S3Client]):
+        if s3_client is None:
+            raise NoS3ClientConfiguredError(
+                "S3CogPointValueStrategy requires a configured S3Client"
+            )
         self._s3_client = s3_client
 
     async def sample_cog_value(self, cog_key: str, lat: float, lon: float) -> float:

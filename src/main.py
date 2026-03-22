@@ -35,11 +35,24 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 async def configure_strategies(
     client_redis: RedisClient,
-) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, Optional[S3Client]]:
+) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, S3CogPointValueStrategy, Optional[S3Client]]:
     """Configure and return sync strategies based on settings."""
     s3_client = None
     sat_strategy: SatelliteSyncStrategy
     radar_strategy: RadarSyncStrategy
+
+    if settings.is_s3_configured():
+        s3_client = S3Client(
+            endpoint=settings.s3_tiles_data_endpoint,
+            access_key=settings.s3_tiles_data_access_key,
+            secret_key=settings.s3_tiles_data_secret_key,
+            bucket=settings.s3_tiles_data_bucket_name,
+            secure=settings.s3_tiles_data_secure,
+            max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        )
+        await s3_client.connect()
+
+    point_value_strategy = S3CogPointValueStrategy(s3_client)
 
     if settings.sync_mode == "full":
         # Background sync mode (default)
@@ -51,16 +64,6 @@ async def configure_strategies(
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
-        if settings.is_s3_configured():
-            s3_client = S3Client(
-                endpoint=settings.s3_tiles_data_endpoint,
-                access_key=settings.s3_tiles_data_access_key,
-                secret_key=settings.s3_tiles_data_secret_key,
-                bucket=settings.s3_tiles_data_bucket_name,
-                secure=settings.s3_tiles_data_secure,
-                max_concurrent_downloads=settings.s3_max_concurrent_downloads,
-            )
-            await s3_client.connect()
 
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
@@ -74,8 +77,6 @@ async def configure_strategies(
             settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
         )
-
-        point_value_strategy = S3CogPointValueStrategy(s3_client)
 
     return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
