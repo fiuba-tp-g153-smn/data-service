@@ -236,6 +236,7 @@ Operational tuning settings live in `settings.json` at the project root. Edit th
 {
   "sync_mode": "full",
   "tile_ttl": 21600,
+  "radar_tile_ttl": 2592000,
   "tileset_listing_ttl": 30,
   "sync_interval_seconds": 60,
   "radar_sync_interval_seconds": 30,
@@ -245,18 +246,19 @@ Operational tuning settings live in `settings.json` at the project root. Edit th
 }
 ```
 
-| Key                           | Description                                                              |
-| :---------------------------- | :----------------------------------------------------------------------- |
-| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache).        |
-| `tile_ttl`                    | Redis TTL in seconds for cached tiles (both modes).                      |
-| `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes). |
-| `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).          |
-| `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).              |
-| `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                |
-| `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.              |
-| `cache_control_tile`          | `Cache-Control` header for tile endpoints.                               |
+| Key                           | Description                                                                                                                                                                                                              |
+| :---------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache).                                                                                                                                                        |
+| `tile_ttl`                    | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h).                                                                                |
+| `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles. Radar tiles have no per-object SeaweedFS TTL, so this can be set much higher (default: 2592000 = 30 days, matching the S3 bucket lifecycle). Env var: `RADAR_TILE_TTL`. |
+| `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                                                                                                 |
+| `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).                                                                                                                                                          |
+| `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).                                                                                                                                                              |
+| `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                                                                                                |
+| `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                                                                                                              |
+| `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                                                                                               |
 
-Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`).
+Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`).
 
 About cache-control headers:
 

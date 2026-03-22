@@ -281,7 +281,7 @@ class SyncService(BaseSyncService):
                             variable_id,
                             tileset_id,
                             elevation_id,
-                            tile_ttl=self._settings.tile_ttl,
+                            tile_ttl=self._settings.radar_tile_ttl,
                         )
 
                         if downloaded > 0:
@@ -290,7 +290,7 @@ class SyncService(BaseSyncService):
                                 variable_id,
                                 elevation_id,
                                 tileset_id,
-                                ttl=self._settings.tile_ttl,
+                                ttl=self._settings.radar_tile_ttl,
                             )
                             total_downloaded += downloaded
                             logger.info(

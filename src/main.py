@@ -68,7 +68,7 @@ async def configure_strategies(
         radar_strategy = RadarOnDemandStrategy(
             client_redis,
             s3_client,
-            settings.tile_ttl,
+            settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
         )
 

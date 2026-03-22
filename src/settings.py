@@ -32,6 +32,7 @@ class Settings:
     # --- Operational tuning (loaded from settings.json, env overrides) ---
     sync_mode: str
     tile_ttl: int
+    radar_tile_ttl: int
     tileset_listing_ttl: int
     sync_interval_seconds: int
     radar_sync_interval_seconds: int
@@ -60,6 +61,7 @@ class Settings:
         json_keys = {
             "sync_mode",
             "tile_ttl",
+            "radar_tile_ttl",
             "tileset_listing_ttl",
             "sync_interval_seconds",
             "radar_sync_interval_seconds",
@@ -112,6 +114,7 @@ class Settings:
         )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
+        self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
         self.tileset_listing_ttl = self._env_int(
             "TILESET_LISTING_TTL", self.tileset_listing_ttl
         )

@@ -1,6 +1,7 @@
 {
   "sync_mode": "full",
   "tile_ttl": 21600,
+  "radar_tile_ttl": 2592000,
   "tileset_listing_ttl": 30,
   "sync_interval_seconds": 60,
   "radar_sync_interval_seconds": 30,

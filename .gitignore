@@ -69,3 +69,4 @@ data/
 output_radar/
 .agent/
 .claude
+mypy_cache/
