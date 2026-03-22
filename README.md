@@ -2,7 +2,7 @@
 
 <img src="https://uptime.mapasmn.com/api/badge/5/status?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/uptime?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/ping?style=flat-square" />
 
-The Data Service is a Python-based microservice built with FastAPI for managing data operations. It handles data CRUD and related functionalities in a RESTful API.
+The Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles (GOES-19 ABI and GOES-19 GLM), radar data, and weather station information via REST API. It syncs tile data from an S3/SeaweedFS bucket — populated by the `tiles-processor` service — to local storage, and uses Redis for caching and index management.
 
 ### Team members
 
@@ -15,15 +15,39 @@ The Data Service is a Python-based microservice built with FastAPI for managing 
 
 ### Table of Contents
 
+1. [Architecture](#architecture)
+   - [General data flow between all the services](#general-data-flow-between-all-the-services)
+   - [Cache Sync: Full mode](#cache-sync-full-mode)
+   - [Cache Sync: On-demand mode](#cache-sync-on-demand-mode)
 1. [Dependencies](#dependencies)
 1. [Setup for development](#Setup-for-development)
-1. [MinIO S3 Integration](#minio-s3-integration)
+1. [S3 Integration](#s3-integration)
 1. [Makefile Commands](#Makefile-Commands)
 1. [Running Tests](#Running-Tests)
 1. [Dockerfiles](#Dockerfiles)
 1. [Configuration (`settings.json`)](#configuration-settingsjson)
 1. [Environment Variables](#environment-variables)
 1. [API Documentation](#API-Documentation)
+
+## Architecture
+
+### General data flow between all the services
+
+<p align="center">
+    <img src="./docs/imgs/general_data_flow.png" alt="General data flow between all the services" height="500px">
+</p>
+
+### Cache Sync: Full mode
+
+<p align="center">
+    <img src="./docs/imgs/cache_sync_full_mode.png" alt="Cache Sync: Full mode" height="550px">
+</p>
+
+### Cache Sync: On-demand mode
+
+<p align="center">
+    <img src="./docs/imgs/cache_sync_on_demand_mode.png" alt="Cache Sync: On-demand mode" height="800px">
+</p>
 
 ## Dependencies
 
@@ -46,7 +70,7 @@ You need to have the next dependencies installed:
 3. For local development:
 
    With Docker:
-   - Run `make dev`.
+   - Run `make up`.
 
      The app will be available at http://localhost:8080.
 
@@ -58,16 +82,16 @@ You need to have the next dependencies installed:
 
      The app will be available at http://localhost:8080.
 
-## MinIO S3 Integration
+## S3 Integration
 
-The Data Service syncs tile data from a MinIO S3 bucket, typically populated by the `tiles-processor` service. This decouples tile generation from tile serving.
+The Data Service syncs tile data from a SeaweedFS S3 bucket, typically populated by the `tiles-processor` service. This decouples tile generation from tile serving.
 
 ### How It Works
 
-1. **Background Sync Service**: On startup, data-service starts a background task that periodically syncs tiles from MinIO to local storage.
+1. **Background Sync Service**: On startup, data-service starts a background task that periodically syncs tiles from SeaweedFS to local storage.
 2. **Sync Interval**: Configurable via `SYNC_INTERVAL_SECONDS` (default: 60 seconds).
 3. **Incremental Sync**: Only downloads new or changed files, deletes local files removed from S3.
-4. **Graceful Handling**: If MinIO is not configured or unavailable, the service continues without sync (uses existing local tiles).
+4. **Graceful Handling**: If SeaweedFS is not configured or unavailable, the service continues without sync (uses existing local tiles).
 
 ### S3 Bucket Structure
 
@@ -75,37 +99,42 @@ The service expects tiles in the following structure:
 
 ```
 tiles-data/                              # Bucket name
-├── band_13/
+├── band_2/
 │   └── tiles/
 │       └── {tileset_id}_tiles/
 │           └── {z}/{x}/{y}.webp
-└── band_9/
+├── band_9/
+│   └── tiles/
+│       └── {tileset_id}_tiles/
+│           └── {z}/{x}/{y}.webp
+└── band_13/
     └── tiles/
         └── {tileset_id}_tiles/
             └── {z}/{x}/{y}.webp
 ```
 
-### Connecting to tiles-processor MinIO
+### Connecting to tiles-processor S3/SeaweedFS
 
 When running both services separately:
 
-1. **Start tiles-processor** (includes MinIO):
+1. **Start tiles-processor** (includes S3/SeaweedFS):
 
    ```bash
    cd ../tiles-processor
    docker compose up -d
    ```
 
-   MinIO will be available at `localhost:9000` (S3 API) and `localhost:9001` (Console).
+   SeaweedFS will be available at `localhost:9000` (S3 API) and `localhost:9001` (Console).
 
 2. **Configure data-service** to connect:
 
    ```bash
    # In data-service/.env
-   MINIO_ENDPOINT=host.docker.internal:9000
-   MINIO_ACCESS_KEY=minioadmin
-   MINIO_SECRET_KEY=minioadmin
-   MINIO_BUCKET=tiles-data
+   S3_TILES_DATA_ENDPOINT=host.docker.internal:9000
+   S3_TILES_DATA_ACCESS_KEY=data_service
+   S3_TILES_DATA_SECRET_KEY=data_service
+   S3_TILES_DATA_BUCKET_NAME=tiles-data
+   S3_TILES_DATA_SECURE=false
    ```
 
 3. **Start data-service**:
@@ -113,35 +142,32 @@ When running both services separately:
    docker compose up -d
    ```
 
-The data-service will sync tiles from tiles-processor's MinIO and serve them via REST API.
-
-### Architecture
-
-```
-┌─────────────────────┐         ┌─────────────────────┐         ┌─────────────────────┐
-│   tiles-processor   │ upload  │        MinIO        │  sync   │    data-service     │
-│                     │ ──────> │    (S3 Bucket)      │ <────── │                     │
-│ Generates tiles     │         │ Port 9000 (S3 API)  │         │ Serves tiles via    │
-│ from GOES-19        │         │ Port 9001 (Console) │         │ REST API            │
-└─────────────────────┘         └─────────────────────┘         └─────────────────────┘
-```
+The data-service will sync tiles from tiles-processor's S3/SeaweedFS and serve them via REST API.
 
 ## Makefile Commands
 
 The `Makefile` provides convenient targets for common tasks. Run them from the project root:
 
-- `make dev`:  
+- `make install`:
+  Installs Poetry and all dependencies (including dev/test deps). Required before running `make local` or bare `pytest` commands.
+
+- `make up`:
   Builds the development image (`Dockerfile.dev`) and runs the container.
   - Mounts `./src` for live reloading.
   - Mounts `.env` for configuration.
-  - Exposes the app at http://localhost:8080.  
-    Stop with Ctrl+C or `docker stop <container_id>`.
+  - Exposes the app at http://localhost:8080.
+    Stop with Ctrl+C or `make down`.
+
+- `make down`:
+  Stops all running containers.
+
+- `make clean`:
+  Stops containers and removes Docker volumes.
 
 - `make test`:
   Builds the test image (`Dockerfile.run_test`) and runs all tests.
   - Mounts `./reports/` to persist outputs.
-  - Exposes port 8080 (for any test servers).
-    Test results and coverage reports are saved in `./reports/`.
+  - Test results and coverage reports are saved in `./reports/`.
 
 - `make local`:
   Runs the application locally using Uvicorn.
@@ -149,6 +175,12 @@ The `Makefile` provides convenient targets for common tasks. Run them from the p
   - Enables auto-reload for development.
   - Exposes the app at http://localhost:8080.
     Stop with Ctrl+C.
+
+- `make precommit`:
+  Runs pre-commit hooks (black formatter, pylint static analysis, mypy type checking).
+
+- `make prod`:
+  Builds the production Docker image.
 
 ## Running Tests
 
@@ -203,12 +235,13 @@ Operational tuning settings live in `settings.json` at the project root. Edit th
 ```json
 {
   "sync_mode": "full",
-  "tile_ttl": 21600, // 6 hours
+  "tile_ttl": 21600,
   "tileset_listing_ttl": 30,
   "sync_interval_seconds": 60,
   "radar_sync_interval_seconds": 30,
+  "s3_max_concurrent_downloads": 5,
   "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
-  "cache_control_tile": "public, max-age=43200, immutable" // 12 hours
+  "cache_control_tile": "public, max-age=43200, immutable"
 }
 ```
 
@@ -219,6 +252,7 @@ Operational tuning settings live in `settings.json` at the project root. Edit th
 | `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes). |
 | `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).          |
 | `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).              |
+| `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                |
 | `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.              |
 | `cache_control_tile`          | `Cache-Control` header for tile endpoints.                               |
 
@@ -238,18 +272,18 @@ About cache-control headers:
 
 Environment variables configure secrets, infrastructure, and runtime params. Set them in `.env` (see `.env.example`).
 
-| Variable                    | Description                                                               | Default                    |
-| :-------------------------- | :------------------------------------------------------------------------ | :------------------------- |
-| `LOG_LEVEL`                 | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                          | `INFO`                     |
-| `APP_ENV`                   | Application environment (development, production).                        | `production`               |
-| `APP_HOST_PORT`             | Host port for the API service.                                            | `6006`                     |
-| `S3_TILES_DATA_ENDPOINT`    | S3/MinIO endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
-| `S3_TILES_DATA_ACCESS_KEY`  | S3/MinIO access key.                                                      | Required for sync          |
-| `S3_TILES_DATA_SECRET_KEY`  | S3/MinIO secret key.                                                      | Required for sync          |
-| `S3_TILES_DATA_BUCKET_NAME` | S3 bucket name for tile storage.                                          | `tiles-data`               |
-| `S3_TILES_DATA_SECURE`      | Use HTTPS for S3 connection (`true`/`false`).                             | `false`                    |
-| `REDIS_URL`                 | Redis connection URL.                                                     | `redis://localhost:6379/0` |
-| `WEB_CONCURRENCY`           | Number of Uvicorn workers.                                                | `1`                        |
+| Variable                    | Description                                                                   | Default                    |
+| :-------------------------- | :---------------------------------------------------------------------------- | :------------------------- |
+| `LOG_LEVEL`                 | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                              | `INFO`                     |
+| `APP_ENV`                   | Application environment (development, production).                            | `production`               |
+| `APP_HOST_PORT`             | Host port for the API service.                                                | `6006`                     |
+| `S3_TILES_DATA_ENDPOINT`    | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
+| `S3_TILES_DATA_ACCESS_KEY`  | S3/SeaweedFS access key.                                                      | Required for sync          |
+| `S3_TILES_DATA_SECRET_KEY`  | S3/SeaweedFS secret key.                                                      | Required for sync          |
+| `S3_TILES_DATA_BUCKET_NAME` | S3 bucket name for tile storage.                                              | `tiles-data`               |
+| `S3_TILES_DATA_SECURE`      | Use HTTPS for S3 connection (`true`/`false`).                                 | `false`                    |
+| `REDIS_URL`                 | Redis connection URL.                                                         | `redis://localhost:6379/0` |
+| `WEB_CONCURRENCY`           | Number of Uvicorn workers.                                                    | `1`                        |
 
 ## API Documentation
 
