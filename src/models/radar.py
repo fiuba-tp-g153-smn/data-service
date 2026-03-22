@@ -70,3 +70,16 @@ class RadarStationTilesetsResponse(BaseModel):
     elevations: List[ElevationInfo]
     tilesets: List[TilesetInfo]
     tile_url_pattern: str
+
+
+class RadarPointValueResponse(BaseModel):
+    """Response payload for point-value queries on radar COGs."""
+
+    radar: str
+    variable: str
+    elevation: str
+    tileset_id: str
+    lat: float
+    lon: float
+    value: float
+    unit: str

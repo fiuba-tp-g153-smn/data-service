@@ -12,6 +12,7 @@ from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from controller import general
 from dependencies import logger, redis_client, settings
+from gdal_config import configure_gdal_vsi_s3
 from routes import radar, satellite, sync
 from services.radar_service import radar_service
 from services.radar_sync_strategy import (
@@ -19,6 +20,8 @@ from services.radar_sync_strategy import (
     RadarOnDemandStrategy,
     RadarSyncStrategy,
 )
+from services.point_value_service import point_value_service
+from services.point_value_strategy import S3CogPointValueStrategy
 from services.satellite_service import satellite_service
 from services.satellite_sync_strategy import (
     SatelliteFullSyncStrategy,
@@ -32,11 +35,24 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 async def configure_strategies(
     client_redis: RedisClient,
-) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, Optional[S3Client]]:
+) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, S3CogPointValueStrategy, Optional[S3Client]]:
     """Configure and return sync strategies based on settings."""
     s3_client = None
     sat_strategy: SatelliteSyncStrategy
     radar_strategy: RadarSyncStrategy
+
+    if settings.is_s3_configured():
+        s3_client = S3Client(
+            endpoint=settings.s3_tiles_data_endpoint,
+            access_key=settings.s3_tiles_data_access_key,
+            secret_key=settings.s3_tiles_data_secret_key,
+            bucket=settings.s3_tiles_data_bucket_name,
+            secure=settings.s3_tiles_data_secure,
+            max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        )
+        await s3_client.connect()
+
+    point_value_strategy = S3CogPointValueStrategy(s3_client)
 
     if settings.sync_mode == "full":
         # Background sync mode (default)
@@ -48,16 +64,6 @@ async def configure_strategies(
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
-        if settings.is_s3_configured():
-            s3_client = S3Client(
-                endpoint=settings.s3_tiles_data_endpoint,
-                access_key=settings.s3_tiles_data_access_key,
-                secret_key=settings.s3_tiles_data_secret_key,
-                bucket=settings.s3_tiles_data_bucket_name,
-                secure=settings.s3_tiles_data_secure,
-                max_concurrent_downloads=settings.s3_max_concurrent_downloads,
-            )
-            await s3_client.connect()
 
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
@@ -72,7 +78,7 @@ async def configure_strategies(
             settings.tileset_listing_ttl,
         )
 
-    return sat_strategy, radar_strategy, s3_client
+    return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
 
 async def shutdown_services():
@@ -84,14 +90,15 @@ async def shutdown_services():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
-    # Startup
     logger.info("Starting data-service...")
+    configure_gdal_vsi_s3()
     await redis_client.connect()
 
-    sat_strategy, radar_strategy, s3_client = await configure_strategies(redis_client)
+    sat_strategy, radar_strategy, point_value_strategy, s3_client = await configure_strategies(redis_client)
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
+    point_value_service.set_strategy(point_value_strategy)
 
     yield
 

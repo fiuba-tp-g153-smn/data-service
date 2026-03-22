@@ -2,7 +2,7 @@
 
 from email.utils import format_datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
@@ -12,8 +12,10 @@ from routes.utils import create_tile_response
 from models.satellite import (
     ChannelTilesetsResponse,
     InstrumentResponse,
+    SatellitePointValueResponse,
     SatelliteProductResponse,
 )
+from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
 from services.satellite_service import satellite_service
 
 router = APIRouter(prefix="/products", tags=["Satellite"])
@@ -205,3 +207,77 @@ async def get_satellite_tile(
     logger.debug("Serving satellite tile: %s/%s/%s/%s", tileset_id, z, x, y)
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)
+
+
+@router.get(
+    "/{product_id}/{instrument_id}/{channel_id}/{tileset_id}/point",
+    status_code=status.HTTP_200_OK,
+    summary="Get Satellite Point Value",
+    response_description="Returns nearest sampled value for a lat/lon from satellite COG",
+    response_model=SatellitePointValueResponse,
+)
+async def get_satellite_point_value(
+    product_id: str = PathParam(
+        ..., description="Satellite product identifier (e.g., goes-19)"
+    ),
+    instrument_id: str = PathParam(
+        ..., description="Instrument identifier (e.g., abi)"
+    ),
+    channel_id: str = PathParam(..., description="Channel identifier (e.g., ch-13)"),
+    tileset_id: str = PathParam(..., description="Tileset identifier (timestamp-based)"),
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
+):
+    """Query nearest point value for a satellite COG by geographic coordinate."""
+    if not satellite_service.channel_exists(product_id, instrument_id, channel_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Channel '{channel_id}' not found for {product_id}/{instrument_id}",
+        )
+
+    try:
+        sample = await satellite_service.get_point_value(
+            product_id=product_id,
+            instrument_id=instrument_id,
+            channel_id=channel_id,
+            tileset_id=tileset_id,
+            lat=lat,
+            lon=lon,
+        )
+    except CogNotFoundError as exc:
+        logger.warning(
+            "Satellite COG not found for point query: %s/%s/%s/%s",
+            product_id,
+            instrument_id,
+            channel_id,
+            tileset_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="cog_not_found",
+        ) from exc
+    except NoDataOrOutsideError as exc:
+        logger.warning(
+            "Satellite point query returned nodata/outside: %s/%s/%s/%s lat=%s lon=%s",
+            product_id,
+            instrument_id,
+            channel_id,
+            tileset_id,
+            lat,
+            lon,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="nodata_or_outside",
+        ) from exc
+
+    return {
+        "product": product_id,
+        "instrument": instrument_id,
+        "channel": channel_id,
+        "tileset_id": tileset_id,
+        "lat": lat,
+        "lon": lon,
+        "value": sample.value,
+        "unit": sample.unit,
+    }

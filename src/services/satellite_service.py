@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from dependencies import logger
 from services.base_service import BaseProductService
+from services.point_value_service import PointSample, point_value_service
 from services.satellite_sync_strategy import SatelliteSyncStrategy
 
 
@@ -300,6 +301,29 @@ class SatelliteService(BaseProductService):
 
         dir_name = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
         return await self._strategy.get_tile(dir_name, tileset_id, z, x, y)
+
+    async def get_point_value(
+        self,
+        product_id: str,
+        instrument_id: str,
+        channel_id: str,
+        tileset_id: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        """Get a nearest-neighbor sampled value from the channel COG."""
+        if not self.channel_exists(product_id, instrument_id, channel_id):
+            raise ValueError(
+                f"Channel '{channel_id}' not found for {product_id}/{instrument_id}"
+            )
+
+        band_id = self.CHANNEL_DIR_MAPPING.get(channel_id, channel_id)
+        return await point_value_service.sample_satellite_point(
+            band_id=band_id,
+            tileset_id=tileset_id,
+            lat=lat,
+            lon=lon,
+        )
 
     def validate_zoom_level(
         self, product_id: str, instrument_id: str, channel_id: str, z: int

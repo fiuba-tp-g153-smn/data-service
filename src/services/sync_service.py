@@ -19,7 +19,7 @@ from settings import Settings
 logger = logging.getLogger(__name__)
 
 # S3 prefix where radar data lives
-RADAR_S3_PREFIX = "radar"
+RADAR_S3_PREFIX = "tiles/radar"
 
 
 class SyncService(BaseSyncService):
@@ -35,22 +35,22 @@ class SyncService(BaseSyncService):
 
     # Prefixes to sync from S3 (matches tiles-processor output structure)
     DEFAULT_SYNC_PREFIXES = [
-        "band_13/tiles",
-        "band_9/tiles",
-        "band_2/tiles",
-        "glm_fed/tiles",
-        "glm_toe/tiles",
-        "glm_mfa/tiles",
+        "tiles/band_13",
+        "tiles/band_9",
+        "tiles/band_2",
+        "tiles/glm_fed",
+        "tiles/glm_toe",
+        "tiles/glm_mfa",
     ]
 
     # Maps S3 prefix to channel_dir for Redis key construction
     PREFIX_TO_CHANNEL = {
-        "band_13/tiles": "band_13",
-        "band_9/tiles": "band_9",
-        "band_2/tiles": "band_2",
-        "glm_fed/tiles": "glm_fed",
-        "glm_toe/tiles": "glm_toe",
-        "glm_mfa/tiles": "glm_mfa",
+        "tiles/band_13": "band_13",
+        "tiles/band_9": "band_9",
+        "tiles/band_2": "band_2",
+        "tiles/glm_fed": "glm_fed",
+        "tiles/glm_toe": "glm_toe",
+        "tiles/glm_mfa": "glm_mfa",
     }
 
     def __init__(
@@ -131,7 +131,7 @@ class SyncService(BaseSyncService):
 
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
-                prefix, prefix.split("/", maxsplit=1)[0]
+                prefix, prefix.rstrip("/").split("/")[-1]
             )
             try:
                 # 1. List S3 tileset prefixes
@@ -147,7 +147,7 @@ class SyncService(BaseSyncService):
                 prefix_downloaded = 0
                 new_tilesets = 0
                 for s3_tileset_prefix in tileset_prefixes:
-                    # Extract tileset_id from prefix: "band_13/tiles/20260521320209/"
+                    # Extract tileset_id from prefix: "tiles/band_13/20260521320209/"
                     tileset_id = s3_tileset_prefix.rstrip("/").split("/")[-1]
 
                     if tileset_id in existing_tilesets:
@@ -206,7 +206,7 @@ class SyncService(BaseSyncService):
         sat_count = 0
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
-                prefix, prefix.split("/", maxsplit=1)[0]
+                prefix, prefix.rstrip("/").split("/")[-1]
             )
             tilesets = await self._redis_client.get_satellite_tilesets(channel_dir)
             sat_count += len(tilesets)
@@ -258,33 +258,31 @@ class SyncService(BaseSyncService):
         radar_ids_seen: set = set()
 
         try:
-            # 1. List radar IDs: radar/{radar_id}/
+            # 1. List radar IDs: tiles/radar/{radar_id}/
             radar_prefixes = await self._client.get_subdirectories(RADAR_S3_PREFIX)
 
             for radar_prefix in radar_prefixes:
                 radar_id = radar_prefix.rstrip("/").split("/")[-1]
                 radar_ids_seen.add(radar_id)
 
-                # 2. List variables: radar/{radar_id}/{variable_id}/
+                # 2. List variables: tiles/radar/{radar_id}/{variable_id}/
                 var_prefixes = await self._client.get_subdirectories(radar_prefix)
 
                 for var_prefix in var_prefixes:
                     variable_id = var_prefix.rstrip("/").split("/")[-1]
 
-                    # 3. List tileset dirs: radar/{radar_id}/{variable_id}/{ts}_elev{N}/
-                    ts_prefixes = await self._client.get_subdirectories(var_prefix)
+                    # 3. List elevations: tiles/radar/{radar_id}/{variable_id}/elev{N}/
+                    elevation_prefixes = await self._client.get_subdirectories(
+                        var_prefix
+                    )
 
                     # Cache existing tilesets per elevation from Redis
                     existing_by_elevation = {}
 
-                    for ts_prefix in ts_prefixes:
-                        folder_name = ts_prefix.rstrip("/").split("/")[-1]
-                        parts = folder_name.split("_elev")
-                        if len(parts) != 2:
+                    for elevation_prefix in elevation_prefixes:
+                        elevation_id = elevation_prefix.rstrip("/").split("/")[-1]
+                        if not elevation_id.startswith("elev"):
                             continue
-
-                        tileset_id = parts[0]
-                        elevation_id = f"elev{parts[1]}"
 
                         # Query Redis once per elevation (same pattern as satellite)
                         if elevation_id not in existing_by_elevation:
@@ -294,30 +292,45 @@ class SyncService(BaseSyncService):
                                 )
                             )
 
-                        if tileset_id in existing_by_elevation[elevation_id]:
-                            continue
-
-                        # 4. Download tiles under tileset prefix
-                        downloaded = await self._client.sync_radar_prefix_to_redis(
-                            self._redis_client,
-                            ts_prefix,
-                            radar_id,
-                            variable_id,
-                            tileset_id,
-                            elevation_id,
-                            tile_ttl=self._settings.radar_tile_ttl,
+                        # 4. List tileset dirs: .../{elevation_id}/{timestamp}/
+                        ts_prefixes = await self._client.get_subdirectories(
+                            elevation_prefix
                         )
 
-                        if downloaded > 0:
-                            await self._redis_client.add_radar_index(
+                        for ts_prefix in ts_prefixes:
+                            tileset_id = ts_prefix.rstrip("/").split("/")[-1]
+
+                            if tileset_id in existing_by_elevation[elevation_id]:
+                                continue
+
+                            # 5. Download tiles under tileset prefix
+                            downloaded = await self._client.sync_radar_prefix_to_redis(
+                                self._redis_client,
+                                ts_prefix,
                                 radar_id,
                                 variable_id,
-                                elevation_id,
                                 tileset_id,
-                                ttl=self._settings.radar_tile_ttl,
+                                elevation_id,
+                                tile_ttl=self._settings.tile_ttl,
                             )
-                            total_downloaded += downloaded
-                            new_tilesets += 1
+
+                            if downloaded > 0:
+                                await self._redis_client.add_radar_index(
+                                    radar_id,
+                                    variable_id,
+                                    elevation_id,
+                                    tileset_id,
+                                    ttl=self._settings.tile_ttl,
+                                )
+                                total_downloaded += downloaded
+                                logger.info(
+                                    "Radar sync: %d tiles for %s/%s/%s/%s",
+                                    downloaded,
+                                    radar_id,
+                                    variable_id,
+                                    elevation_id,
+                                    tileset_id,
+                                )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Radar sync error: %s", e)

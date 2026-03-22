@@ -3,6 +3,7 @@
 from typing import Optional
 
 from services.base_service import BaseProductService
+from services.point_value_service import PointSample, point_value_service
 from services.radar_sync_strategy import RadarSyncStrategy
 
 
@@ -84,6 +85,25 @@ class RadarService(BaseProductService):
 
         return await self._strategy.get_tile(
             radar_id, variable_id, elevation_id, tileset_id, z, x, y
+        )
+
+    async def get_point_value(
+        self,
+        radar_id: str,
+        variable_id: str,
+        elevation_id: str,
+        tileset_id: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        """Get a nearest-neighbor sampled value from the radar COG."""
+        return await point_value_service.sample_radar_point(
+            radar_id=radar_id,
+            variable_id=variable_id,
+            elevation_id=elevation_id,
+            tileset_id=tileset_id,
+            lat=lat,
+            lon=lon,
         )
 
 

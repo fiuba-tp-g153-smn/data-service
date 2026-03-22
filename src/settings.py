@@ -28,6 +28,11 @@ class Settings:
     s3_tiles_data_bucket_name: str = ""
     s3_tiles_data_secure: bool = False
     redis_url: str = ""
+    gdal_disable_readdir_on_open: str = "EMPTY_DIR"
+    gdal_curl_use_head: str = "NO"
+    gdal_vsi_cache: bool = True
+    gdal_vsi_cache_size: str = "50MB"
+    gdal_vsicurl_cache_size: str = "200MB"
 
     # --- Operational tuning (loaded from settings.json, env overrides) ---
     sync_mode: str
@@ -104,6 +109,21 @@ class Settings:
 
         # Redis
         self.redis_url = os.getenv("REDIS_URL", self.redis_url)
+
+        # GDAL / VSI S3 tuning
+        self.gdal_disable_readdir_on_open = os.getenv(
+            "GDAL_DISABLE_READDIR_ON_OPEN", self.gdal_disable_readdir_on_open
+        )
+        self.gdal_curl_use_head = os.getenv(
+            "CPL_VSIL_CURL_USE_HEAD", self.gdal_curl_use_head
+        )
+        self.gdal_vsi_cache = os.getenv("VSI_CACHE", "TRUE").upper() == "TRUE"
+        self.gdal_vsi_cache_size = os.getenv(
+            "VSI_CACHE_SIZE", self.gdal_vsi_cache_size
+        )
+        self.gdal_vsicurl_cache_size = os.getenv(
+            "CPL_VSIL_CURL_CACHE_SIZE", self.gdal_vsicurl_cache_size
+        )
 
         # Operational (env overrides JSON)
         self.sync_interval_seconds = self._env_int(

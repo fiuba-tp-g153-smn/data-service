@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, List, Optional, cast
 
 import aioboto3
+from botocore.exceptions import ClientError
 from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
@@ -99,7 +100,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
 
         Args:
             redis_client: Redis client for storing tiles
-            s3_prefix: S3 key prefix for this tileset (e.g., "band_13/tiles/OR_ABI-.../")
+            s3_prefix: S3 key prefix for this tileset (e.g., "tiles/band_13/20260740300213/")
             channel_dir: Channel directory name (e.g., "band_13")
             tileset_id: Tileset identifier
             tile_ttl: Optional TTL in seconds for stored tiles
@@ -157,7 +158,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         client = self._client
         async with self._semaphore:
             try:
-                # Parse z/x/y from key: .../tiles/{tileset_id}_tiles/{z}/{x}/{y}.webp
+                # Parse z/x/y from key: .../{tileset_id}/{z}/{x}/{y}.webp
                 parts = s3_key.split("/")
                 y_file = parts[-1]  # "{y}.webp"
                 x = parts[-2]
@@ -207,7 +208,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         channel_dir: str, tileset_id: str, z: int, x: int, y: int
     ) -> str:
         """Build S3 key for a satellite tile."""
-        return f"{channel_dir}/tiles/{tileset_id}/{z}/{x}/{y}.webp"
+        return f"tiles/{channel_dir}/{tileset_id}/{z}/{x}/{y}.webp"
 
     @staticmethod
     def build_radar_tile_key(
@@ -221,8 +222,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
     ) -> str:
         """Build S3 key for a radar tile."""
         return (
-            f"radar/{radar_id}/{variable_id}/"
-            f"{tileset_id}_{elevation_id}/{z}/{x}/{y}.webp"
+            f"tiles/radar/{radar_id}/{variable_id}/"
+            f"{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp"
         )
 
     async def sync_radar_prefix_to_redis(
@@ -248,12 +249,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             return 0
 
         logger.info(
-            "Downloading %d radar tiles for %s/%s/%s_%s",
+            "Downloading %d radar tiles for %s/%s/%s/%s",
             len(tile_objects),
             radar_id,
             variable_id,
-            tileset_id,
             elevation_id,
+            tileset_id,
         )
 
         tasks = [
@@ -325,6 +326,19 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Failed to download tile %s: %s", s3_key, e)
             return None
+
+    async def object_exists(self, key: str) -> bool:
+        """Check if an object exists in S3 using a HEAD request."""
+        client = await self._ensure_connected()
+        try:
+            await client.head_object(Bucket=self._bucket, Key=key)
+            return True
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                return False
+            logger.error("Unexpected S3 error while checking object %s: %s", key, exc)
+            raise
 
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""

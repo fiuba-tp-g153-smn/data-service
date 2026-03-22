@@ -63,8 +63,8 @@ You need to have the next dependencies installed:
 
 1. Clone the repository to your local machine.
 
-2. Copy the example environment file:  
-   `cp .env.example .env`  
+2. Copy the example environment file:
+   `cp .env.example .env`
    Edit `.env` to configure your environment variables (e.g., database connections, secrets).
 
 3. For local development:
@@ -99,18 +99,19 @@ The service expects tiles in the following structure:
 
 ```
 tiles-data/                              # Bucket name
-├── band_2/
-│   └── tiles/
-│       └── {tileset_id}_tiles/
+├── tiles/
+│   ├── band_9/
+│   │   └── {tileset_id}/
+│   │       └── {z}/{x}/{y}.webp
+│   ├── band_13/
+│   │   └── {tileset_id}/
+│   │       └── {z}/{x}/{y}.webp
+│   └── radar/
+│       └── {radar_id}/{variable}/elev{N}/{tileset_id}/
 │           └── {z}/{x}/{y}.webp
-├── band_9/
-│   └── tiles/
-│       └── {tileset_id}_tiles/
-│           └── {z}/{x}/{y}.webp
-└── band_13/
-    └── tiles/
-        └── {tileset_id}_tiles/
-            └── {z}/{x}/{y}.webp
+└── cog/
+  ├── {band_id}/{tileset_id}.tif
+  └── radar/{radar_id}/{variable}/elev{N}/{tileset_id}.tif
 ```
 
 ### Connecting to tiles-processor S3/SeaweedFS
@@ -186,8 +187,8 @@ The `Makefile` provides convenient targets for common tasks. Run them from the p
 
 Tests use pytest and are located in the `tests/` directory.
 
-- **With Docker (Recommended)**:  
-  `make test`  
+- **With Docker (Recommended)**:
+  `make test`
   This runs:
   - The tests with `pytest`.
   - Skips tests marked `@pytest.mark.skip`.
@@ -196,34 +197,34 @@ Tests use pytest and are located in the `tests/` directory.
     - JUnit XML report: `reports/junit_report.xml` (for CI integration).
     - HTML coverage report: Open `reports/coverage/index.html` in a browser.
 
-- **Locally (with Poetry)**:  
-  `poetry run pytest -m "not skip" --cov=src --cov-report=html:reports/coverage`  
+- **Locally (with Poetry)**:
+  `poetry run pytest -m "not skip" --cov=src --cov-report=html:reports/coverage`
   Ensure `make install` has been run to install dev dependencies.
 
 ## Dockerfiles
 
 The project includes three Dockerfiles for different environments:
 
-- **Dockerfile** (Production):  
+- **Dockerfile** (Production):
   Builds a production image based on Python 3.13 slim.
   - Installs only runtime dependencies (skips dev/test deps).
   - Copies the source code (`./src`) into the container.
-  - Runs the app with Uvicorn on port 8080.  
+  - Runs the app with Uvicorn on port 8080.
     Use this for **deployment**.
 
-- **Dockerfile.dev** (Development):  
+- **Dockerfile.dev** (Development):
   Similar to production but optimized for development.
   - Does not copy source code (mount `./src` as a volume for live code changes and hot-reloading).
   - Enables Uvicorn's `--reload` flag for automatic restarts on code changes.
-  - Mount `.env` for environment variables.  
+  - Mount `.env` for environment variables.
     Ideal for local **development** workflows.
 
-- **Dockerfile.run_test** (Testing):  
+- **Dockerfile.run_test** (Testing):
   Builds an image for running tests.
   - Installs all dependencies, including dev/test ones.
   - Copies the entire project (`.`).
   - Runs `pytest` with coverage reporting, JUnit XML output, and ignores deprecation warnings.
-  - Generates reports in `/app/reports` (mounted to `./reports` on host).  
+  - Generates reports in `/app/reports` (mounted to `./reports` on host).
     Use this to execute **tests in an isolated environment** in a production-like environment.
 
 All images use Python 3.13.12-alpine as the base for minimal size.
@@ -289,7 +290,7 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 
 ## API Documentation
 
-- **Swagger UI**: http://localhost:8080/docs (when the app is running)  
+- **Swagger UI**: http://localhost:8080/docs (when the app is running)
   Explore endpoints, try requests, and view schemas interactively.
 
 In production, replace `localhost:8080` with your deployed URL (e.g., https://api.example.com/docs).
