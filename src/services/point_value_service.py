@@ -51,6 +51,10 @@ class PointValueService(BaseProductService):
         "VRAD": "m/s",
     }
 
+    MODEL_UNITS = {
+        "ecmwf_total_precipitation": "mm",
+    }
+
     def set_strategy(self, strategy: PointValueStrategy) -> None:
         """Set point-value strategy (called during app startup)."""
         self._strategy = strategy
@@ -92,8 +96,9 @@ class PointValueService(BaseProductService):
     ) -> PointSample:
         """Sample an ECMWF precipitation COG at a specific coordinate."""
         cog_key = f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
+        unit = self.MODEL_UNITS.get("ecmwf_total_precipitation", "1")
         value = await self._sample_value(cog_key, lat, lon)
-        return PointSample(value=value, unit="mm")
+        return PointSample(value=value, unit=unit)
 
     async def _sample_value(self, cog_key: str, lat: float, lon: float) -> float:
         strategy = self._get_strategy()

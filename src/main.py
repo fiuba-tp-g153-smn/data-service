@@ -81,7 +81,7 @@ async def configure_strategies(
         )
 
     # ECMWF precipitation (independently configurable sync mode)
-    if settings.ecmwf_sync_mode == "full":
+    if settings.sync_mode == "full":
         ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
         ecmwf_service.set_s3_client(s3_client)
         ecmwf_service.set_redis_client(client_redis)
@@ -103,7 +103,7 @@ async def shutdown_services():
     """Stop background services if sync mode is full."""
     if settings.sync_mode == "full":
         await sync_service.stop(logger)
-    if settings.ecmwf_sync_mode == "full":
+    if settings.sync_mode == "full":
         await ecmwf_service.stop_sync(logger)
 
 
