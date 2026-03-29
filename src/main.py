@@ -13,7 +13,9 @@ from clients.s3_client import S3Client
 from controller import general
 from dependencies import logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
-from routes import radar, satellite, sync
+from routes import ecmwf, radar, satellite, sync
+from services.ecmwf_service import ecmwf_service
+from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
 from services.radar_service import radar_service
 from services.radar_sync_strategy import (
     RadarFullSyncStrategy,
@@ -78,6 +80,22 @@ async def configure_strategies(
             settings.tileset_listing_ttl,
         )
 
+    # ECMWF precipitation (independently configurable sync mode)
+    if settings.ecmwf_sync_mode == "full":
+        ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
+        ecmwf_service.set_s3_client(s3_client)
+        ecmwf_service.set_redis_client(client_redis)
+        await ecmwf_service.start_sync(logger)
+    else:
+        logger.info("Starting ECMWF in on-demand sync mode")
+        ecmwf_strategy = EcmwfOnDemandStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_tile_ttl,
+            settings.tileset_listing_ttl,
+        )
+    ecmwf_service.set_strategy(ecmwf_strategy)
+
     return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
 
@@ -85,6 +103,8 @@ async def shutdown_services():
     """Stop background services if sync mode is full."""
     if settings.sync_mode == "full":
         await sync_service.stop(logger)
+    if settings.ecmwf_sync_mode == "full":
+        await ecmwf_service.stop_sync(logger)
 
 
 @asynccontextmanager
@@ -130,6 +150,7 @@ app.add_middleware(
 )
 
 app.include_router(general.router)
-app.include_router(radar.router)  # Radar routes (most specific)
+app.include_router(radar.router)      # Radar routes (most specific)
+app.include_router(ecmwf.router)      # ECMWF precipitation routes
 app.include_router(satellite.router)  # Satellite routes
-app.include_router(sync.router)  # Sync observability
+app.include_router(sync.router)       # Sync observability

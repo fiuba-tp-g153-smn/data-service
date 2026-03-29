@@ -83,6 +83,18 @@ class PointValueService(BaseProductService):
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
 
+    async def sample_ecmwf_point(
+        self,
+        forecast_ts: str,
+        period_ts: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        """Sample an ECMWF precipitation COG at a specific coordinate."""
+        cog_key = f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit="mm")
+
     async def _sample_value(self, cog_key: str, lat: float, lon: float) -> float:
         strategy = self._get_strategy()
         try:

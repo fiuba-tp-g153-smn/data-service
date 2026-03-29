@@ -47,7 +47,13 @@ class Settings:
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
     radar_lock_path: str = "/tmp/radar_sync.lock"
+    ecmwf_lock_path: str = "/tmp/ecmwf_sync.lock"
     s3_max_concurrent_downloads: int = 5
+    # ECMWF precipitation (loaded from settings.json, env overrides)
+    ecmwf_sync_mode: str
+    ecmwf_tile_ttl: int
+    ecmwf_forecasts_to_keep: int
+    ecmwf_sync_interval_seconds: int
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -73,6 +79,10 @@ class Settings:
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
+            "ecmwf_sync_mode",
+            "ecmwf_tile_ttl",
+            "ecmwf_forecasts_to_keep",
+            "ecmwf_sync_interval_seconds",
         }
 
         for key in json_keys:
@@ -146,6 +156,16 @@ class Settings:
         )
         self.s3_max_concurrent_downloads = self._env_int(
             "S3_MAX_CONCURRENT_DOWNLOADS", self.s3_max_concurrent_downloads
+        )
+        self.ecmwf_sync_mode = (
+            os.getenv("ECMWF_SYNC_MODE", self.ecmwf_sync_mode) or self.ecmwf_sync_mode
+        )
+        self.ecmwf_tile_ttl = self._env_int("ECMWF_TILE_TTL", self.ecmwf_tile_ttl)
+        self.ecmwf_forecasts_to_keep = self._env_int(
+            "ECMWF_FORECASTS_TO_KEEP", self.ecmwf_forecasts_to_keep
+        )
+        self.ecmwf_sync_interval_seconds = self._env_int(
+            "ECMWF_SYNC_INTERVAL_SECONDS", self.ecmwf_sync_interval_seconds
         )
 
     def is_s3_configured(self) -> bool:

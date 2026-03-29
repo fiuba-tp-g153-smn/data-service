@@ -217,6 +217,65 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         )
         return sorted((m.decode() for m in members), reverse=True)
 
+    # ============== ECMWF Tile Operations ==============
+
+    async def store_ecmwf_tile(
+        self,
+        forecast_ts: str,
+        period_ts: str,
+        z: int,
+        x: int,
+        y: int,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Store an ECMWF precipitation tile in Redis, optionally with TTL."""
+        key = f"tile:ecmwf:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_ecmwf_tile(
+        self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
+    ) -> Optional[bytes]:
+        """Get an ECMWF precipitation tile from Redis."""
+        key = f"tile:ecmwf:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
+        return await self._conn.get(key)
+
+    # ============== ECMWF Index Operations ==============
+
+    async def store_ecmwf_index(
+        self, forecast_ts: str, periods: List[str], ttl: int
+    ) -> None:
+        """Add forecast and its periods to the ECMWF Redis index."""
+        pipe = await self._conn.pipeline()
+
+        forecasts_key = "idx:ecmwf:forecasts"
+        pipe.sadd(forecasts_key, forecast_ts.encode())
+        pipe.expire(forecasts_key, ttl)
+
+        periods_key = f"idx:ecmwf:{forecast_ts}:periods"
+        for period in periods:
+            pipe.sadd(periods_key, period.encode())
+        if periods:
+            pipe.expire(periods_key, ttl)
+
+        await pipe.execute()
+
+    async def get_ecmwf_forecasts(self) -> List[str]:
+        """Get all available forecast timestamps, sorted descending."""
+        members = await self._conn.smembers("idx:ecmwf:forecasts")  # type: ignore[misc]
+        return sorted((m.decode() for m in members), reverse=True)
+
+    async def get_ecmwf_periods(self, forecast_ts: str) -> List[str]:
+        """Get all period timestamps for a forecast, sorted ascending."""
+        members = await self._conn.smembers(  # type: ignore[misc]
+            f"idx:ecmwf:{forecast_ts}:periods"
+        )
+        return sorted(m.decode() for m in members)
+
     # ============== Listing Cache Operations ==============
 
     async def cache_listing(self, cache_key: str, data: bytes, ttl: int) -> None:

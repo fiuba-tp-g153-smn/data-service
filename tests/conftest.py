@@ -38,4 +38,17 @@ def mock_redis_client():
     client.update_sync_status = AsyncMock()
     client.get_sync_status = AsyncMock(return_value={})
 
+    # ECMWF tile operations
+    client.store_ecmwf_tile = AsyncMock()
+    client.get_ecmwf_tile = AsyncMock(return_value=None)
+
+    # ECMWF index operations
+    client.store_ecmwf_index = AsyncMock()
+    client.get_ecmwf_forecasts = AsyncMock(return_value=[])
+    client.get_ecmwf_periods = AsyncMock(return_value=[])
+
+    # Listing cache (shared across sources)
+    client.get_cached_listing = AsyncMock(return_value=None)
+    client.cache_listing = AsyncMock()
+
     return client

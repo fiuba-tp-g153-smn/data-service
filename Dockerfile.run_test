@@ -1,8 +1,11 @@
-# Based on slim Debian 13 Trixie
-FROM python:3.13.12-alpine
+FROM python:3.13.12-slim-trixie
 
 # Set working directory inside the container
 WORKDIR /app
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends libexpat1 \
+	&& rm -rf /var/lib/apt/lists/*
 
 # Copy only dependency manifests first (to leverage Docker build cache for faster builds)
 COPY pyproject.toml poetry.lock* /app/
