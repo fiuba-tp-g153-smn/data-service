@@ -61,3 +61,58 @@ async def test_sample_raises_no_data_or_outside():
 
     with pytest.raises(NoDataOrOutsideError):
         await service.sample_satellite_point("band_13", "t1", -34.0, -58.0)
+
+
+@pytest.mark.asyncio
+async def test_sample_ecmwf_point_returns_mm_unit():
+    service = PointValueService()
+    strategy = MagicMock()
+    strategy.sample_cog_value = AsyncMock(return_value=5.2)
+    service.set_strategy(strategy)
+
+    sample = await service.sample_ecmwf_point(
+        "20260330T1200Z", "20260330T1500Z-20260330T1800Z", -34.0, -58.0
+    )
+
+    assert sample.value == 5.2
+    assert sample.unit == "mm"
+
+
+@pytest.mark.asyncio
+async def test_sample_ecmwf_point_builds_correct_cog_key():
+    service = PointValueService()
+    strategy = MagicMock()
+    strategy.sample_cog_value = AsyncMock(return_value=0.0)
+    service.set_strategy(strategy)
+
+    await service.sample_ecmwf_point(
+        "20260330T1200Z", "20260330T1500Z-20260330T1800Z", -34.0, -58.0
+    )
+
+    expected_key = (
+        "cog/models/ecmwf/total_precipitation"
+        "/20260330T1200Z/20260330T1500Z-20260330T1800Z.tif"
+    )
+    strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)
+
+
+@pytest.mark.asyncio
+async def test_sample_ecmwf_point_raises_cog_not_found():
+    service = PointValueService()
+    strategy = MagicMock()
+    strategy.sample_cog_value = AsyncMock(side_effect=CogObjectNotFoundError())
+    service.set_strategy(strategy)
+
+    with pytest.raises(CogNotFoundError):
+        await service.sample_ecmwf_point("20260330T1200Z", "p1", -34.0, -58.0)
+
+
+@pytest.mark.asyncio
+async def test_sample_ecmwf_point_raises_nodata_or_outside():
+    service = PointValueService()
+    strategy = MagicMock()
+    strategy.sample_cog_value = AsyncMock(side_effect=NoDataOrOutsideSampleError())
+    service.set_strategy(strategy)
+
+    with pytest.raises(NoDataOrOutsideError):
+        await service.sample_ecmwf_point("20260330T1200Z", "p1", -34.0, -58.0)
