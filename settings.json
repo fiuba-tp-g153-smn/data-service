@@ -1,5 +1,5 @@
 {
-  "sync_mode": "on_demand",
+  "sync_mode": "full",
   "tile_ttl": 21600,
   "radar_tile_ttl": 2592000,
   "tileset_listing_ttl": 30,
