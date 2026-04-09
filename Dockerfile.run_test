@@ -14,13 +14,13 @@ COPY pyproject.toml poetry.lock* /app/
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # Install Poetry (dependency manager) globally, disable venvs to install into system site-packages
-RUN pip install "poetry" && poetry config virtualenvs.create false
+RUN pip install --no-cache-dir "poetry==2.3.2" && poetry config virtualenvs.create false
 
 # Verify that poetry.lock matches pyproject.toml, regenerate if out of date
 # Install all dependencies, tests need dev dependencies as well
 # "--no-root" avoids installing this project package itself, since tests usually run against
 # the source code rather than an installed package
-RUN (poetry check --lock || poetry lock) && poetry install --no-root
+RUN (poetry check --lock || poetry lock) && poetry install --no-root --no-cache
 
 # Copy the rest of the project files (source code, tests, configs, etc.)
 COPY . .

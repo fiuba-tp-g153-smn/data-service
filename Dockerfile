@@ -13,10 +13,10 @@ RUN apt-get update \
 COPY pyproject.toml poetry.lock /app/
 
 # Install Poetry, disable venvs to install into system site-packages
-RUN pip install --no-cache-dir "poetry" && poetry config virtualenvs.create false
+RUN pip install --no-cache-dir "poetry==2.3.2" && poetry config virtualenvs.create false
 
 # Re-generate lock file if it is outdated, then install all dependencies (except dev/test deps)
-RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root --no-ansi
+RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root --no-ansi --no-cache
 
 ################################
 # Stage 2: Runtime

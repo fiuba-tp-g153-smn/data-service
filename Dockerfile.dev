@@ -16,12 +16,12 @@ COPY pyproject.toml poetry.lock /app/
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # Install Poetry (dependency manager) globally, disable venvs to install into system site-packages
-RUN pip install "poetry" && poetry config virtualenvs.create false
+RUN pip install --no-cache-dir "poetry==2.3.2" && poetry config virtualenvs.create false
 
 # Re-generate lock file if it is outdated, then install all dependencies (except dev/test deps)
 # "--without dev": keep container smaller by skipping development deps
 # "--no-root": don’t install this project as a package itself, we run code mounted in /app
-RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root
+RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root --no-cache
 
 # Commented on purpose. Code should be added as a volume to avoid re-building image on each change
 # for loval development
