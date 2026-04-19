@@ -1,5 +1,6 @@
 """Unit tests for resumable-scrape wiring in `BasemapScraperService`."""
 
+import time
 from types import SimpleNamespace
 from typing import Dict, Iterable, Set, Tuple
 from unittest.mock import AsyncMock, MagicMock
@@ -243,6 +244,147 @@ async def test_watermark_checkpoint_persists_during_sweep(store):
 
     total = len(list(iter_tiles(5, bbox)))
     assert max(indices) == total
+
+
+@pytest.mark.asyncio
+async def test_successful_sweep_persists_last_completed(store):
+    """After a full sweep, `basemap_scrape_last_completed` holds a recent timestamp."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    before = int(time.time())
+    await scraper._run_sync()  # pylint: disable=protected-access
+    after = int(time.time())
+
+    stamped = await store.get_last_completed(provider.provider_id)
+    assert stamped is not None
+    assert before <= stamped <= after
+
+
+@pytest.mark.asyncio
+async def test_cooldown_skips_provider_within_window(store, monkeypatch):
+    """A provider completed < interval ago is skipped on the next `_run_sync`."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_interval_seconds=604800
+    )
+
+    # Stamp completion 1 hour ago; still inside the 7-day window.
+    fake_now = 2_000_000_000
+    await store.set_last_completed(provider.provider_id, fake_now - 3600)
+    monkeypatch.setattr("services.basemap_scraper_service.time.time", lambda: fake_now)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # No tile fetched; cursor stays absent; completion stamp unchanged.
+    assert http.calls == []
+    assert await store.get_cursor(provider.provider_id) is None
+    assert await store.get_last_completed(provider.provider_id) == fake_now - 3600
+
+
+@pytest.mark.asyncio
+async def test_cooldown_ignored_when_cursor_present(store, monkeypatch):
+    """A live resume cursor wins over the cool-down — the sweep still runs."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_interval_seconds=604800
+    )
+
+    fake_now = 2_000_000_000
+    await store.set_last_completed(provider.provider_id, fake_now - 60)
+    await store.set_cursor(provider.provider_id, 5, 0)
+    monkeypatch.setattr("services.basemap_scraper_service.time.time", lambda: fake_now)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # Sweep actually executed: http received calls and completion got restamped.
+    assert len(http.calls) > 0
+    assert await store.get_last_completed(provider.provider_id) == fake_now
+
+
+@pytest.mark.asyncio
+async def test_cooldown_expired_runs_full_sweep(store, monkeypatch):
+    """Once the cool-down expires, the next `_run_sync` scrapes normally."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_interval_seconds=604800
+    )
+
+    fake_now = 2_000_000_000
+    await store.set_last_completed(provider.provider_id, fake_now - 604801)
+    monkeypatch.setattr("services.basemap_scraper_service.time.time", lambda: fake_now)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    assert len(http.calls) > 0
+    assert await store.get_last_completed(provider.provider_id) == fake_now
+
+
+@pytest.mark.asyncio
+async def test_compute_next_sleep_returns_soonest_remaining(store, monkeypatch):
+    """`_compute_next_sleep` reflects the soonest-due provider, floored at 60s."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_interval_seconds=604800
+    )
+
+    fake_now = 2_000_000_000
+    # 100k seconds remaining: last = now - (604800 - 100000).
+    await store.set_last_completed(provider.provider_id, fake_now - (604800 - 100000))
+    monkeypatch.setattr("services.basemap_scraper_service.time.time", lambda: fake_now)
+
+    got = await scraper._compute_next_sleep(
+        default=604800.0
+    )  # pylint: disable=protected-access
+    assert got == 100000.0
+
+
+@pytest.mark.asyncio
+async def test_compute_next_sleep_zero_when_cursor_present(store):
+    """A cursor forces immediate re-run (sleep == 0)."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    await scraper._state.set_cursor(
+        provider.provider_id, 5, 0
+    )  # pylint: disable=protected-access
+    got = await scraper._compute_next_sleep(
+        default=9999.0
+    )  # pylint: disable=protected-access
+    assert got == 0.0
+
+
+@pytest.mark.asyncio
+async def test_compute_next_sleep_floored_at_60s(store, monkeypatch):
+    """When the soonest-due remaining is tiny, sleep is floored to 60s."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_interval_seconds=604800
+    )
+
+    fake_now = 2_000_000_000
+    # 5 seconds remaining — below the 60s floor.
+    await store.set_last_completed(provider.provider_id, fake_now - (604800 - 5))
+    monkeypatch.setattr("services.basemap_scraper_service.time.time", lambda: fake_now)
+
+    got = await scraper._compute_next_sleep(
+        default=604800.0
+    )  # pylint: disable=protected-access
+    assert got == 60.0
 
 
 @pytest.mark.asyncio

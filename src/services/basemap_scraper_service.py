@@ -98,6 +98,59 @@ class BasemapScraperService(BaseSyncService):
             return False
         return True
 
+    def _log_started(self, app_logger: Logger) -> None:
+        """Log a status summary alongside the default started message."""
+        app_logger.info("%s started", self._service_name)
+        asyncio.create_task(self._log_startup_summary(app_logger))
+
+    async def _log_startup_summary(self, app_logger: Logger) -> None:
+        """Emit a one-line summary of which providers are due / waiting."""
+        try:
+            now = int(time.time())
+            interval = self._sync_interval
+            due = 0
+            waiting = 0
+            soonest_remaining: float = float(interval)
+            for pid in self._providers:
+                if await self._state.get_cursor(pid) is not None:
+                    due += 1
+                    soonest_remaining = 0.0
+                    continue
+                last = await self._state.get_last_completed(pid)
+                remaining = (
+                    float(interval)
+                    if last is None
+                    else max(0.0, (last + interval) - now)
+                )
+                if remaining <= 0:
+                    due += 1
+                else:
+                    waiting += 1
+                soonest_remaining = min(soonest_remaining, remaining)
+            app_logger.info(
+                "Basemap scraper: %d provider(s) due, %d waiting (next due in %s)",
+                due,
+                waiting,
+                _fmt_duration(soonest_remaining),
+            )
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            app_logger.warning("Basemap startup summary failed: %s", exc)
+
+    async def _compute_next_sleep(self, default: float) -> float:
+        """Sleep only until the soonest-due provider, floored at 60s."""
+        now = int(time.time())
+        interval = self._sync_interval
+        soonest = default
+        for pid in self._providers:
+            if await self._state.get_cursor(pid) is not None:
+                return 0.0
+            last = await self._state.get_last_completed(pid)
+            remaining = (
+                float(interval) if last is None else max(0.0, (last + interval) - now)
+            )
+            soonest = min(soonest, remaining)
+        return max(60.0, soonest)
+
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
         start = time.monotonic()
@@ -124,6 +177,18 @@ class BasemapScraperService(BaseSyncService):
         failed = 0
 
         cursor = await self._state.get_cursor(provider.provider_id)
+        if cursor is None:
+            last_completed = await self._state.get_last_completed(provider.provider_id)
+            if last_completed is not None:
+                remaining = (last_completed + self._sync_interval) - int(time.time())
+                if remaining > 0:
+                    logger.info(
+                        "Skipping %s: next scrape in %s",
+                        provider.provider_id,
+                        _fmt_duration(remaining),
+                    )
+                    return 0, 0
+
         zoom_start = cursor.zoom if cursor else provider.min_zoom
         index_start = cursor.tile_index if cursor else 0
 
@@ -150,10 +215,11 @@ class BasemapScraperService(BaseSyncService):
             downloaded += zoom_ok
             failed += zoom_failed
 
-        # Provider fully scraped — clear all persistent state so the next
-        # interval-triggered cycle starts as a fresh full sweep.
+        # Provider fully scraped — clear resume state and stamp completion so
+        # the next cycle respects the configured scrape interval.
         await self._state.clear_cursor(provider.provider_id)
         await self._state.clear_failed_for_provider(provider.provider_id)
+        await self._state.set_last_completed(provider.provider_id, int(time.time()))
 
         logger.info(
             "Provider %s: %d downloaded, %d failed",

@@ -144,6 +144,45 @@ async def test_clear_failed_for_provider_drops_all_zooms(store):
 
 
 @pytest.mark.asyncio
+async def test_last_completed_missing_returns_none(store):
+    assert await store.get_last_completed("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_set_last_completed_inserts_then_upserts(store):
+    await store.set_last_completed("argenmap", 1000)
+    assert await store.get_last_completed("argenmap") == 1000
+
+    await store.set_last_completed("argenmap", 2500)
+    assert await store.get_last_completed("argenmap") == 2500
+
+
+@pytest.mark.asyncio
+async def test_last_completed_survives_reopen(tmp_path):
+    """The completion stamp persists across store close/open (schema idempotent)."""
+    db_path = tmp_path / "state.sqlite"
+    s1 = BasemapStateStore(str(db_path))
+    await s1.connect()
+    await s1.set_last_completed("argenmap", 1700000000)
+    await s1.close()
+
+    s2 = BasemapStateStore(str(db_path))
+    await s2.connect()
+    try:
+        assert await s2.get_last_completed("argenmap") == 1700000000
+    finally:
+        await s2.close()
+
+
+@pytest.mark.asyncio
+async def test_last_completed_scoped_per_provider(store):
+    await store.set_last_completed("p1", 100)
+    await store.set_last_completed("p2", 200)
+    assert await store.get_last_completed("p1") == 100
+    assert await store.get_last_completed("p2") == 200
+
+
+@pytest.mark.asyncio
 async def test_operations_without_connect_raise(tmp_path):
     """All public methods must require an active connection."""
     s = BasemapStateStore(str(tmp_path / "state.sqlite"))

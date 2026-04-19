@@ -41,6 +41,12 @@ _SCHEMA_SQL = (
     CREATE INDEX IF NOT EXISTS idx_failed_scope
         ON basemap_scrape_failed(provider_id, zoom);
     """,
+    """
+    CREATE TABLE IF NOT EXISTS basemap_scrape_last_completed (
+        provider_id  TEXT PRIMARY KEY,
+        completed_at INTEGER NOT NULL
+    );
+    """,
 )
 
 
@@ -213,4 +219,39 @@ class BasemapStateStore:
         self._require_conn().execute(
             "DELETE FROM basemap_scrape_failed WHERE provider_id = ?",
             (provider_id,),
+        )
+
+    async def get_last_completed(self, provider_id: str) -> Optional[int]:
+        """Return the last completion timestamp (unix seconds) for a provider."""
+        return await asyncio.to_thread(self._get_last_completed_sync, provider_id)
+
+    def _get_last_completed_sync(self, provider_id: str) -> Optional[int]:
+        row = (
+            self._require_conn()
+            .execute(
+                "SELECT completed_at FROM basemap_scrape_last_completed WHERE provider_id = ?",
+                (provider_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return int(row[0])
+
+    async def set_last_completed(self, provider_id: str, timestamp: int) -> None:
+        """Upsert the last completion timestamp for a provider."""
+        async with self._write_lock:
+            await asyncio.to_thread(
+                self._set_last_completed_sync, provider_id, timestamp
+            )
+
+    def _set_last_completed_sync(self, provider_id: str, timestamp: int) -> None:
+        self._require_conn().execute(
+            """
+            INSERT INTO basemap_scrape_last_completed (provider_id, completed_at)
+            VALUES (?, ?)
+            ON CONFLICT(provider_id) DO UPDATE SET
+                completed_at = excluded.completed_at
+            """,
+            (provider_id, timestamp),
         )
