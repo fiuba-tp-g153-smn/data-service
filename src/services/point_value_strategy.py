@@ -4,9 +4,9 @@ import asyncio
 import math
 from typing import Optional, Protocol
 
-import rasterio
-from rasterio.errors import RasterioIOError
-from rasterio.windows import Window
+import rasterio  # type: ignore[import-untyped]
+from rasterio.errors import RasterioIOError  # type: ignore[import-untyped]
+from rasterio.windows import Window  # type: ignore[import-untyped]
 
 from clients.s3_client import S3Client
 from dependencies import logger, settings

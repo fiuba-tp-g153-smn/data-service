@@ -30,9 +30,9 @@
     { "id": "argenmapGris", "enabled": false },
     { "id": "argenmapOscuro", "enabled": false },
     { "id": "argenmapTopografico", "enabled": false },
-    { "id": "satellite", "enabled": true },
-    { "id": "topographic", "enabled": true },
-    { "id": "googleSatellite", "enabled": true },
-    { "id": "oceanBase", "enabled": true }
+    { "id": "satellite", "enabled": false },
+    { "id": "topographic", "enabled": false },
+    { "id": "googleSatellite", "enabled": false },
+    { "id": "oceanBase", "enabled": false }
   ]
 }

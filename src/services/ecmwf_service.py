@@ -8,6 +8,7 @@ from typing import List, Optional
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from dependencies import settings
+from models.base import BoundingBox, ZoomLevels
 from models.ecmwf import (
     ForecastListResponse,
     ForecastRunInfo,
@@ -22,8 +23,8 @@ logger = logging.getLogger(__name__)
 class EcmwfService:
     """Service managing ECMWF precipitation forecast tiles and COGs."""
 
-    ZOOM_LEVELS = {"min": 3, "max": 7}
-    BOUNDING_BOX = {"minx": -110.0, "miny": -60.0, "maxx": -30.0, "maxy": -15.0}
+    ZOOM_LEVELS = ZoomLevels(min=3, max=7)
+    BOUNDING_BOX = BoundingBox(minx=-110.0, miny=-60.0, maxx=-30.0, maxy=-15.0)
     TILE_URL_PATTERN = (
         "/products/ecmwf/total-precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
     )
@@ -38,12 +39,11 @@ class EcmwfService:
         """Set the sync strategy (called during app startup)."""
         self._strategy = strategy
 
-    def set_s3_client(self, s3_client: S3Client) -> None:
-        """Set S3 client for background sync (full mode only)."""
+    def configure_sync_clients(
+        self, s3_client: S3Client, redis_client: RedisClient
+    ) -> None:
+        """Configure clients required for background sync (full mode only)."""
         self._s3_client = s3_client
-
-    def set_redis_client(self, redis_client: RedisClient) -> None:
-        """Set Redis client for background sync (full mode only)."""
         self._redis_client = redis_client
 
     async def list_forecasts(self) -> ForecastListResponse:
@@ -115,7 +115,9 @@ class EcmwfService:
             await asyncio.sleep(settings.ecmwf_sync_interval_seconds)
 
     async def _sync_once(self) -> None:
-        if not self._s3_client or not self._redis_client:
+        s3_client = self._s3_client
+        redis_client = self._redis_client
+        if s3_client is None or redis_client is None:
             logger.warning("ECMWF sync skipped: S3 or Redis client not configured")
             return
 
@@ -128,13 +130,13 @@ class EcmwfService:
             return  # Another worker holds the lock
 
         try:
-            await self._do_sync()
+            await self._do_sync(s3_client, redis_client)
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
             lock_file.close()
 
-    async def _do_sync(self) -> None:
-        subdirs = await self._s3_client.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
+    async def _do_sync(self, s3_client: S3Client, redis_client: RedisClient) -> None:
+        subdirs = await s3_client.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
         all_forecasts = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -150,7 +152,7 @@ class EcmwfService:
             return
 
         for forecast_ts in active_forecasts:
-            period_subdirs = await self._s3_client.get_subdirectories(
+            period_subdirs = await s3_client.get_subdirectories(
                 f"{S3Client.ECMWF_TILES_PREFIX}/{forecast_ts}"
             )
             periods = sorted(
@@ -159,18 +161,18 @@ class EcmwfService:
                 if s.rstrip("/").split("/")[-1]
             )
 
-            known_periods = await self._redis_client.get_ecmwf_periods(forecast_ts)
+            known_periods = await redis_client.get_ecmwf_periods(forecast_ts)
             new_periods = [p for p in periods if p not in known_periods]
 
             for period_ts in new_periods:
-                stored = await self._s3_client.sync_ecmwf_period_to_redis(
-                    self._redis_client, forecast_ts, period_ts, settings.ecmwf_tile_ttl
+                stored = await s3_client.sync_ecmwf_period_to_redis(
+                    redis_client, forecast_ts, period_ts, settings.ecmwf_tile_ttl
                 )
                 logger.info(
                     "ECMWF synced %d tiles for %s/%s", stored, forecast_ts, period_ts
                 )
 
-            await self._redis_client.store_ecmwf_index(
+            await redis_client.store_ecmwf_index(
                 forecast_ts, periods, settings.ecmwf_tile_ttl
             )
 

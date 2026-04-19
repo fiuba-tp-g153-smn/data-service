@@ -20,7 +20,11 @@ from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_tile_reader import BasemapTileReader
 from services.ecmwf_service import ecmwf_service
-from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
+from services.ecmwf_sync_strategy import (
+    EcmwfFullSyncStrategy,
+    EcmwfOnDemandStrategy,
+    EcmwfSyncStrategy,
+)
 from services.point_value_service import point_value_service
 from services.point_value_strategy import S3CogPointValueStrategy
 from services.radar_service import radar_service
@@ -101,11 +105,14 @@ async def configure_strategies(
         )
 
     # ECMWF precipitation (independently configurable sync mode)
+    ecmwf_strategy: EcmwfSyncStrategy
     if settings.sync_mode == "full":
         ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
-        ecmwf_service.set_s3_client(s3_client)
-        ecmwf_service.set_redis_client(client_redis)
-        await ecmwf_service.start_sync(logger)
+        if s3_client is not None:
+            ecmwf_service.configure_sync_clients(s3_client, client_redis)
+            await ecmwf_service.start_sync(logger)
+        else:
+            logger.warning("ECMWF background sync skipped: S3 not configured")
     else:
         logger.info("Starting ECMWF in on-demand sync mode")
         ecmwf_strategy = EcmwfOnDemandStrategy(

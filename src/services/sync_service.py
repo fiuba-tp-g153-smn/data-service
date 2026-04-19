@@ -131,7 +131,7 @@ class SyncService(BaseSyncService):
 
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
-                prefix, prefix.rstrip("/").split("/")[-1]
+                prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
             )
             try:
                 # 1. List S3 tileset prefixes
@@ -206,7 +206,7 @@ class SyncService(BaseSyncService):
         sat_count = 0
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
-                prefix, prefix.rstrip("/").split("/")[-1]
+                prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
             )
             tilesets = await self._redis_client.get_satellite_tilesets(channel_dir)
             sat_count += len(tilesets)
@@ -277,60 +277,20 @@ class SyncService(BaseSyncService):
                     )
 
                     # Cache existing tilesets per elevation from Redis
-                    existing_by_elevation = {}
+                    existing_by_elevation: dict[str, set[str]] = {}
 
                     for elevation_prefix in elevation_prefixes:
                         elevation_id = elevation_prefix.rstrip("/").split("/")[-1]
                         if not elevation_id.startswith("elev"):
                             continue
 
-                        # Query Redis once per elevation (same pattern as satellite)
-                        if elevation_id not in existing_by_elevation:
-                            existing_by_elevation[elevation_id] = set(
-                                await self._redis_client.get_radar_tilesets(
-                                    radar_id, variable_id, elevation_id
-                                )
-                            )
-
-                        # 4. List tileset dirs: .../{elevation_id}/{timestamp}/
-                        ts_prefixes = await self._client.get_subdirectories(
-                            elevation_prefix
+                        total_downloaded += await self._sync_radar_elevation(
+                            elevation_prefix,
+                            radar_id,
+                            variable_id,
+                            elevation_id,
+                            existing_by_elevation,
                         )
-
-                        for ts_prefix in ts_prefixes:
-                            tileset_id = ts_prefix.rstrip("/").split("/")[-1]
-
-                            if tileset_id in existing_by_elevation[elevation_id]:
-                                continue
-
-                            # 5. Download tiles under tileset prefix
-                            downloaded = await self._client.sync_radar_prefix_to_redis(
-                                self._redis_client,
-                                ts_prefix,
-                                radar_id,
-                                variable_id,
-                                tileset_id,
-                                elevation_id,
-                                tile_ttl=self._settings.tile_ttl,
-                            )
-
-                            if downloaded > 0:
-                                await self._redis_client.add_radar_index(
-                                    radar_id,
-                                    variable_id,
-                                    elevation_id,
-                                    tileset_id,
-                                    ttl=self._settings.tile_ttl,
-                                )
-                                total_downloaded += downloaded
-                                logger.info(
-                                    "Radar sync: %d tiles for %s/%s/%s/%s",
-                                    downloaded,
-                                    radar_id,
-                                    variable_id,
-                                    elevation_id,
-                                    tileset_id,
-                                )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Radar sync error: %s", e)
@@ -343,6 +303,63 @@ class SyncService(BaseSyncService):
             total_downloaded,
         )
         return total_downloaded, errors
+
+    async def _sync_radar_elevation(
+        self,
+        elevation_prefix: str,
+        radar_id: str,
+        variable_id: str,
+        elevation_id: str,
+        existing_by_elevation: dict[str, set[str]],
+    ) -> int:
+        """Sync all new tilesets under a single radar elevation prefix."""
+        if self._client is None or self._redis_client is None:
+            raise RuntimeError("S3 or Redis client is not initialized")
+
+        if elevation_id not in existing_by_elevation:
+            existing_by_elevation[elevation_id] = set(
+                await self._redis_client.get_radar_tilesets(
+                    radar_id, variable_id, elevation_id
+                )
+            )
+
+        ts_prefixes = await self._client.get_subdirectories(elevation_prefix)
+        downloaded_total = 0
+
+        for ts_prefix in ts_prefixes:
+            tileset_id = ts_prefix.rstrip("/").split("/")[-1]
+            if tileset_id in existing_by_elevation[elevation_id]:
+                continue
+
+            downloaded = await self._client.sync_radar_prefix_to_redis(
+                self._redis_client,
+                ts_prefix,
+                radar_id,
+                variable_id,
+                tileset_id,
+                elevation_id,
+                tile_ttl=self._settings.tile_ttl,
+            )
+
+            if downloaded > 0:
+                await self._redis_client.add_radar_index(
+                    radar_id,
+                    variable_id,
+                    elevation_id,
+                    tileset_id,
+                    ttl=self._settings.tile_ttl,
+                )
+                downloaded_total += downloaded
+                logger.info(
+                    "Radar sync: %d tiles for %s/%s/%s/%s",
+                    downloaded,
+                    radar_id,
+                    variable_id,
+                    elevation_id,
+                    tileset_id,
+                )
+
+        return downloaded_total
 
     async def _count_radar_tilesets(self) -> int:
         """Count total radar tilesets from Redis index."""

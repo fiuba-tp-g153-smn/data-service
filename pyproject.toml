@@ -59,6 +59,7 @@ max-attributes = 10
 max-args = 10
 max-positional-arguments = 8
 max-locals = 20
+min-public-methods = 1
 
 [[tool.mypy.overrides]]
 module = "newrelic.*"
