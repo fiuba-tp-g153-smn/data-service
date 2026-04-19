@@ -46,7 +46,9 @@ class S3CogPointValueStrategy:
         if not await self._s3_client.object_exists(cog_key):
             raise CogObjectNotFoundError()
 
-        return await asyncio.to_thread(self._read_point_from_cog_sync, cog_key, lat, lon)
+        return await asyncio.to_thread(
+            self._read_point_from_cog_sync, cog_key, lat, lon
+        )
 
     def _read_point_from_cog_sync(self, cog_key: str, lat: float, lon: float) -> float:
         """Open remote COG and sample nearest value. Runs in thread."""

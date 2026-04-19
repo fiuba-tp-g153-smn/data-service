@@ -114,4 +114,5 @@ class PointValueService(BaseProductService):
             raise RuntimeError("PointValueService strategy is not configured")
         return self._strategy
 
+
 point_value_service = PointValueService()

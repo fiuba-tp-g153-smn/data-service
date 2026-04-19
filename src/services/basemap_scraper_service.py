@@ -1,19 +1,16 @@
-"""Background scraper for pre-caching base map tiles from external providers."""
+"""Background scraper that builds the basemap tile backup (full sync, mandatory)."""
 
 import asyncio
 import logging
 import time
 
+import httpx
+
 from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
-from services.basemap_config import (
-    BasemapProvider,
-    build_source_url,
-    get_providers,
-    iter_tiles,
-)
+from services.basemap_config import BasemapProvider, build_source_url, iter_tiles
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -21,8 +18,14 @@ logger = logging.getLogger(__name__)
 
 class BasemapScraperService(BaseSyncService):
     """
-    Weekly background scraper that downloads base map tiles
-    from external providers and stores them in S3 + Redis.
+    Periodic full-sync scraper: walks the "bounding_box x zoom" range for every
+    enabled provider and writes tiles into S3 + Redis. This is the primary
+    source of basemap data — the on-request reader only falls back to the
+    external provider for tiles this scraper hasn't produced yet.
+
+    Runs independently of `settings.sync_mode` (which controls satellite /
+    radar / ECMWF) because a basemap backup without full sync defeats the
+    purpose of caching provider tiles locally.
     """
 
     def __init__(
@@ -31,6 +34,7 @@ class BasemapScraperService(BaseSyncService):
         s3_client: S3Client,
         redis_client: RedisClient,
         http_client: HttpTileClient,
+        providers: dict[str, BasemapProvider],
         tile_ttl: int,
     ):
         super().__init__(
@@ -41,6 +45,7 @@ class BasemapScraperService(BaseSyncService):
         self._s3 = s3_client
         self._redis = redis_client
         self._http = http_client
+        self._providers = providers
         self._tile_ttl = tile_ttl
         self._cache_max_zoom = settings.basemap_cache_max_zoom
 
@@ -53,7 +58,7 @@ class BasemapScraperService(BaseSyncService):
         total_downloaded = 0
         total_failed = 0
 
-        for provider in get_providers().values():
+        for provider in self._providers.values():
             downloaded, failed = await self._scrape_provider(provider)
             total_downloaded += downloaded
             total_failed += failed
@@ -81,8 +86,7 @@ class BasemapScraperService(BaseSyncService):
 
         for zoom in range(provider.min_zoom, max_zoom + 1):
             for z, x, y in iter_tiles(provider, zoom):
-                success = await self._download_and_store(provider, z, x, y)
-                if success:
+                if await self._download_and_store(provider, z, x, y):
                     downloaded += 1
                 else:
                     failed += 1
@@ -98,7 +102,7 @@ class BasemapScraperService(BaseSyncService):
     async def _download_and_store(
         self, provider: BasemapProvider, z: int, x: int, y: int
     ) -> bool:
-        """Download a single tile from external provider and store in S3 + Redis."""
+        """Download a single tile from the external provider and store in S3 + Redis."""
         try:
             url = build_source_url(provider, z, x, y)
             data = await self._http.download_tile(url)
@@ -112,7 +116,7 @@ class BasemapScraperService(BaseSyncService):
                 provider.provider_id, z, x, y, data, ttl=self._tile_ttl
             )
             return True
-        except Exception as exc:  # pylint: disable=broad-exception-caught
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
             logger.warning(
                 "Failed to scrape tile %s/%d/%d/%d: %s",
                 provider.provider_id,

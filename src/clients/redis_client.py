@@ -288,7 +288,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         ttl: Optional[int] = None,
     ) -> None:
         """Store a base map tile in Redis, optionally with TTL."""
-        key = f"tile:basemap:{provider_id}/{z}/{x}/{y}"
+        key = f"tile:basemap:{provider_id}:{z}:{x}:{y}"
         if ttl:
             await self._conn.set(key, data, ex=ttl)
         else:
@@ -298,7 +298,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         self, provider_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
         """Get a base map tile from Redis."""
-        key = f"tile:basemap:{provider_id}/{z}/{x}/{y}"
+        key = f"tile:basemap:{provider_id}:{z}:{x}:{y}"
         return await self._conn.get(key)
 
     # ============== Listing Cache Operations ==============

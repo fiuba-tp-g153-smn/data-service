@@ -49,6 +49,16 @@ class HttpTileClient:
             self._client = None
             logger.info("HTTP tile client closed")
 
+    def _overall_budget_seconds(self) -> float:
+        """Cap on total time a single download_tile call may hold the semaphore.
+
+        Upper bound: per-attempt timeout × retries + cumulative backoff between
+        attempts + 1s slack. Prevents a pathological URL from pinning a
+        concurrency slot indefinitely.
+        """
+        backoff_total = sum(2**i for i in range(self._max_retries - 1))
+        return self._timeout * self._max_retries + backoff_total + 1.0
+
     async def download_tile(self, url: str) -> Optional[bytes]:
         """
         Download a tile from a URL with rate limiting and retry.
@@ -59,47 +69,60 @@ class HttpTileClient:
             raise RuntimeError("HTTP tile client not connected")
 
         async with self._semaphore:
-            for attempt in range(self._max_retries):
-                try:
-                    response = await self._client.get(url)
+            try:
+                async with asyncio.timeout(self._overall_budget_seconds()):
+                    return await self._download_with_retries(url)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Overall download budget exceeded for %s (%.1fs)",
+                    url,
+                    self._overall_budget_seconds(),
+                )
+                return None
 
-                    if response.status_code == 200:
-                        data = response.content
-                        if self._delay_ms > 0:
-                            await asyncio.sleep(self._delay_ms / 1000.0)
-                        return data
+    async def _download_with_retries(self, url: str) -> Optional[bytes]:
+        """Run the retry loop; caller wraps with an overall timeout."""
+        assert self._client is not None  # narrowed by caller
 
-                    if response.status_code == 429:
-                        backoff = 2 ** (attempt + 1)
-                        logger.warning(
-                            "Rate limited on %s, backing off %ds", url, backoff
-                        )
-                        await asyncio.sleep(backoff)
-                        continue
+        for attempt in range(self._max_retries):
+            try:
+                response = await self._client.get(url)
 
-                    if response.status_code in (404, 403):
-                        return None
+                if response.status_code == 200:
+                    data = response.content
+                    if self._delay_ms > 0:
+                        await asyncio.sleep(self._delay_ms / 1000.0)
+                    return data
 
-                    logger.warning(
-                        "HTTP %d fetching %s (attempt %d/%d)",
-                        response.status_code,
-                        url,
-                        attempt + 1,
-                        self._max_retries,
-                    )
-                except (httpx.HTTPError, asyncio.TimeoutError) as exc:
-                    logger.warning(
-                        "Error fetching %s (attempt %d/%d): %s",
-                        url,
-                        attempt + 1,
-                        self._max_retries,
-                        exc,
-                    )
+                if response.status_code == 429:
+                    backoff = 2 ** (attempt + 1)
+                    logger.warning("Rate limited on %s, backing off %ds", url, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
 
-                if attempt < self._max_retries - 1:
-                    await asyncio.sleep(2**attempt)
+                if response.status_code in (404, 403):
+                    return None
 
-            logger.error(
-                "Failed to download tile after %d attempts: %s", self._max_retries, url
-            )
-            return None
+                logger.warning(
+                    "HTTP %d fetching %s (attempt %d/%d)",
+                    response.status_code,
+                    url,
+                    attempt + 1,
+                    self._max_retries,
+                )
+            except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+                logger.warning(
+                    "Error fetching %s (attempt %d/%d): %s",
+                    url,
+                    attempt + 1,
+                    self._max_retries,
+                    exc,
+                )
+
+            if attempt < self._max_retries - 1:
+                await asyncio.sleep(2**attempt)
+
+        logger.error(
+            "Failed to download tile after %d attempts: %s", self._max_retries, url
+        )
+        return None

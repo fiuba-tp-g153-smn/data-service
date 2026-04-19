@@ -87,7 +87,11 @@ class EcmwfOnDemandStrategy:
 
         subdirs = await self._s3.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
         forecasts = sorted(
-            (s.rstrip("/").split("/")[-1] for s in subdirs if s.rstrip("/").split("/")[-1]),
+            (
+                s.rstrip("/").split("/")[-1]
+                for s in subdirs
+                if s.rstrip("/").split("/")[-1]
+            ),
             reverse=True,
         )
 
@@ -108,7 +112,9 @@ class EcmwfOnDemandStrategy:
         prefix = f"{S3Client.ECMWF_TILES_PREFIX}/{forecast_ts}"
         subdirs = await self._s3.get_subdirectories(prefix)
         periods = sorted(
-            s.rstrip("/").split("/")[-1] for s in subdirs if s.rstrip("/").split("/")[-1]
+            s.rstrip("/").split("/")[-1]
+            for s in subdirs
+            if s.rstrip("/").split("/")[-1]
         )
 
         await self._redis.cache_listing(

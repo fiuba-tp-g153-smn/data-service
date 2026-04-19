@@ -4,21 +4,31 @@ import logging
 from typing import List, Optional
 
 from models.basemap import BasemapProviderInfo, BasemapProvidersResponse
-from services.basemap_config import get_provider, get_providers
-from services.basemap_sync_strategy import BasemapSyncStrategy
+from services.basemap_config import BasemapProvider
+from services.basemap_tile_reader import BasemapTileReader
 
 logger = logging.getLogger(__name__)
+
+
+class BasemapNotConfiguredError(Exception):
+    """Raised when basemap tiles are requested but the service is not configured."""
 
 
 class BasemapService:
     """Singleton service managing base map tile access."""
 
     def __init__(self) -> None:
-        self._strategy: Optional[BasemapSyncStrategy] = None
+        self._reader: Optional[BasemapTileReader] = None
+        self._providers: dict[str, BasemapProvider] = {}
 
-    def set_strategy(self, strategy: BasemapSyncStrategy) -> None:
-        """Set the sync strategy (called during app startup)."""
-        self._strategy = strategy
+    def configure(
+        self,
+        reader: BasemapTileReader,
+        providers: dict[str, BasemapProvider],
+    ) -> None:
+        """Attach the tile reader and provider registry during app startup."""
+        self._reader = reader
+        self._providers = providers
 
     def list_providers(self) -> BasemapProvidersResponse:
         """Return all available base map providers."""
@@ -31,27 +41,31 @@ class BasemapService:
                 cache_max_zoom=p.cache_max_zoom,
                 attribution=p.attribution,
             )
-            for p in get_providers().values()
+            for p in self._providers.values()
         ]
         return BasemapProvidersResponse(providers=providers)
 
     async def get_tile_data(
         self, provider_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Get tile bytes via the configured strategy."""
-        if not self._strategy:
-            return None
-        return await self._strategy.get_tile(provider_id, z, x, y)
+        """Fetch tile bytes via the configured reader.
 
-    @staticmethod
-    def validate_provider(provider_id: str) -> bool:
+        Raises BasemapNotConfiguredError if the service has no reader attached
+        (e.g. basemap disabled at startup because S3 was unconfigured).
+        """
+        if not self._reader:
+            raise BasemapNotConfiguredError(
+                "Basemap service is not configured (no reader attached)."
+            )
+        return await self._reader.get_tile(provider_id, z, x, y)
+
+    def validate_provider(self, provider_id: str) -> bool:
         """Check if a provider ID is valid and enabled."""
-        return get_provider(provider_id) is not None
+        return provider_id in self._providers
 
-    @staticmethod
-    def validate_zoom(provider_id: str, z: int) -> bool:
+    def validate_zoom(self, provider_id: str, z: int) -> bool:
         """Check if a zoom level is valid for the given provider."""
-        provider = get_provider(provider_id)
+        provider = self._providers.get(provider_id)
         if not provider:
             return False
         return provider.min_zoom <= z <= provider.max_zoom

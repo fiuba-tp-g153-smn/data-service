@@ -8,7 +8,12 @@ from typing import List, Optional
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from dependencies import settings
-from models.ecmwf import ForecastListResponse, ForecastRunInfo, PeriodInfo, PeriodListResponse
+from models.ecmwf import (
+    ForecastListResponse,
+    ForecastRunInfo,
+    PeriodInfo,
+    PeriodListResponse,
+)
 from services.ecmwf_sync_strategy import EcmwfSyncStrategy
 
 logger = logging.getLogger(__name__)
@@ -52,7 +57,9 @@ class EcmwfService:
         infos: List[ForecastRunInfo] = []
         for forecast_ts in active:
             periods = await self._strategy.list_periods(forecast_ts)
-            infos.append(ForecastRunInfo(forecast_ts=forecast_ts, period_count=len(periods)))
+            infos.append(
+                ForecastRunInfo(forecast_ts=forecast_ts, period_count=len(periods))
+            )
 
         return ForecastListResponse(forecasts=infos)
 
@@ -113,7 +120,9 @@ class EcmwfService:
             return
 
         try:
-            lock_file = open(settings.ecmwf_lock_path, "w", encoding="utf-8")  # noqa: WPS515
+            lock_file = open(
+                settings.ecmwf_lock_path, "w", encoding="utf-8"
+            )  # noqa: WPS515
             fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             return  # Another worker holds the lock
@@ -127,7 +136,11 @@ class EcmwfService:
     async def _do_sync(self) -> None:
         subdirs = await self._s3_client.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
         all_forecasts = sorted(
-            (s.rstrip("/").split("/")[-1] for s in subdirs if s.rstrip("/").split("/")[-1]),
+            (
+                s.rstrip("/").split("/")[-1]
+                for s in subdirs
+                if s.rstrip("/").split("/")[-1]
+            ),
             reverse=True,
         )
         active_forecasts = all_forecasts[: settings.ecmwf_forecasts_to_keep]

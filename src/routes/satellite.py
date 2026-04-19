@@ -224,7 +224,9 @@ async def get_satellite_point_value(
         ..., description="Instrument identifier (e.g., abi)"
     ),
     channel_id: str = PathParam(..., description="Channel identifier (e.g., ch-13)"),
-    tileset_id: str = PathParam(..., description="Tileset identifier (timestamp-based)"),
+    tileset_id: str = PathParam(
+        ..., description="Tileset identifier (timestamp-based)"
+    ),
     lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
     lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
 ):

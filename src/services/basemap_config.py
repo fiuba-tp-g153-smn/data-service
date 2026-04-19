@@ -110,9 +110,6 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
 }
 
 
-_PROVIDERS: dict[str, BasemapProvider] = {}
-
-
 def _env_prefix(provider_id: str) -> str:
     """Build env var prefix for a provider ID (e.g. 'argenmapGris' -> 'BASEMAP_ARGENMAPGRIS')."""
     return f"BASEMAP_{provider_id.upper()}"
@@ -146,14 +143,15 @@ def _load_provider(provider_id: str) -> Optional[BasemapProvider]:
     )
 
 
-def load_providers(config_list: List[dict]) -> None:
+def load_providers(config_list: List[dict]) -> dict[str, BasemapProvider]:
     """
-    Populate the provider registry from settings.json toggles.
+    Build the enabled-provider registry from settings.json toggles.
 
     Each entry has {id, enabled}. URL comes from BASEMAP_<UPPER_ID>_URL env var;
     other metadata (name, TMS flag, zoom range, attribution) from PROVIDER_DEFAULTS.
+    Returns a dict keyed by provider_id; caller owns storage and lifecycle.
     """
-    _PROVIDERS.clear()
+    providers: dict[str, BasemapProvider] = {}
     for cfg in config_list:
         if not cfg.get("enabled", True):
             continue
@@ -163,23 +161,14 @@ def load_providers(config_list: List[dict]) -> None:
 
         provider = _load_provider(provider_id)
         if provider:
-            _PROVIDERS[provider.provider_id] = provider
+            providers[provider.provider_id] = provider
 
     logger.info(
         "Loaded %d enabled basemap providers: %s",
-        len(_PROVIDERS),
-        ", ".join(_PROVIDERS.keys()) or "(none)",
+        len(providers),
+        ", ".join(providers.keys()) or "(none)",
     )
-
-
-def get_providers() -> dict[str, BasemapProvider]:
-    """Return the registry of enabled providers."""
-    return _PROVIDERS
-
-
-def get_provider(provider_id: str) -> BasemapProvider | None:
-    """Return a single provider by ID, or None if not enabled/unknown."""
-    return _PROVIDERS.get(provider_id)
+    return providers
 
 
 def lon_to_tile_x(lon: float, zoom: int) -> int:

@@ -2,6 +2,7 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Optional
 
 import uvloop
@@ -18,7 +19,7 @@ from routes import basemap, ecmwf, radar, satellite, sync
 from services.basemap_config import load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_service import basemap_service
-from services.basemap_sync_strategy import BasemapOnDemandStrategy
+from services.basemap_tile_reader import BasemapTileReader
 from services.ecmwf_service import ecmwf_service
 from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
 from services.radar_service import radar_service
@@ -38,6 +39,16 @@ from services.satellite_sync_strategy import (
 from services.sync_service import sync_service
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
+@dataclass(slots=True)
+class BasemapRuntime:
+    """Lifecycle holder for basemap-scoped resources owned by the app lifespan."""
+
+    s3_client: S3Client
+    http_client: HttpTileClient
+    reader: BasemapTileReader
+    scraper: BasemapScraperService
 
 
 async def configure_strategies(
@@ -109,26 +120,29 @@ async def configure_strategies(
     return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
 
-_basemap_s3_client: Optional[S3Client] = None
-_http_tile_client: Optional[HttpTileClient] = None
-_basemap_scraper: Optional[BasemapScraperService] = None
+async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntime]:
+    """Bring up the basemap subsystem (reader + mandatory full-sync scraper).
 
+    Basemap ignores `settings.sync_mode`: a backup of provider tiles requires
+    the scraper to always run. If S3 is not configured, basemap is refused
+    entirely rather than silently degrading to pure provider-proxy mode, which
+    would defeat the whole caching purpose.
+    """
+    providers = load_providers(settings.basemap_providers)
 
-async def configure_basemap(client_redis: RedisClient) -> None:
-    """Configure basemap scraper and on-demand strategy."""
-    global _basemap_s3_client, _http_tile_client, _basemap_scraper  # noqa: WPS420
-
-    load_providers(settings.basemap_providers)
-
-    if not settings.basemap_providers:
-        logger.info("Basemap disabled: no providers configured")
-        return
+    if not providers:
+        logger.info("Basemap disabled: no providers enabled in settings.json")
+        return None
 
     if not settings.is_s3_configured():
-        logger.warning("Basemap scraper disabled: S3 not configured")
-        return
+        logger.error(
+            "Basemap refused to start: S3 is not configured but basemap "
+            "requires full-sync storage. Configure S3 credentials or disable "
+            "basemap_providers in settings.json."
+        )
+        return None
 
-    _basemap_s3_client = S3Client(
+    basemap_s3 = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
         access_key=settings.s3_tiles_data_access_key,
         secret_key=settings.s3_tiles_data_secret_key,
@@ -136,40 +150,50 @@ async def configure_basemap(client_redis: RedisClient) -> None:
         secure=settings.s3_tiles_data_secure,
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
     )
-    await _basemap_s3_client.connect()
+    await basemap_s3.connect()
 
-    _http_tile_client = HttpTileClient(
+    http_client = HttpTileClient(
         max_concurrent=settings.basemap_scrape_concurrent,
         delay_ms=settings.basemap_scrape_delay_ms,
     )
-    await _http_tile_client.connect()
+    await http_client.connect()
 
-    strategy = BasemapOnDemandStrategy(
+    reader = BasemapTileReader(
         redis_client=client_redis,
-        s3_client=_basemap_s3_client,
-        http_client=_http_tile_client,
+        s3_client=basemap_s3,
+        http_client=http_client,
+        providers=providers,
         tile_ttl=settings.basemap_tile_ttl,
+        cache_concurrent=settings.basemap_cache_concurrent,
     )
-    basemap_service.set_strategy(strategy)
+    basemap_service.configure(reader=reader, providers=providers)
 
-    _basemap_scraper = BasemapScraperService(
+    scraper = BasemapScraperService(
         settings=settings,
-        s3_client=_basemap_s3_client,
+        s3_client=basemap_s3,
         redis_client=client_redis,
-        http_client=_http_tile_client,
+        http_client=http_client,
+        providers=providers,
         tile_ttl=settings.basemap_tile_ttl,
     )
-    await _basemap_scraper.start(logger)
+    await scraper.start(logger)
+
+    return BasemapRuntime(
+        s3_client=basemap_s3,
+        http_client=http_client,
+        reader=reader,
+        scraper=scraper,
+    )
 
 
-async def shutdown_basemap() -> None:
-    """Shut down basemap resources."""
-    if _basemap_scraper:
-        await _basemap_scraper.stop(logger)
-    if _http_tile_client:
-        await _http_tile_client.close()
-    if _basemap_s3_client:
-        await _basemap_s3_client.close()
+async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
+    """Tear down basemap resources in reverse startup order."""
+    if not runtime:
+        return
+    await runtime.scraper.stop(logger)
+    await runtime.reader.close()
+    await runtime.http_client.close()
+    await runtime.s3_client.close()
 
 
 async def shutdown_services():
@@ -195,13 +219,13 @@ async def lifespan(_app: FastAPI):
     radar_service.set_strategy(radar_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
-    await configure_basemap(redis_client)
+    basemap_runtime = await configure_basemap(redis_client)
 
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
-    await shutdown_basemap()
+    await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
     if s3_client:

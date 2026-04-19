@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 
@@ -59,9 +60,10 @@ class Settings:
     basemap_scrape_concurrent: int = 3
     basemap_scrape_delay_ms: int = 200
     basemap_cache_max_zoom: int = 11
+    basemap_cache_concurrent: int = 10
     basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
     s3_basemap_bucket_name: str = "basemap-tiles"
-    basemap_providers: list = []
+    basemap_providers: List[Dict[str, Any]] = []
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -95,6 +97,7 @@ class Settings:
             "basemap_scrape_concurrent",
             "basemap_scrape_delay_ms",
             "basemap_cache_max_zoom",
+            "basemap_cache_concurrent",
             "basemap_providers",
         }
 
@@ -192,6 +195,9 @@ class Settings:
         )
         self.basemap_cache_max_zoom = self._env_int(
             "BASEMAP_CACHE_MAX_ZOOM", self.basemap_cache_max_zoom
+        )
+        self.basemap_cache_concurrent = self._env_int(
+            "BASEMAP_CACHE_CONCURRENT", self.basemap_cache_concurrent
         )
 
     def is_s3_configured(self) -> bool:

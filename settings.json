@@ -16,6 +16,7 @@
   "basemap_scrape_concurrent": 3,
   "basemap_scrape_delay_ms": 200,
   "basemap_cache_max_zoom": 11,
+  "basemap_cache_concurrent": 10,
   "basemap_providers": [
     { "id": "argenmap", "enabled": true },
     { "id": "argenmapGris", "enabled": false },
