@@ -20,8 +20,8 @@ class BasemapTileReader:
 
       Tier 1 — Redis (hot cache, TTL'd)
       Tier 2 — SeaweedFS S3 (cold backup populated by the scraper)
-      Tier 3 — External provider (proxy fallback for misses before the scraper
-               has populated this tile; results are fed back into Tiers 1+2).
+      Tier 3 — External provider (proxy fallback for misses; can be disabled
+               via `online_fallback=False` to force fully-offline reads).
 
     The scraper is the source of truth: this reader is what routes call on a
     per-request basis. Cache-miss writes back to Redis/S3 are scheduled as
@@ -37,19 +37,26 @@ class BasemapTileReader:
         providers: dict[str, BasemapProvider],
         tile_ttl: int,
         cache_concurrent: int,
+        online_fallback: bool,
     ):
         self._redis = redis_client
         self._s3 = s3_client
         self._http = http_client
         self._providers = providers
         self._tile_ttl = tile_ttl
+        self._online_fallback = online_fallback
         self._cache_semaphore = asyncio.Semaphore(cache_concurrent)
         self._inflight_cache_tasks: set[asyncio.Task] = set()
+        logger.info(
+            "BasemapTileReader online_fallback=%s (tier-3 provider proxy %s)",
+            online_fallback,
+            "enabled" if online_fallback else "DISABLED — offline-only mode",
+        )
 
     async def get_tile(
         self, provider_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Fetch a tile with Redis → S3 → external-provider fallback."""
+        """Fetch a tile with Redis → S3 → (optional) external-provider fallback."""
         data = await self._redis.get_basemap_tile(provider_id, z, x, y)
         if data:
             return data
@@ -65,6 +72,9 @@ class BasemapTileReader:
                 label=f"redis-after-s3 {s3_key}",
             )
             return data
+
+        if not self._online_fallback:
+            return None
 
         provider = self._providers.get(provider_id)
         if not provider:

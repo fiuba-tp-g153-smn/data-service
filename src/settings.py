@@ -64,6 +64,21 @@ class Settings:
     basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
     s3_basemap_bucket_name: str = "basemap-tiles"
     basemap_providers: List[Dict[str, Any]] = []
+    # Basemap tile bounding box (Argentina + surrounding region by default)
+    basemap_bbox_lat_min: float = -60.0
+    basemap_bbox_lat_max: float = -15.0
+    basemap_bbox_lon_min: float = -85.0
+    basemap_bbox_lon_max: float = -40.0
+    # Basemap HTTP client tuning
+    basemap_http_timeout_seconds: int = 10
+    basemap_http_max_retries: int = 3
+    # S3 bucket lifecycle: auto-expire tiles after N days. Scrape cadence (7d by
+    # default) must be strictly less than this TTL so weekly re-uploads refresh
+    # object age before S3 expires them.
+    basemap_s3_object_ttl_days: int = 14
+    # When False, disables tier-3 provider proxy — service serves only from
+    # Redis/S3 (fully offline reads; scraper still pulls from providers).
+    basemap_online_fallback_enabled: bool = True
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -99,6 +114,14 @@ class Settings:
             "basemap_cache_max_zoom",
             "basemap_cache_concurrent",
             "basemap_providers",
+            "basemap_bbox_lat_min",
+            "basemap_bbox_lat_max",
+            "basemap_bbox_lon_min",
+            "basemap_bbox_lon_max",
+            "basemap_http_timeout_seconds",
+            "basemap_http_max_retries",
+            "basemap_s3_object_ttl_days",
+            "basemap_online_fallback_enabled",
         }
 
         for key in json_keys:
@@ -110,6 +133,20 @@ class Settings:
         """Read an env var as int, falling back to default if unset or empty."""
         value = os.getenv(key, "")
         return int(value) if value else default
+
+    @staticmethod
+    def _env_float(key: str, default: float) -> float:
+        """Read an env var as float, falling back to default if unset or empty."""
+        value = os.getenv(key, "")
+        return float(value) if value else default
+
+    @staticmethod
+    def _env_bool(key: str, default: bool) -> bool:
+        """Read an env var as bool (truthy: 1/true/yes), falling back to default."""
+        value = os.getenv(key, "")
+        if not value:
+            return default
+        return value.strip().lower() in ("1", "true", "yes", "on")
 
     def _load_from_env(self) -> None:
         """Load from environment variables (overrides JSON values)."""
@@ -198,6 +235,30 @@ class Settings:
         )
         self.basemap_cache_concurrent = self._env_int(
             "BASEMAP_CACHE_CONCURRENT", self.basemap_cache_concurrent
+        )
+        self.basemap_bbox_lat_min = self._env_float(
+            "BASEMAP_BBOX_LAT_MIN", self.basemap_bbox_lat_min
+        )
+        self.basemap_bbox_lat_max = self._env_float(
+            "BASEMAP_BBOX_LAT_MAX", self.basemap_bbox_lat_max
+        )
+        self.basemap_bbox_lon_min = self._env_float(
+            "BASEMAP_BBOX_LON_MIN", self.basemap_bbox_lon_min
+        )
+        self.basemap_bbox_lon_max = self._env_float(
+            "BASEMAP_BBOX_LON_MAX", self.basemap_bbox_lon_max
+        )
+        self.basemap_http_timeout_seconds = self._env_int(
+            "BASEMAP_HTTP_TIMEOUT_SECONDS", self.basemap_http_timeout_seconds
+        )
+        self.basemap_http_max_retries = self._env_int(
+            "BASEMAP_HTTP_MAX_RETRIES", self.basemap_http_max_retries
+        )
+        self.basemap_s3_object_ttl_days = self._env_int(
+            "BASEMAP_S3_OBJECT_TTL_DAYS", self.basemap_s3_object_ttl_days
+        )
+        self.basemap_online_fallback_enabled = self._env_bool(
+            "BASEMAP_ONLINE_FALLBACK_ENABLED", self.basemap_online_fallback_enabled
         )
 
     def is_s3_configured(self) -> bool:

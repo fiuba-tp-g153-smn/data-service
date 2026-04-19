@@ -5,24 +5,39 @@ import logging
 from typing import Optional
 
 import httpx
+from tenacity import (
+    AsyncRetrying,
+    RetryError,
+    before_sleep_log,
+    retry_if_exception_type,
+    stop_after_attempt,
+    stop_after_delay,
+    wait_exponential_jitter,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class _RetryableHttpStatus(Exception):
+    """Raised for HTTP status codes worth retrying (5xx / 429)."""
 
 
 class HttpTileClient:
     """
     Async HTTP client for fetching tiles from external providers.
 
-    Provides rate limiting via semaphore and configurable delay,
-    retry with exponential backoff, and connection pooling.
+    Bounds concurrency via a semaphore, paces requests with a configurable
+    delay, and retries transient failures (network errors, timeouts, 429s,
+    5xx) using tenacity with exponential backoff + jitter. 404/403 are
+    treated as permanent misses and not retried.
     """
 
     def __init__(
         self,
-        max_concurrent: int = 3,
-        delay_ms: int = 200,
-        timeout_seconds: int = 10,
-        max_retries: int = 3,
+        max_concurrent: int,
+        delay_ms: int,
+        timeout_seconds: int,
+        max_retries: int,
     ):
         self._max_concurrent = max_concurrent
         self._delay_ms = delay_ms
@@ -37,10 +52,14 @@ class HttpTileClient:
             return
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout),
-            headers={"User-Agent": "data-service-basemap-scraper/1.0"},
             follow_redirects=True,
         )
-        logger.info("HTTP tile client connected (concurrency=%d)", self._max_concurrent)
+        logger.info(
+            "HTTP tile client connected (concurrency=%d, retries=%d, timeout=%ds)",
+            self._max_concurrent,
+            self._max_retries,
+            self._timeout,
+        )
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -50,12 +69,7 @@ class HttpTileClient:
             logger.info("HTTP tile client closed")
 
     def _overall_budget_seconds(self) -> float:
-        """Cap on total time a single download_tile call may hold the semaphore.
-
-        Upper bound: per-attempt timeout × retries + cumulative backoff between
-        attempts + 1s slack. Prevents a pathological URL from pinning a
-        concurrency slot indefinitely.
-        """
+        """Cap on total time a single download_tile call may hold the semaphore."""
         backoff_total = sum(2**i for i in range(self._max_retries - 1))
         return self._timeout * self._max_retries + backoff_total + 1.0
 
@@ -63,66 +77,53 @@ class HttpTileClient:
         """
         Download a tile from a URL with rate limiting and retry.
 
-        Returns raw bytes on success, None on permanent failure.
+        Returns raw bytes on success, None on permanent failure (404/403,
+        exhausted retries, or budget exceeded).
         """
         if not self._client:
             raise RuntimeError("HTTP tile client not connected")
 
         async with self._semaphore:
             try:
-                async with asyncio.timeout(self._overall_budget_seconds()):
-                    return await self._download_with_retries(url)
-            except asyncio.TimeoutError:
-                logger.error(
-                    "Overall download budget exceeded for %s (%.1fs)",
-                    url,
-                    self._overall_budget_seconds(),
-                )
+                async for attempt in AsyncRetrying(
+                    stop=(
+                        stop_after_attempt(self._max_retries)
+                        | stop_after_delay(self._overall_budget_seconds())
+                    ),
+                    wait=wait_exponential_jitter(initial=1, max=30),
+                    retry=retry_if_exception_type(
+                        (httpx.HTTPError, asyncio.TimeoutError, _RetryableHttpStatus)
+                    ),
+                    before_sleep=before_sleep_log(logger, logging.WARNING),
+                    reraise=True,
+                ):
+                    with attempt:
+                        return await self._fetch_once(url)
+            except _RetryableHttpStatus:
+                logger.error("Gave up on retryable status for %s", url)
+                return None
+            except (httpx.HTTPError, asyncio.TimeoutError, RetryError) as exc:
+                logger.error("Failed to download tile %s: %s", url, exc)
                 return None
 
-    async def _download_with_retries(self, url: str) -> Optional[bytes]:
-        """Run the retry loop; caller wraps with an overall timeout."""
-        assert self._client is not None  # narrowed by caller
+        return None
 
-        for attempt in range(self._max_retries):
-            try:
-                response = await self._client.get(url)
+    async def _fetch_once(self, url: str) -> Optional[bytes]:
+        """Single HTTP attempt. Raises for retryable conditions, returns None for 404/403."""
+        assert self._client is not None
+        response = await self._client.get(url)
 
-                if response.status_code == 200:
-                    data = response.content
-                    if self._delay_ms > 0:
-                        await asyncio.sleep(self._delay_ms / 1000.0)
-                    return data
+        if response.status_code == 200:
+            data = response.content
+            if self._delay_ms > 0:
+                await asyncio.sleep(self._delay_ms / 1000.0)
+            return data
 
-                if response.status_code == 429:
-                    backoff = 2 ** (attempt + 1)
-                    logger.warning("Rate limited on %s, backing off %ds", url, backoff)
-                    await asyncio.sleep(backoff)
-                    continue
+        if response.status_code in (404, 403):
+            return None
 
-                if response.status_code in (404, 403):
-                    return None
+        if response.status_code == 429 or response.status_code >= 500:
+            raise _RetryableHttpStatus(f"HTTP {response.status_code} for {url}")
 
-                logger.warning(
-                    "HTTP %d fetching %s (attempt %d/%d)",
-                    response.status_code,
-                    url,
-                    attempt + 1,
-                    self._max_retries,
-                )
-            except (httpx.HTTPError, asyncio.TimeoutError) as exc:
-                logger.warning(
-                    "Error fetching %s (attempt %d/%d): %s",
-                    url,
-                    attempt + 1,
-                    self._max_retries,
-                    exc,
-                )
-
-            if attempt < self._max_retries - 1:
-                await asyncio.sleep(2**attempt)
-
-        logger.error(
-            "Failed to download tile after %d attempts: %s", self._max_retries, url
-        )
+        logger.warning("Non-retryable HTTP %d for %s", response.status_code, url)
         return None

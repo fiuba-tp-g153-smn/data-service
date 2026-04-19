@@ -15,18 +15,20 @@ class BasemapNotConfiguredError(Exception):
 
 
 class BasemapService:
-    """Singleton service managing base map tile access."""
+    """Service managing base map tile access.
 
-    def __init__(self) -> None:
-        self._reader: Optional[BasemapTileReader] = None
-        self._providers: dict[str, BasemapProvider] = {}
+    Instantiated once at app startup inside the FastAPI lifespan and exposed
+    to routes via `Depends(get_basemap_service)`. When basemap is disabled
+    (no providers, no S3), the service is still created with an empty
+    registry so `/basemap/providers` answers an empty list and tile requests
+    raise `BasemapNotConfiguredError`.
+    """
 
-    def configure(
+    def __init__(
         self,
-        reader: BasemapTileReader,
+        reader: Optional[BasemapTileReader],
         providers: dict[str, BasemapProvider],
     ) -> None:
-        """Attach the tile reader and provider registry during app startup."""
         self._reader = reader
         self._providers = providers
 
@@ -69,6 +71,3 @@ class BasemapService:
         if not provider:
             return False
         return provider.min_zoom <= z <= provider.max_zoom
-
-
-basemap_service = BasemapService()

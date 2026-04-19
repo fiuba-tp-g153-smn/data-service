@@ -432,6 +432,44 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 ContentType=content_type,
             )
 
+    async def ensure_lifecycle_expiration(
+        self, days: int, rule_id: str = "basemap-tile-expiration"
+    ) -> None:
+        """
+        Idempotently set a bucket-wide lifecycle rule that expires all objects
+        after `days` days from their creation (i.e. last PUT).
+
+        Safe to call on every startup — `put_bucket_lifecycle_configuration`
+        replaces the named rule. Not all S3-compatible backends support this
+        API; failures are logged at WARNING and do not abort startup.
+        """
+        client = await self._ensure_connected()
+        try:
+            await client.put_bucket_lifecycle_configuration(
+                Bucket=self._bucket,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": rule_id,
+                            "Status": "Enabled",
+                            "Filter": {"Prefix": ""},
+                            "Expiration": {"Days": days},
+                        }
+                    ]
+                },
+            )
+            logger.info(
+                "S3 lifecycle policy set on bucket %s: expire all objects after %d days",
+                self._bucket,
+                days,
+            )
+        except ClientError as exc:
+            logger.warning(
+                "Could not set lifecycle policy on bucket %s (backend may not support it): %s",
+                self._bucket,
+                exc,
+            )
+
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""
         client = await self._ensure_connected()

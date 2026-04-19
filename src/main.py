@@ -16,20 +16,20 @@ from controller import general
 from dependencies import logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
 from routes import basemap, ecmwf, radar, satellite, sync
-from services.basemap_config import load_providers
+from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
-from services.basemap_service import basemap_service
+from services.basemap_service import BasemapService
 from services.basemap_tile_reader import BasemapTileReader
 from services.ecmwf_service import ecmwf_service
 from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
+from services.point_value_service import point_value_service
+from services.point_value_strategy import S3CogPointValueStrategy
 from services.radar_service import radar_service
 from services.radar_sync_strategy import (
     RadarFullSyncStrategy,
     RadarOnDemandStrategy,
     RadarSyncStrategy,
 )
-from services.point_value_service import point_value_service
-from services.point_value_strategy import S3CogPointValueStrategy
 from services.satellite_service import satellite_service
 from services.satellite_sync_strategy import (
     SatelliteFullSyncStrategy,
@@ -120,19 +120,24 @@ async def configure_strategies(
     return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
 
-async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntime]:
-    """Bring up the basemap subsystem (reader + mandatory full-sync scraper).
+async def configure_basemap(
+    client_redis: RedisClient,
+) -> tuple[BasemapService, Optional[BasemapRuntime]]:
+    """Bring up the basemap subsystem (service + optional reader/scraper runtime).
 
     Basemap ignores `settings.sync_mode`: a backup of provider tiles requires
-    the scraper to always run. If S3 is not configured, basemap is refused
-    entirely rather than silently degrading to pure provider-proxy mode, which
-    would defeat the whole caching purpose.
+    the scraper to always run when enabled. If S3 is not configured, basemap
+    is refused entirely rather than silently degrading to pure provider-proxy
+    mode — which would defeat the backup purpose.
+
+    Always returns a BasemapService (possibly with an empty provider list) so
+    routes can answer `/basemap/providers` even when the subsystem is disabled.
     """
     providers = load_providers(settings.basemap_providers)
 
     if not providers:
         logger.info("Basemap disabled: no providers enabled in settings.json")
-        return None
+        return BasemapService(reader=None, providers={}), None
 
     if not settings.is_s3_configured():
         logger.error(
@@ -140,7 +145,7 @@ async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntim
             "requires full-sync storage. Configure S3 credentials or disable "
             "basemap_providers in settings.json."
         )
-        return None
+        return BasemapService(reader=None, providers={}), None
 
     basemap_s3 = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
@@ -151,10 +156,13 @@ async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntim
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
     )
     await basemap_s3.connect()
+    await basemap_s3.ensure_lifecycle_expiration(settings.basemap_s3_object_ttl_days)
 
     http_client = HttpTileClient(
         max_concurrent=settings.basemap_scrape_concurrent,
         delay_ms=settings.basemap_scrape_delay_ms,
+        timeout_seconds=settings.basemap_http_timeout_seconds,
+        max_retries=settings.basemap_http_max_retries,
     )
     await http_client.connect()
 
@@ -165,8 +173,15 @@ async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntim
         providers=providers,
         tile_ttl=settings.basemap_tile_ttl,
         cache_concurrent=settings.basemap_cache_concurrent,
+        online_fallback=settings.basemap_online_fallback_enabled,
     )
-    basemap_service.configure(reader=reader, providers=providers)
+
+    bbox = BoundingBox(
+        lat_min=settings.basemap_bbox_lat_min,
+        lat_max=settings.basemap_bbox_lat_max,
+        lon_min=settings.basemap_bbox_lon_min,
+        lon_max=settings.basemap_bbox_lon_max,
+    )
 
     scraper = BasemapScraperService(
         settings=settings,
@@ -174,16 +189,19 @@ async def configure_basemap(client_redis: RedisClient) -> Optional[BasemapRuntim
         redis_client=client_redis,
         http_client=http_client,
         providers=providers,
+        bbox=bbox,
         tile_ttl=settings.basemap_tile_ttl,
     )
     await scraper.start(logger)
 
-    return BasemapRuntime(
+    service = BasemapService(reader=reader, providers=providers)
+    runtime = BasemapRuntime(
         s3_client=basemap_s3,
         http_client=http_client,
         reader=reader,
         scraper=scraper,
     )
+    return service, runtime
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
@@ -205,7 +223,7 @@ async def shutdown_services():
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app_instance: FastAPI):
     """Manage application lifecycle events."""
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
@@ -219,7 +237,8 @@ async def lifespan(_app: FastAPI):
     radar_service.set_strategy(radar_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
-    basemap_runtime = await configure_basemap(redis_client)
+    basemap_svc, basemap_runtime = await configure_basemap(redis_client)
+    app_instance.state.basemap_service = basemap_svc
 
     yield
 

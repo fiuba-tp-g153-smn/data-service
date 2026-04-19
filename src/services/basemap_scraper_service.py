@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from logging import Logger
 
 import httpx
 
@@ -10,7 +11,12 @@ from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
-from services.basemap_config import BasemapProvider, build_source_url, iter_tiles
+from services.basemap_config import (
+    BasemapProvider,
+    BoundingBox,
+    build_source_url,
+    iter_tiles,
+)
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -35,6 +41,7 @@ class BasemapScraperService(BaseSyncService):
         redis_client: RedisClient,
         http_client: HttpTileClient,
         providers: dict[str, BasemapProvider],
+        bbox: BoundingBox,
         tile_ttl: int,
     ):
         super().__init__(
@@ -46,11 +53,21 @@ class BasemapScraperService(BaseSyncService):
         self._redis = redis_client
         self._http = http_client
         self._providers = providers
+        self._bbox = bbox
         self._tile_ttl = tile_ttl
         self._cache_max_zoom = settings.basemap_cache_max_zoom
 
     def _get_lock_path(self) -> str:
         return self._settings.basemap_scrape_lock_path
+
+    def _pre_start_check(self, app_logger: Logger) -> bool:
+        """Refuse to start when there are no enabled providers to scrape."""
+        if not self._providers:
+            app_logger.info(
+                "%s not started: no enabled providers to scrape", self._service_name
+            )
+            return False
+        return True
 
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
@@ -85,7 +102,7 @@ class BasemapScraperService(BaseSyncService):
         )
 
         for zoom in range(provider.min_zoom, max_zoom + 1):
-            for z, x, y in iter_tiles(provider, zoom):
+            for z, x, y in iter_tiles(zoom, self._bbox):
                 if await self._download_and_store(provider, z, x, y):
                     downloaded += 1
                 else:

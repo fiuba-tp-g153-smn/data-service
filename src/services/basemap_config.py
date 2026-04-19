@@ -23,11 +23,14 @@ class BasemapProvider:
     attribution: str
 
 
-# Bounding box covering Argentina + surrounding visible region
-BBOX_LAT_MIN = -60.0
-BBOX_LAT_MAX = -15.0
-BBOX_LON_MIN = -85.0
-BBOX_LON_MAX = -40.0
+@dataclass(frozen=True, slots=True)
+class BoundingBox:
+    """Geographic bounding box for tile scraping (degrees)."""
+
+    lat_min: float
+    lat_max: float
+    lon_min: float
+    lon_max: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,12 +191,12 @@ def tms_y_flip(y: int, zoom: int) -> int:
     return (1 << zoom) - 1 - y
 
 
-def iter_tiles(provider: BasemapProvider, zoom: int) -> Iterator[Tuple[int, int, int]]:
+def iter_tiles(zoom: int, bbox: BoundingBox) -> Iterator[Tuple[int, int, int]]:
     """Yield all (z, x, y) tile coordinates within the bounding box for a zoom level."""
-    x_min = lon_to_tile_x(BBOX_LON_MIN, zoom)
-    x_max = lon_to_tile_x(BBOX_LON_MAX, zoom)
-    y_min = lat_to_tile_y(BBOX_LAT_MAX, zoom)
-    y_max = lat_to_tile_y(BBOX_LAT_MIN, zoom)
+    x_min = lon_to_tile_x(bbox.lon_min, zoom)
+    x_max = lon_to_tile_x(bbox.lon_max, zoom)
+    y_min = lat_to_tile_y(bbox.lat_max, zoom)
+    y_max = lat_to_tile_y(bbox.lat_min, zoom)
 
     max_tile = (1 << zoom) - 1
     x_min = max(0, x_min)
