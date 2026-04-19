@@ -152,8 +152,13 @@ class BasemapScraperService(BaseSyncService):
         next_time = start + _PROGRESS_TIME_INTERVAL_S
         last_log = start
 
-        for z, x, y in iter_tiles(zoom, self._bbox):
-            if await self._download_and_store(provider, z, x, y):
+        tasks = [
+            asyncio.create_task(self._download_and_store(provider, z, x, y))
+            for z, x, y in iter_tiles(zoom, self._bbox)
+        ]
+
+        for fut in asyncio.as_completed(tasks):
+            if await fut:
                 ok += 1
             else:
                 failed += 1

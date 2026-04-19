@@ -57,8 +57,8 @@ class Settings:
     # Basemap scraper (loaded from settings.json, env overrides)
     basemap_tile_ttl: int = 604800
     basemap_scrape_interval_seconds: int = 604800
-    basemap_scrape_concurrent: int = 3
-    basemap_scrape_delay_ms: int = 200
+    basemap_scrape_concurrent: int = 20
+    basemap_scrape_delay_ms: int = 30
     basemap_cache_max_zoom: int = 11
     basemap_cache_concurrent: int = 10
     basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
