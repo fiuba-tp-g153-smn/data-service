@@ -15,9 +15,27 @@ from services.basemap_config import (
     BasemapProvider,
     BoundingBox,
     build_source_url,
+    count_tiles,
     iter_tiles,
 )
 from settings import Settings
+
+_PROGRESS_PCT_STEP = 10
+_PROGRESS_TIME_INTERVAL_S = 30.0
+_PROGRESS_MIN_INTERVAL_S = 1.0
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration as e.g. '0.9s', '42s', '3m22s', '1h04m'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s" if seconds < 10 else f"{int(seconds)}s"
+    if seconds < 3600:
+        minutes, secs = divmod(int(seconds), 60)
+        return f"{minutes}m{secs:02d}s"
+    hours, rem = divmod(int(seconds), 3600)
+    minutes = rem // 60
+    return f"{hours}h{minutes:02d}m"
+
 
 logger = logging.getLogger(__name__)
 
@@ -102,11 +120,9 @@ class BasemapScraperService(BaseSyncService):
         )
 
         for zoom in range(provider.min_zoom, max_zoom + 1):
-            for z, x, y in iter_tiles(zoom, self._bbox):
-                if await self._download_and_store(provider, z, x, y):
-                    downloaded += 1
-                else:
-                    failed += 1
+            zoom_ok, zoom_failed = await self._scrape_zoom(provider, zoom)
+            downloaded += zoom_ok
+            failed += zoom_failed
 
         logger.info(
             "Provider %s: %d downloaded, %d failed",
@@ -115,6 +131,87 @@ class BasemapScraperService(BaseSyncService):
             failed,
         )
         return downloaded, failed
+
+    async def _scrape_zoom(
+        self, provider: BasemapProvider, zoom: int
+    ) -> tuple[int, int]:
+        """Scrape one zoom level for a provider with throttled progress logs."""
+        total = count_tiles(zoom, self._bbox)
+        logger.info(
+            "%s z=%d: starting (%d tiles in bbox)",
+            provider.provider_id,
+            zoom,
+            total,
+        )
+
+        start = time.monotonic()
+        ok = 0
+        failed = 0
+        processed = 0
+        next_pct = _PROGRESS_PCT_STEP
+        next_time = start + _PROGRESS_TIME_INTERVAL_S
+        last_log = start
+
+        for z, x, y in iter_tiles(zoom, self._bbox):
+            if await self._download_and_store(provider, z, x, y):
+                ok += 1
+            else:
+                failed += 1
+            processed += 1
+
+            now = time.monotonic()
+            pct = (processed * 100 // total) if total else 100
+            pct_due = pct >= next_pct
+            time_due = now >= next_time
+            if (
+                (pct_due or time_due)
+                and processed < total
+                and now - last_log >= _PROGRESS_MIN_INTERVAL_S
+            ):
+                self._log_zoom_progress(provider, zoom, processed, total, now - start)
+                while next_pct <= pct:
+                    next_pct += _PROGRESS_PCT_STEP
+                next_time = now + _PROGRESS_TIME_INTERVAL_S
+                last_log = now
+
+        elapsed = time.monotonic() - start
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "%s z=%d: done (%d tiles, %d ok, %d failed, %s, %.1f tiles/s)",
+            provider.provider_id,
+            zoom,
+            processed,
+            ok,
+            failed,
+            _fmt_duration(elapsed),
+            rate,
+        )
+        return ok, failed
+
+    def _log_zoom_progress(
+        self,
+        provider: BasemapProvider,
+        zoom: int,
+        processed: int,
+        total: int,
+        elapsed: float,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Emit one in-zoom progress line with rate + ETA."""
+        pct = (processed * 100 // total) if total else 100
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        remaining = max(total - processed, 0)
+        eta = remaining / rate if rate > 0 else 0.0
+        logger.info(
+            "%s z=%d: %d/%d (%d%%) @ %.1f tiles/s, ETA %s",
+            provider.provider_id,
+            zoom,
+            processed,
+            total,
+            pct,
+            rate,
+            _fmt_duration(eta),
+        )
 
     async def _download_and_store(
         self, provider: BasemapProvider, z: int, x: int, y: int

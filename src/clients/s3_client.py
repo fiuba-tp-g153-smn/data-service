@@ -470,6 +470,20 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 exc,
             )
 
+    async def has_any_object(self, prefix: str) -> bool:
+        """True if at least one object exists under the given prefix."""
+        client = await self._ensure_connected()
+        try:
+            response = await client.list_objects_v2(
+                Bucket=self._bucket, Prefix=prefix, MaxKeys=1
+            )
+            return bool(response.get("Contents"))
+        except ClientError as exc:
+            logger.error(
+                "Unexpected S3 error while checking prefix %s: %s", prefix, exc
+            )
+            raise
+
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""
         client = await self._ensure_connected()

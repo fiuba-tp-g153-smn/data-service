@@ -201,7 +201,14 @@ async def configure_basemap(
     )
     await scraper.start(logger)
 
-    basemap_service.configure(reader=reader, providers=providers)
+    basemap_service.configure(
+        reader=reader,
+        providers=providers,
+        online_fallback=settings.basemap_online_fallback_enabled,
+        s3_client=basemap_s3,
+        redis_client=client_redis,
+        presence_ttl=settings.basemap_provider_presence_ttl,
+    )
     return BasemapRuntime(
         s3_client=basemap_s3,
         http_client=http_client,

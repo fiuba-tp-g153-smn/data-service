@@ -191,22 +191,36 @@ def tms_y_flip(y: int, zoom: int) -> int:
     return (1 << zoom) - 1 - y
 
 
-def iter_tiles(zoom: int, bbox: BoundingBox) -> Iterator[Tuple[int, int, int]]:
-    """Yield all (z, x, y) tile coordinates within the bounding box for a zoom level."""
+def _tile_range(zoom: int, bbox: BoundingBox) -> Tuple[int, int, int, int]:
+    """Return (x_min, x_max, y_min, y_max) tile bounds clamped to world extent."""
     x_min = lon_to_tile_x(bbox.lon_min, zoom)
     x_max = lon_to_tile_x(bbox.lon_max, zoom)
     y_min = lat_to_tile_y(bbox.lat_max, zoom)
     y_max = lat_to_tile_y(bbox.lat_min, zoom)
 
     max_tile = (1 << zoom) - 1
-    x_min = max(0, x_min)
-    x_max = min(max_tile, x_max)
-    y_min = max(0, y_min)
-    y_max = min(max_tile, y_max)
+    return (
+        max(0, x_min),
+        min(max_tile, x_max),
+        max(0, y_min),
+        min(max_tile, y_max),
+    )
 
+
+def iter_tiles(zoom: int, bbox: BoundingBox) -> Iterator[Tuple[int, int, int]]:
+    """Yield all (z, x, y) tile coordinates within the bounding box for a zoom level."""
+    x_min, x_max, y_min, y_max = _tile_range(zoom, bbox)
     for x in range(x_min, x_max + 1):
         for y in range(y_min, y_max + 1):
             yield zoom, x, y
+
+
+def count_tiles(zoom: int, bbox: BoundingBox) -> int:
+    """Return the number of tiles `iter_tiles` would yield for this zoom/bbox."""
+    x_min, x_max, y_min, y_max = _tile_range(zoom, bbox)
+    if x_max < x_min or y_max < y_min:
+        return 0
+    return (x_max - x_min + 1) * (y_max - y_min + 1)
 
 
 def build_source_url(provider: BasemapProvider, z: int, x: int, y: int) -> str:

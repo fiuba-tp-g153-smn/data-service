@@ -79,6 +79,9 @@ class Settings:
     # When False, disables tier-3 provider proxy — service serves only from
     # Redis/S3 (fully offline reads; scraper still pulls from providers).
     basemap_online_fallback_enabled: bool = True
+    # TTL for the Redis-backed cache of per-provider "has any tile in S3?"
+    # answers used by /basemap/providers when the online fallback is disabled.
+    basemap_provider_presence_ttl: int = 60
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -122,6 +125,7 @@ class Settings:
             "basemap_http_max_retries",
             "basemap_s3_object_ttl_days",
             "basemap_online_fallback_enabled",
+            "basemap_provider_presence_ttl",
         }
 
         for key in json_keys:
@@ -259,6 +263,9 @@ class Settings:
         )
         self.basemap_online_fallback_enabled = self._env_bool(
             "BASEMAP_ONLINE_FALLBACK_ENABLED", self.basemap_online_fallback_enabled
+        )
+        self.basemap_provider_presence_ttl = self._env_int(
+            "BASEMAP_PROVIDER_PRESENCE_TTL", self.basemap_provider_presence_ttl
         )
 
     def is_s3_configured(self) -> bool:

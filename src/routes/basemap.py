@@ -25,7 +25,7 @@ async def list_providers(
 
     Use the returned `id` as `{provider_id}` in `/basemap/{provider_id}/{z}/{x}/{y}.png`.
     """
-    return basemap_service.list_providers()
+    return await basemap_service.list_providers()
 
 
 @router.get(
