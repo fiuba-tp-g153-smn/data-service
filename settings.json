@@ -10,5 +10,20 @@
   "s3_max_concurrent_downloads": 5,
   "ecmwf_tile_ttl": 86400,
   "ecmwf_forecasts_to_keep": 2,
-  "ecmwf_sync_interval_seconds": 120
+  "ecmwf_sync_interval_seconds": 120,
+  "basemap_tile_ttl": 604800,
+  "basemap_scrape_interval_seconds": 604800,
+  "basemap_scrape_concurrent": 3,
+  "basemap_scrape_delay_ms": 200,
+  "basemap_cache_max_zoom": 11,
+  "basemap_providers": [
+    { "id": "argenmap", "enabled": true },
+    { "id": "argenmapGris", "enabled": false },
+    { "id": "argenmapOscuro", "enabled": false },
+    { "id": "argenmapTopografico", "enabled": false },
+    { "id": "satellite", "enabled": true },
+    { "id": "topographic", "enabled": true },
+    { "id": "googleSatellite", "enabled": true },
+    { "id": "oceanBase", "enabled": true }
+  ]
 }

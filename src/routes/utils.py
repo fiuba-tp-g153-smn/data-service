@@ -21,11 +21,13 @@ def make_transparent_tile_response(etag: str, cache_control: str) -> Response:
     return create_tile_response(TRANSPARENT_TILE, etag, cache_control)
 
 
-def create_tile_response(tile_data: bytes, etag: str, cache_control: str) -> Response:
-    """Create a standard WebP tile response with caching headers."""
+def create_tile_response(
+    tile_data: bytes, etag: str, cache_control: str, media_type: str = "image/webp"
+) -> Response:
+    """Create a tile response with caching headers."""
     return Response(
         content=tile_data,
-        media_type="image/webp",
+        media_type=media_type,
         headers={
             "Cache-Control": cache_control,
             "ETag": etag,

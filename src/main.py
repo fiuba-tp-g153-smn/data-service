@@ -8,12 +8,17 @@ import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from controller import general
 from dependencies import logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
-from routes import ecmwf, radar, satellite, sync
+from routes import basemap, ecmwf, radar, satellite, sync
+from services.basemap_config import load_providers
+from services.basemap_scraper_service import BasemapScraperService
+from services.basemap_service import basemap_service
+from services.basemap_sync_strategy import BasemapOnDemandStrategy
 from services.ecmwf_service import ecmwf_service
 from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
 from services.radar_service import radar_service
@@ -37,7 +42,12 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 async def configure_strategies(
     client_redis: RedisClient,
-) -> tuple[SatelliteSyncStrategy, RadarSyncStrategy, S3CogPointValueStrategy, Optional[S3Client]]:
+) -> tuple[
+    SatelliteSyncStrategy,
+    RadarSyncStrategy,
+    S3CogPointValueStrategy,
+    Optional[S3Client],
+]:
     """Configure and return sync strategies based on settings."""
     s3_client = None
     sat_strategy: SatelliteSyncStrategy
@@ -99,6 +109,69 @@ async def configure_strategies(
     return sat_strategy, radar_strategy, point_value_strategy, s3_client
 
 
+_basemap_s3_client: Optional[S3Client] = None
+_http_tile_client: Optional[HttpTileClient] = None
+_basemap_scraper: Optional[BasemapScraperService] = None
+
+
+async def configure_basemap(client_redis: RedisClient) -> None:
+    """Configure basemap scraper and on-demand strategy."""
+    global _basemap_s3_client, _http_tile_client, _basemap_scraper  # noqa: WPS420
+
+    load_providers(settings.basemap_providers)
+
+    if not settings.basemap_providers:
+        logger.info("Basemap disabled: no providers configured")
+        return
+
+    if not settings.is_s3_configured():
+        logger.warning("Basemap scraper disabled: S3 not configured")
+        return
+
+    _basemap_s3_client = S3Client(
+        endpoint=settings.s3_tiles_data_endpoint,
+        access_key=settings.s3_tiles_data_access_key,
+        secret_key=settings.s3_tiles_data_secret_key,
+        bucket=settings.s3_basemap_bucket_name,
+        secure=settings.s3_tiles_data_secure,
+        max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+    )
+    await _basemap_s3_client.connect()
+
+    _http_tile_client = HttpTileClient(
+        max_concurrent=settings.basemap_scrape_concurrent,
+        delay_ms=settings.basemap_scrape_delay_ms,
+    )
+    await _http_tile_client.connect()
+
+    strategy = BasemapOnDemandStrategy(
+        redis_client=client_redis,
+        s3_client=_basemap_s3_client,
+        http_client=_http_tile_client,
+        tile_ttl=settings.basemap_tile_ttl,
+    )
+    basemap_service.set_strategy(strategy)
+
+    _basemap_scraper = BasemapScraperService(
+        settings=settings,
+        s3_client=_basemap_s3_client,
+        redis_client=client_redis,
+        http_client=_http_tile_client,
+        tile_ttl=settings.basemap_tile_ttl,
+    )
+    await _basemap_scraper.start(logger)
+
+
+async def shutdown_basemap() -> None:
+    """Shut down basemap resources."""
+    if _basemap_scraper:
+        await _basemap_scraper.stop(logger)
+    if _http_tile_client:
+        await _http_tile_client.close()
+    if _basemap_s3_client:
+        await _basemap_s3_client.close()
+
+
 async def shutdown_services():
     """Stop background services if sync mode is full."""
     if settings.sync_mode == "full":
@@ -114,16 +187,21 @@ async def lifespan(_app: FastAPI):
     configure_gdal_vsi_s3()
     await redis_client.connect()
 
-    sat_strategy, radar_strategy, point_value_strategy, s3_client = await configure_strategies(redis_client)
+    sat_strategy, radar_strategy, point_value_strategy, s3_client = (
+        await configure_strategies(redis_client)
+    )
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
+    await configure_basemap(redis_client)
+
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
+    await shutdown_basemap()
     await shutdown_services()
 
     if s3_client:
@@ -150,7 +228,8 @@ app.add_middleware(
 )
 
 app.include_router(general.router)
-app.include_router(radar.router)      # Radar routes (most specific)
-app.include_router(ecmwf.router)      # ECMWF precipitation routes
+app.include_router(basemap.router)  # Base map tile proxy
+app.include_router(radar.router)  # Radar routes (most specific)
+app.include_router(ecmwf.router)  # ECMWF precipitation routes
 app.include_router(satellite.router)  # Satellite routes
-app.include_router(sync.router)       # Sync observability
+app.include_router(sync.router)  # Sync observability

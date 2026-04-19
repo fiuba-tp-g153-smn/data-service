@@ -53,6 +53,15 @@ class Settings:
     ecmwf_tile_ttl: int
     ecmwf_forecasts_to_keep: int
     ecmwf_sync_interval_seconds: int
+    # Basemap scraper (loaded from settings.json, env overrides)
+    basemap_tile_ttl: int = 604800
+    basemap_scrape_interval_seconds: int = 604800
+    basemap_scrape_concurrent: int = 3
+    basemap_scrape_delay_ms: int = 200
+    basemap_cache_max_zoom: int = 11
+    basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
+    s3_basemap_bucket_name: str = "basemap-tiles"
+    basemap_providers: list = []
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -81,6 +90,12 @@ class Settings:
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
             "ecmwf_sync_interval_seconds",
+            "basemap_tile_ttl",
+            "basemap_scrape_interval_seconds",
+            "basemap_scrape_concurrent",
+            "basemap_scrape_delay_ms",
+            "basemap_cache_max_zoom",
+            "basemap_providers",
         }
 
         for key in json_keys:
@@ -126,9 +141,7 @@ class Settings:
             "CPL_VSIL_CURL_USE_HEAD", self.gdal_curl_use_head
         )
         self.gdal_vsi_cache = os.getenv("VSI_CACHE", "TRUE").upper() == "TRUE"
-        self.gdal_vsi_cache_size = os.getenv(
-            "VSI_CACHE_SIZE", self.gdal_vsi_cache_size
-        )
+        self.gdal_vsi_cache_size = os.getenv("VSI_CACHE_SIZE", self.gdal_vsi_cache_size)
         self.gdal_vsicurl_cache_size = os.getenv(
             "CPL_VSIL_CURL_CACHE_SIZE", self.gdal_vsicurl_cache_size
         )
@@ -161,6 +174,24 @@ class Settings:
         )
         self.ecmwf_sync_interval_seconds = self._env_int(
             "ECMWF_SYNC_INTERVAL_SECONDS", self.ecmwf_sync_interval_seconds
+        )
+
+        # Basemap
+        self.s3_basemap_bucket_name = os.getenv(
+            "S3_BASEMAP_BUCKET_NAME", self.s3_basemap_bucket_name
+        )
+        self.basemap_tile_ttl = self._env_int("BASEMAP_TILE_TTL", self.basemap_tile_ttl)
+        self.basemap_scrape_interval_seconds = self._env_int(
+            "BASEMAP_SCRAPE_INTERVAL_SECONDS", self.basemap_scrape_interval_seconds
+        )
+        self.basemap_scrape_concurrent = self._env_int(
+            "BASEMAP_SCRAPE_CONCURRENT", self.basemap_scrape_concurrent
+        )
+        self.basemap_scrape_delay_ms = self._env_int(
+            "BASEMAP_SCRAPE_DELAY_MS", self.basemap_scrape_delay_ms
+        )
+        self.basemap_cache_max_zoom = self._env_int(
+            "BASEMAP_CACHE_MAX_ZOOM", self.basemap_cache_max_zoom
         )
 
     def is_s3_configured(self) -> bool:

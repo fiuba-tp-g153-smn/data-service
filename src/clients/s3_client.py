@@ -277,7 +277,13 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                     content = await stream.read()
 
                 await redis_client.store_ecmwf_tile(
-                    forecast_ts, period_ts, int(z), int(x), int(y), content, ttl=tile_ttl
+                    forecast_ts,
+                    period_ts,
+                    int(z),
+                    int(x),
+                    int(y),
+                    content,
+                    ttl=tile_ttl,
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -407,6 +413,24 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.warning("Failed to download tile %s: %s", s3_key, e)
             return None
+
+    @staticmethod
+    def build_basemap_tile_key(provider_id: str, z: int, x: int, y: int) -> str:
+        """Build S3 key for a base map tile."""
+        return f"basemap/{provider_id}/{z}/{x}/{y}.png"
+
+    async def upload_tile(
+        self, key: str, data: bytes, content_type: str = "image/png"
+    ) -> None:
+        """Upload a tile to S3."""
+        client = await self._ensure_connected()
+        async with self._semaphore:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
 
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""

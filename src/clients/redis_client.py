@@ -276,6 +276,31 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments
         )
         return sorted(m.decode() for m in members)
 
+    # ============== Base Map Tile Operations ==============
+
+    async def store_basemap_tile(
+        self,
+        provider_id: str,
+        z: int,
+        x: int,
+        y: int,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        """Store a base map tile in Redis, optionally with TTL."""
+        key = f"tile:basemap:{provider_id}/{z}/{x}/{y}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_basemap_tile(
+        self, provider_id: str, z: int, x: int, y: int
+    ) -> Optional[bytes]:
+        """Get a base map tile from Redis."""
+        key = f"tile:basemap:{provider_id}/{z}/{x}/{y}"
+        return await self._conn.get(key)
+
     # ============== Listing Cache Operations ==============
 
     async def cache_listing(self, cache_key: str, data: bytes, ttl: int) -> None:
