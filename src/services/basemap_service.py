@@ -17,18 +17,26 @@ class BasemapNotConfiguredError(Exception):
 class BasemapService:
     """Service managing base map tile access.
 
-    Instantiated once at app startup inside the FastAPI lifespan and exposed
-    to routes via `Depends(get_basemap_service)`. When basemap is disabled
-    (no providers, no S3), the service is still created with an empty
-    registry so `/basemap/providers` answers an empty list and tile requests
-    raise `BasemapNotConfiguredError`.
+    Constructed once at module import as a dependency-injection singleton
+    (see `dependencies.py`) and populated during the FastAPI lifespan via
+    `configure(reader, providers)` — mirroring how `RedisClient` is
+    constructed at import and connected in lifespan.
+
+    Before `configure` runs (or when basemap is disabled), the service
+    answers `/basemap/providers` with an empty list and raises
+    `BasemapNotConfiguredError` on tile requests.
     """
 
-    def __init__(
+    def __init__(self) -> None:
+        self._reader: Optional[BasemapTileReader] = None
+        self._providers: dict[str, BasemapProvider] = {}
+
+    def configure(
         self,
-        reader: Optional[BasemapTileReader],
+        reader: BasemapTileReader,
         providers: dict[str, BasemapProvider],
     ) -> None:
+        """Attach the tile reader and provider registry at startup."""
         self._reader = reader
         self._providers = providers
 

@@ -32,28 +32,23 @@ async def list_providers(
     "/{provider_id}/{z}/{x}/{y}.png",
     status_code=status.HTTP_200_OK,
     summary="Get Base Map Tile",
-    response_description="PNG tile bytes (256x256)",
+    response_description="PNG tile bytes (256×256)",
     description=(
-        "Serve a base map raster tile (XYZ scheme) from a 3-tier cache:\n\n"
-        "1. **Redis** — hot cache with TTL.\n"
-        "2. **S3** — cold backup populated by the weekly scraper.\n"
-        "3. **External provider** — online proxy fallback. Disabled when "
-        "`basemap_online_fallback_enabled=false` in settings.json, in which "
-        "case misses return 404 (fully-offline serving).\n\n"
-        "`ETag` is returned for every tile; clients may send `If-None-Match` "
-        "to get `304 Not Modified`.\n\n"
-        "Example: `GET /basemap/argenmap/4/5/9.png` → PNG tile for zoom 4, "
-        "x=5, y=9 from the Argenmap (IGN) provider."
+        "Return a 256×256 PNG raster tile for the given base map provider "
+        "and XYZ tile coordinates.\n\n"
+        "Supports HTTP caching via `ETag` and `If-None-Match` "
+        "(`304 Not Modified` when the client's ETag matches).\n\n"
+        "Example: `GET /basemap/argenmap/4/5/9.png`."
     ),
     responses={
         200: {
             "content": {"image/png": {}},
-            "description": "PNG tile (256×256) with Cache-Control + ETag headers",
+            "description": "PNG tile with HTTP caching headers",
         },
-        304: {"description": "Not Modified — client's ETag matched"},
+        304: {"description": "Client's `If-None-Match` matched the current ETag"},
         400: {"description": "Zoom level out of range for this provider"},
-        404: {"description": "Unknown provider, or tile not cached (offline mode)"},
-        503: {"description": "Basemap subsystem not configured at startup"},
+        404: {"description": "Tile unavailable for this provider at these coordinates"},
+        503: {"description": "Base map service temporarily unavailable"},
     },
 )
 async def get_tile(
@@ -84,7 +79,7 @@ async def get_tile(
     ),
     basemap_service: BasemapService = Depends(get_basemap_service),
 ) -> Response:
-    """Serve a cached base map tile (PNG)."""
+    """Return a base map tile (PNG)."""
     if not basemap_service.validate_provider(provider_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

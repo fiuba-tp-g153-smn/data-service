@@ -13,12 +13,11 @@ from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from controller import general
-from dependencies import logger, redis_client, settings
+from dependencies import basemap_service, logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
 from routes import basemap, ecmwf, radar, satellite, sync
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
-from services.basemap_service import BasemapService
 from services.basemap_tile_reader import BasemapTileReader
 from services.ecmwf_service import ecmwf_service
 from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
@@ -122,22 +121,23 @@ async def configure_strategies(
 
 async def configure_basemap(
     client_redis: RedisClient,
-) -> tuple[BasemapService, Optional[BasemapRuntime]]:
-    """Bring up the basemap subsystem (service + optional reader/scraper runtime).
+) -> Optional[BasemapRuntime]:
+    """Bring up the basemap subsystem (reader + mandatory full-sync scraper).
 
     Basemap ignores `settings.sync_mode`: a backup of provider tiles requires
     the scraper to always run when enabled. If S3 is not configured, basemap
     is refused entirely rather than silently degrading to pure provider-proxy
     mode — which would defeat the backup purpose.
 
-    Always returns a BasemapService (possibly with an empty provider list) so
-    routes can answer `/basemap/providers` even when the subsystem is disabled.
+    When enabled, populates the module-level `basemap_service` singleton via
+    `configure()` and returns its backing runtime for lifespan-scoped shutdown.
+    When disabled, the singleton keeps its empty default state.
     """
     providers = load_providers(settings.basemap_providers)
 
     if not providers:
         logger.info("Basemap disabled: no providers enabled in settings.json")
-        return BasemapService(reader=None, providers={}), None
+        return None
 
     if not settings.is_s3_configured():
         logger.error(
@@ -145,7 +145,7 @@ async def configure_basemap(
             "requires full-sync storage. Configure S3 credentials or disable "
             "basemap_providers in settings.json."
         )
-        return BasemapService(reader=None, providers={}), None
+        return None
 
     basemap_s3 = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
@@ -194,14 +194,13 @@ async def configure_basemap(
     )
     await scraper.start(logger)
 
-    service = BasemapService(reader=reader, providers=providers)
-    runtime = BasemapRuntime(
+    basemap_service.configure(reader=reader, providers=providers)
+    return BasemapRuntime(
         s3_client=basemap_s3,
         http_client=http_client,
         reader=reader,
         scraper=scraper,
     )
-    return service, runtime
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
@@ -223,7 +222,7 @@ async def shutdown_services():
 
 
 @asynccontextmanager
-async def lifespan(app_instance: FastAPI):
+async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
@@ -237,8 +236,7 @@ async def lifespan(app_instance: FastAPI):
     radar_service.set_strategy(radar_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
-    basemap_svc, basemap_runtime = await configure_basemap(redis_client)
-    app_instance.state.basemap_service = basemap_svc
+    basemap_runtime = await configure_basemap(redis_client)
 
     yield
 
