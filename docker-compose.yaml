@@ -43,6 +43,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - data:/app/data
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -78,6 +80,7 @@ services:
 
 volumes:
   redis_data:
+  data:
 
 networks:
   data_service_network:

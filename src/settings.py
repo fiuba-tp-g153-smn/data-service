@@ -82,6 +82,10 @@ class Settings:
     # TTL for the Redis-backed cache of per-provider "has any tile in S3?"
     # answers used by /basemap/providers when the online fallback is disabled.
     basemap_provider_presence_ttl: int = 60
+    # Resumable-scrape state (SQLite cold storage + checkpoint knobs)
+    basemap_scrape_state_db_path: str = "data/basemap_scraper_state.sqlite"
+    basemap_scrape_checkpoint_every: int = 200
+    basemap_scrape_checkpoint_seconds: float = 5.0
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -126,6 +130,9 @@ class Settings:
             "basemap_s3_object_ttl_days",
             "basemap_online_fallback_enabled",
             "basemap_provider_presence_ttl",
+            "basemap_scrape_state_db_path",
+            "basemap_scrape_checkpoint_every",
+            "basemap_scrape_checkpoint_seconds",
         }
 
         for key in json_keys:
@@ -266,6 +273,15 @@ class Settings:
         )
         self.basemap_provider_presence_ttl = self._env_int(
             "BASEMAP_PROVIDER_PRESENCE_TTL", self.basemap_provider_presence_ttl
+        )
+        self.basemap_scrape_state_db_path = os.getenv(
+            "BASEMAP_SCRAPE_STATE_DB_PATH", self.basemap_scrape_state_db_path
+        )
+        self.basemap_scrape_checkpoint_every = self._env_int(
+            "BASEMAP_SCRAPE_CHECKPOINT_EVERY", self.basemap_scrape_checkpoint_every
+        )
+        self.basemap_scrape_checkpoint_seconds = self._env_float(
+            "BASEMAP_SCRAPE_CHECKPOINT_SECONDS", self.basemap_scrape_checkpoint_seconds
         )
 
     def is_s3_configured(self) -> bool:

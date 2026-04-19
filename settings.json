@@ -25,6 +25,9 @@
   "basemap_http_max_retries": 3,
   "basemap_s3_object_ttl_days": 14,
   "basemap_online_fallback_enabled": true,
+  "basemap_scrape_state_db_path": "data/basemap_scraper_state.sqlite",
+  "basemap_scrape_checkpoint_every": 200,
+  "basemap_scrape_checkpoint_seconds": 5.0,
   "basemap_providers": [
     { "id": "argenmap", "enabled": true },
     { "id": "argenmapGris", "enabled": false },

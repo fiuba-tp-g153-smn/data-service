@@ -51,6 +51,7 @@ services:
       - ./src:/app
       - ./settings.json:/settings.json:ro
       - ./output_radar:/output_radar
+      - ./data:/app/data
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}

@@ -9,6 +9,7 @@ import uvloop
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from clients.basemap_state_store import BasemapStateStore
 from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
@@ -50,6 +51,7 @@ class BasemapRuntime:
 
     s3_client: S3Client
     http_client: HttpTileClient
+    state_store: BasemapStateStore
     reader: BasemapTileReader
     scraper: BasemapScraperService
 
@@ -190,11 +192,15 @@ async def configure_basemap(
         lon_max=settings.basemap_bbox_lon_max,
     )
 
+    state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
+    await state_store.connect()
+
     scraper = BasemapScraperService(
         settings=settings,
         s3_client=basemap_s3,
         redis_client=client_redis,
         http_client=http_client,
+        state_store=state_store,
         providers=providers,
         bbox=bbox,
         tile_ttl=settings.basemap_tile_ttl,
@@ -212,6 +218,7 @@ async def configure_basemap(
     return BasemapRuntime(
         s3_client=basemap_s3,
         http_client=http_client,
+        state_store=state_store,
         reader=reader,
         scraper=scraper,
     )
@@ -222,6 +229,7 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     if not runtime:
         return
     await runtime.scraper.stop(logger)
+    await runtime.state_store.close()
     await runtime.reader.close()
     await runtime.http_client.close()
     await runtime.s3_client.close()
