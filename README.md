@@ -97,6 +97,24 @@ Set it in `settings.json` or via the `BASEMAP_SYNC_MODE` env var.
 Negative-cache tombstones are Redis writes, so they follow Redis: on
 in `full` / `on_demand`, off in `no_cache` / `relay_only`.
 
+#### Scrape parallelism
+
+Independent of `basemap_sync_mode`, `basemap_scrape_parallelism_mode`
+controls how providers are dispatched within a single scrape cycle:
+
+| Mode                   | Cross-provider dispatch                                                    | When it fits                                                                            |
+| :--------------------- | :------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------- |
+| `sequential` _default_ | One provider at a time.                                                    | Single enabled provider, or politeness-first default. Matches pre-parallelism behavior. |
+| `per_origin`           | Providers grouped by URL host; groups run in parallel, in-group is serial. | Multi-origin set-ups that want a speedup without piling on any single upstream.         |
+| `full`                 | All providers fan out at once, host-agnostic.                              | Dev/testing, or truly disjoint upstreams with no shared quota.                          |
+
+Independently, `basemap_scrape_per_host_concurrent` caps concurrent
+in-flight requests from the scraper to any single upstream host. It
+stacks under the global `basemap_scrape_concurrent` budget — so even
+in `full` mode with 4 providers sharing one host, that host will see
+at most `per_host_concurrent` concurrent requests from us. The
+per-host budget must be ≤ the global budget (enforced at startup).
+
 #### Switching modes at runtime: Redis rehydration caveat
 
 There is **no dedicated service that rehydrates Redis from the S3 cold
@@ -402,23 +420,25 @@ About cache-control headers:
 
 Environment variables configure secrets, infrastructure, and runtime params. Set them in `.env` (see `.env.example`). Any `settings.json` key has a matching uppercase env var that takes precedence.
 
-| Variable                          | Description                                                                   | Default                    |
-| :-------------------------------- | :---------------------------------------------------------------------------- | :------------------------- |
-| `LOG_LEVEL`                       | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                              | `INFO`                     |
-| `APP_ENV`                         | Application environment (development, production).                            | `production`               |
-| `APP_HOST_PORT`                   | Host port for the API service.                                                | `6006`                     |
-| `S3_TILES_DATA_ENDPOINT`          | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
-| `S3_TILES_DATA_ACCESS_KEY`        | S3/SeaweedFS access key.                                                      | Required for sync          |
-| `S3_TILES_DATA_SECRET_KEY`        | S3/SeaweedFS secret key.                                                      | Required for sync          |
-| `S3_TILES_DATA_BUCKET_NAME`       | S3 bucket name for satellite / radar / ECMWF tiles.                           | `tiles-data`               |
-| `S3_TILES_DATA_SECURE`            | Use HTTPS for S3 connection (`true`/`false`).                                 | `false`                    |
-| `S3_BASEMAP_BUCKET_NAME`          | S3 bucket name for the basemap cold backup.                                   | `basemap-tiles`            |
-| `REDIS_URL`                       | Redis connection URL.                                                         | `redis://localhost:6379/0` |
-| `WEB_CONCURRENCY`                 | Number of Uvicorn workers.                                                    | `1`                        |
-| `SYNC_MODE`                       | `full` / `on_demand` — applies to satellite, radar, ECMWF.                    | `full`                     |
-| `BASEMAP_SYNC_MODE`               | `full` / `on_demand` / `no_cache` / `relay_only`.                             | `full`                     |
-| `BASEMAP_ONLINE_FALLBACK_ENABLED` | When `false`, disables tier-3 provider relay.                                 | `true`                     |
-| `BASEMAP_{PROVIDER}_URL`          | Per-provider URL template (one per enabled provider in `basemap_providers`).  | See `.env.example`         |
+| Variable                             | Description                                                                                | Default                    |
+| :----------------------------------- | :----------------------------------------------------------------------------------------- | :------------------------- |
+| `LOG_LEVEL`                          | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                                           | `INFO`                     |
+| `APP_ENV`                            | Application environment (development, production).                                         | `production`               |
+| `APP_HOST_PORT`                      | Host port for the API service.                                                             | `6006`                     |
+| `S3_TILES_DATA_ENDPOINT`             | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local.              | Required for sync          |
+| `S3_TILES_DATA_ACCESS_KEY`           | S3/SeaweedFS access key.                                                                   | Required for sync          |
+| `S3_TILES_DATA_SECRET_KEY`           | S3/SeaweedFS secret key.                                                                   | Required for sync          |
+| `S3_TILES_DATA_BUCKET_NAME`          | S3 bucket name for satellite / radar / ECMWF tiles.                                        | `tiles-data`               |
+| `S3_TILES_DATA_SECURE`               | Use HTTPS for S3 connection (`true`/`false`).                                              | `false`                    |
+| `S3_BASEMAP_BUCKET_NAME`             | S3 bucket name for the basemap cold backup.                                                | `basemap-tiles`            |
+| `REDIS_URL`                          | Redis connection URL.                                                                      | `redis://localhost:6379/0` |
+| `WEB_CONCURRENCY`                    | Number of Uvicorn workers.                                                                 | `1`                        |
+| `SYNC_MODE`                          | `full` / `on_demand` — applies to satellite, radar, ECMWF.                                 | `full`                     |
+| `BASEMAP_SYNC_MODE`                  | `full` / `on_demand` / `no_cache` / `relay_only`.                                          | `full`                     |
+| `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
+| `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |
+| `BASEMAP_ONLINE_FALLBACK_ENABLED`    | When `false`, disables tier-3 provider relay.                                              | `true`                     |
+| `BASEMAP_{PROVIDER}_URL`             | Per-provider URL template (one per enabled provider in `basemap_providers`).               | See `.env.example`         |
 
 Basemap tuning (scrape cadence, HTTP client budgets, bounding box,
 negative-cache TTL, etc.) is also settable via env; see `settings.py`
