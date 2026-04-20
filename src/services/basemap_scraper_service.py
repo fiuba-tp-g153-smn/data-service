@@ -1,4 +1,4 @@
-"""Background scraper that builds the basemap tile backup (full sync, mandatory)."""
+"""Background scraper that builds the basemap tile backup from external providers."""
 
 import asyncio
 import logging
@@ -44,10 +44,11 @@ logger = logging.getLogger(__name__)
 class BasemapScraperService(BaseSyncService):
     # pylint: disable=too-many-instance-attributes
     """
-    Periodic full-sync scraper with resumable progress tracking.
+    Periodic bounding-box scraper with resumable progress tracking.
 
     Walks the "bounding_box x zoom" range for every enabled provider and
-    writes tiles into S3 + Redis. Progress is persisted to a SQLite cold
+    writes tiles into S3 (and Redis when `redis_writes_enabled=True`).
+    Progress is persisted to a SQLite cold
     store so process restarts resume where the previous run left off,
     and tiles that failed download are retried on the next cycle.
     A fully-completed sweep clears all persistent state, so the next
