@@ -6,7 +6,7 @@ from fastapi import Request, Response, status
 
 from dependencies import get_basemap_service, settings
 from models.basemap import BasemapProvidersResponse
-from routes.utils import create_tile_response
+from routes.utils import create_tile_response, make_transparent_png_response
 from services.basemap_service import BasemapNotConfiguredError, BasemapService
 
 router = APIRouter(prefix="/basemap", tags=["Basemap"])
@@ -46,8 +46,6 @@ async def list_providers(
             "description": "PNG tile with HTTP caching headers",
         },
         304: {"description": "Client's `If-None-Match` matched the current ETag"},
-        400: {"description": "Zoom level out of range for this provider"},
-        404: {"description": "Tile unavailable for this provider at these coordinates"},
         503: {"description": "Base map service temporarily unavailable"},
     },
 )
@@ -86,12 +84,6 @@ async def get_tile(
             detail=f"Unknown provider '{provider_id}'",
         )
 
-    if not basemap_service.validate_zoom(provider_id, z):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Zoom level {z} not available for provider '{provider_id}'",
-        )
-
     etag = f'"{provider_id}-{z}-{x}-{y}"'
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match == etag:
@@ -106,9 +98,8 @@ async def get_tile(
         ) from exc
 
     if not tile_data:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Tile not found",
+        return make_transparent_png_response(
+            etag, settings.basemap_cache_control_tile_miss
         )
 
     return create_tile_response(

@@ -28,6 +28,13 @@
   "basemap_scrape_state_db_path": "data/basemap_scraper_state.sqlite",
   "basemap_scrape_checkpoint_every": 200,
   "basemap_scrape_checkpoint_seconds": 5.0,
+  "basemap_negative_cache_enabled": true,
+  "basemap_negative_cache_ttl": 300,
+  "basemap_reader_http_concurrent": 8,
+  "basemap_reader_http_timeout_seconds": 3,
+  "basemap_reader_http_max_retries": 1,
+  "basemap_request_deadline_seconds": 4.0,
+  "basemap_cache_control_tile_miss": "public, max-age=300, immutable",
   "basemap_providers": [
     { "id": "argenmap", "enabled": true },
     { "id": "argenmapGris", "enabled": false },

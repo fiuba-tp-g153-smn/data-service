@@ -410,8 +410,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             response = await client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
                 return await stream.read()
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning("Failed to download tile %s: %s", s3_key, e)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                logger.debug("S3 tile miss: %s", s3_key)
+                return None
+            logger.warning("S3 error for tile %s: %s", s3_key, exc)
+            return None
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.warning("Failed to download tile %s: %s", s3_key, exc)
             return None
 
     @staticmethod

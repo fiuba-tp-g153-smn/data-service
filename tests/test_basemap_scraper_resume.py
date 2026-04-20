@@ -82,6 +82,7 @@ def _make_scraper(
     s3.upload_tile = AsyncMock()
     redis = MagicMock()
     redis.store_basemap_tile = AsyncMock()
+    redis.clear_basemap_tile_miss = AsyncMock()
     return BasemapScraperService(
         settings=settings,  # type: ignore[arg-type]
         s3_client=s3,
@@ -244,6 +245,28 @@ async def test_watermark_checkpoint_persists_during_sweep(store):
 
     total = len(list(iter_tiles(5, bbox)))
     assert max(indices) == total
+
+
+@pytest.mark.asyncio
+async def test_scraper_clears_negative_cache_after_upload(store):
+    """Every successful tile upload must invalidate the reader's miss tombstone."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    clear_mock = (
+        scraper._redis.clear_basemap_tile_miss
+    )  # pylint: disable=protected-access
+    from services.basemap_config import iter_tiles
+
+    expected_calls = {
+        (provider.provider_id, z, x, y) for (z, x, y) in iter_tiles(5, bbox)
+    }
+    actual_calls = {call.args for call in clear_mock.call_args_list}
+    assert actual_calls == expected_calls
 
 
 @pytest.mark.asyncio

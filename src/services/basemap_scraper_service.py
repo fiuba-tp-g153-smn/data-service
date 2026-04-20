@@ -490,6 +490,7 @@ class BasemapScraperService(BaseSyncService):
             await self._redis.store_basemap_tile(
                 provider.provider_id, z, x, y, data, ttl=self._tile_ttl
             )
+            await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
             return True
         except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
             logger.warning(

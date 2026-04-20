@@ -86,6 +86,23 @@ class Settings:
     basemap_scrape_state_db_path: str = "data/basemap_scraper_state.sqlite"
     basemap_scrape_checkpoint_every: int = 200
     basemap_scrape_checkpoint_seconds: float = 5.0
+    # Redis-backed negative cache for tiles that miss both S3 and the relay.
+    # Short TTL is a trade-off: long enough to suppress concurrent-request
+    # storms and repeat probes; short enough that a freshly-scraped tile is
+    # unmasked quickly even if the scraper-side invalidation hook is bypassed.
+    basemap_negative_cache_enabled: bool = True
+    basemap_negative_cache_ttl: int = 300
+    # Reader-path HTTP client (isolated from the scraper's pool). Tight budget
+    # so user requests can't queue behind the scraper's retry loop.
+    basemap_reader_http_concurrent: int = 8
+    basemap_reader_http_timeout_seconds: int = 3
+    basemap_reader_http_max_retries: int = 1
+    # Hard wall-clock deadline per tile request. Bounds single-flight waiters
+    # and the relay fallback together.
+    basemap_request_deadline_seconds: float = 4.0
+    # Cache-Control header returned for missing tiles (datalayer-style: a
+    # transparent PNG with a short TTL so the browser stops re-requesting).
+    basemap_cache_control_tile_miss: str = "public, max-age=300, immutable"
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -133,6 +150,13 @@ class Settings:
             "basemap_scrape_state_db_path",
             "basemap_scrape_checkpoint_every",
             "basemap_scrape_checkpoint_seconds",
+            "basemap_negative_cache_enabled",
+            "basemap_negative_cache_ttl",
+            "basemap_reader_http_concurrent",
+            "basemap_reader_http_timeout_seconds",
+            "basemap_reader_http_max_retries",
+            "basemap_request_deadline_seconds",
+            "basemap_cache_control_tile_miss",
         }
 
         for key in json_keys:
@@ -282,6 +306,28 @@ class Settings:
         )
         self.basemap_scrape_checkpoint_seconds = self._env_float(
             "BASEMAP_SCRAPE_CHECKPOINT_SECONDS", self.basemap_scrape_checkpoint_seconds
+        )
+        self.basemap_negative_cache_enabled = self._env_bool(
+            "BASEMAP_NEGATIVE_CACHE_ENABLED", self.basemap_negative_cache_enabled
+        )
+        self.basemap_negative_cache_ttl = self._env_int(
+            "BASEMAP_NEGATIVE_CACHE_TTL", self.basemap_negative_cache_ttl
+        )
+        self.basemap_reader_http_concurrent = self._env_int(
+            "BASEMAP_READER_HTTP_CONCURRENT", self.basemap_reader_http_concurrent
+        )
+        self.basemap_reader_http_timeout_seconds = self._env_int(
+            "BASEMAP_READER_HTTP_TIMEOUT_SECONDS",
+            self.basemap_reader_http_timeout_seconds,
+        )
+        self.basemap_reader_http_max_retries = self._env_int(
+            "BASEMAP_READER_HTTP_MAX_RETRIES", self.basemap_reader_http_max_retries
+        )
+        self.basemap_request_deadline_seconds = self._env_float(
+            "BASEMAP_REQUEST_DEADLINE_SECONDS", self.basemap_request_deadline_seconds
+        )
+        self.basemap_cache_control_tile_miss = os.getenv(
+            "BASEMAP_CACHE_CONTROL_TILE_MISS", self.basemap_cache_control_tile_miss
         )
 
     def is_s3_configured(self) -> bool:

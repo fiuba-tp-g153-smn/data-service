@@ -301,6 +301,32 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         key = f"tile:basemap:{provider_id}:{z}:{x}:{y}"
         return await self._conn.get(key)
 
+    # ============== Base Map Tile Negative Cache ==============
+
+    @staticmethod
+    def _basemap_miss_key(provider_id: str, z: int, x: int, y: int) -> str:
+        return f"tile:basemap:miss:{provider_id}:{z}:{x}:{y}"
+
+    async def get_basemap_tile_miss(
+        self, provider_id: str, z: int, x: int, y: int
+    ) -> bool:
+        """True if a recent miss tombstone exists for this tile."""
+        return bool(
+            await self._conn.exists(self._basemap_miss_key(provider_id, z, x, y))
+        )
+
+    async def mark_basemap_tile_miss(
+        self, provider_id: str, z: int, x: int, y: int, ttl: int
+    ) -> None:
+        """Record a short-lived tombstone so subsequent lookups short-circuit."""
+        await self._conn.set(self._basemap_miss_key(provider_id, z, x, y), b"1", ex=ttl)
+
+    async def clear_basemap_tile_miss(
+        self, provider_id: str, z: int, x: int, y: int
+    ) -> None:
+        """Remove the miss tombstone (called on positive writes, idempotent)."""
+        await self._conn.delete(self._basemap_miss_key(provider_id, z, x, y))
+
     # ============== Base Map Provider Presence Cache ==============
 
     @staticmethod

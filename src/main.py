@@ -50,7 +50,8 @@ class BasemapRuntime:
     """Lifecycle holder for basemap-scoped resources owned by the app lifespan."""
 
     s3_client: S3Client
-    http_client: HttpTileClient
+    scraper_http_client: HttpTileClient
+    reader_http_client: HttpTileClient
     state_store: BasemapStateStore
     reader: BasemapTileReader
     scraper: BasemapScraperService
@@ -167,22 +168,35 @@ async def configure_basemap(
     await basemap_s3.connect()
     await basemap_s3.ensure_lifecycle_expiration(settings.basemap_s3_object_ttl_days)
 
-    http_client = HttpTileClient(
+    scraper_http_client = HttpTileClient(
         max_concurrent=settings.basemap_scrape_concurrent,
         delay_ms=settings.basemap_scrape_delay_ms,
         timeout_seconds=settings.basemap_http_timeout_seconds,
         max_retries=settings.basemap_http_max_retries,
     )
-    await http_client.connect()
+    await scraper_http_client.connect()
+
+    # Separate pool for user-facing reads so tile requests can't queue behind
+    # the scraper's retry loop. Tight budget: short timeout, minimal retries.
+    reader_http_client = HttpTileClient(
+        max_concurrent=settings.basemap_reader_http_concurrent,
+        delay_ms=0,
+        timeout_seconds=settings.basemap_reader_http_timeout_seconds,
+        max_retries=settings.basemap_reader_http_max_retries,
+    )
+    await reader_http_client.connect()
 
     reader = BasemapTileReader(
         redis_client=client_redis,
         s3_client=basemap_s3,
-        http_client=http_client,
+        http_client=reader_http_client,
         providers=providers,
         tile_ttl=settings.basemap_tile_ttl,
         cache_concurrent=settings.basemap_cache_concurrent,
         online_fallback=settings.basemap_online_fallback_enabled,
+        negative_cache_enabled=settings.basemap_negative_cache_enabled,
+        negative_cache_ttl=settings.basemap_negative_cache_ttl,
+        request_deadline_seconds=settings.basemap_request_deadline_seconds,
     )
 
     bbox = BoundingBox(
@@ -199,7 +213,7 @@ async def configure_basemap(
         settings=settings,
         s3_client=basemap_s3,
         redis_client=client_redis,
-        http_client=http_client,
+        http_client=scraper_http_client,
         state_store=state_store,
         providers=providers,
         bbox=bbox,
@@ -217,7 +231,8 @@ async def configure_basemap(
     )
     return BasemapRuntime(
         s3_client=basemap_s3,
-        http_client=http_client,
+        scraper_http_client=scraper_http_client,
+        reader_http_client=reader_http_client,
         state_store=state_store,
         reader=reader,
         scraper=scraper,
@@ -231,7 +246,8 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     await runtime.scraper.stop(logger)
     await runtime.state_store.close()
     await runtime.reader.close()
-    await runtime.http_client.close()
+    await runtime.reader_http_client.close()
+    await runtime.scraper_http_client.close()
     await runtime.s3_client.close()
 
 
