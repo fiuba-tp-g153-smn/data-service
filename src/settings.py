@@ -103,6 +103,12 @@ class Settings:
     # Cache-Control header returned for missing tiles (datalayer-style: a
     # transparent PNG with a short TTL so the browser stops re-requesting).
     basemap_cache_control_tile_miss: str = "public, max-age=300, immutable"
+    # Cache-Control header returned for successful basemap tile hits. Kept
+    # separate from `cache_control_tile` because basemap tiles are static
+    # (upstream providers refresh on the order of weeks) while satellite /
+    # radar / ECMWF tiles rotate every few hours. 604800s = 1 week matches
+    # the Redis TTL (basemap_tile_ttl).
+    basemap_cache_control_tile: str = "public, max-age=604800, immutable"
     # Per-domain sync mode for basemap, independent of `sync_mode`. One of
     # "full" (scraper on + Redis cache on), "on_demand" (scraper off, Redis
     # populated lazily on cold reads), "no_cache" (scraper off, reader
@@ -165,6 +171,7 @@ class Settings:
             "basemap_reader_http_max_retries",
             "basemap_request_deadline_seconds",
             "basemap_cache_control_tile_miss",
+            "basemap_cache_control_tile",
             "basemap_sync_mode",
         }
 
@@ -338,6 +345,9 @@ class Settings:
         )
         self.basemap_cache_control_tile_miss = os.getenv(
             "BASEMAP_CACHE_CONTROL_TILE_MISS", self.basemap_cache_control_tile_miss
+        )
+        self.basemap_cache_control_tile = os.getenv(
+            "BASEMAP_CACHE_CONTROL_TILE", self.basemap_cache_control_tile
         )
         self.basemap_sync_mode = (
             os.getenv("BASEMAP_SYNC_MODE", self.basemap_sync_mode)

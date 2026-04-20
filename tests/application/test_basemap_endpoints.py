@@ -66,6 +66,22 @@ def test_z2_returns_tile_when_relay_has_it(app_with_basemap_stub):
     assert response.headers["content-type"] == "image/png"
 
 
+def test_hit_uses_basemap_specific_cache_control(app_with_basemap_stub):
+    """Basemap hits must use the basemap-specific Cache-Control (1 week),
+    not the shared satellite/radar one (12 h)."""
+    client, stub = app_with_basemap_stub
+    stub.get_tile_data = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+
+    from dependencies import settings
+
+    response = client.get("/basemap/argenmap/4/5/9.png")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == settings.basemap_cache_control_tile
+    # Sanity: the default is 1 week. Config may override, but the shipped
+    # default must not regress to the shared 12h header by accident.
+    assert "max-age=604800" in settings.basemap_cache_control_tile
+
+
 def test_unknown_provider_returns_404(app_with_basemap_stub):
     client, _ = app_with_basemap_stub
     response = client.get("/basemap/no-such-provider/4/5/9.png")

@@ -97,6 +97,40 @@ Set it in `settings.json` or via the `BASEMAP_SYNC_MODE` env var.
 Negative-cache tombstones are Redis writes, so they follow Redis: on
 in `full` / `on_demand`, off in `no_cache` / `relay_only`.
 
+#### Switching modes at runtime: Redis rehydration caveat
+
+There is **no dedicated service that rehydrates Redis from the S3 cold
+backup** when you flip the mode (e.g. `no_cache` → `full`). Redis fills
+back up through two mechanisms:
+
+1. **Reader lazy warm (per-request).** On a Redis miss the reader hits
+   S3 and, on an S3 hit, schedules a background write-through into
+   Redis. So the first user request for each tile repopulates Redis
+   from S3 for free. Heavily-used tiles warm up within seconds of the
+   flip; the long tail only warms when actually requested.
+2. **Next scheduled sweep (bulk).** `BasemapScraperService` stamps
+   `basemap_scrape_last_completed` per provider and respects it across
+   restarts (see `basemap_scrape_interval_seconds`, default 1 week).
+   If you flip to `full` on day 5 of the cycle, the next sweep —
+   which is the first run with `redis_writes_enabled=True` — won't
+   happen until day 7. When it does, it re-populates Redis in bulk.
+
+**If you want an immediate bulk rehydrate** instead of waiting for the
+cooldown to elapse, force the next sweep by clearing the SQLite
+completion stamps before restarting:
+
+```bash
+# Option A — wipe all scraper state (cursor + completed stamps + failed queue)
+rm data/basemap_scraper_state.sqlite
+
+# Option B — keep resume state, just clear the completion stamps
+sqlite3 data/basemap_scraper_state.sqlite "DELETE FROM last_completed;"
+```
+
+Then `make up` / restart the service. Every provider will be "due" on
+boot and the scraper starts a fresh sweep immediately, populating
+Redis as it goes.
+
 ## Dependencies
 
 You don't really need to have `python` installed to run the project given the project is Dockerized. `python` is required to be installed on the local machine only for certain tasks (e.g. running tests or booting the app natively).
@@ -330,6 +364,7 @@ Operational tuning settings live in `settings.json` at the project root. Edit th
 | `basemap_scrape_state_db_path`            | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                              |
 | `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds` | How often the scraper flushes its watermark to SQLite.                                                                                                                              |
 | `basemap_cache_control_tile_miss`         | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                            |
+| `basemap_cache_control_tile`              | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=604800, immutable` = 1 week — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
 
 Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
 

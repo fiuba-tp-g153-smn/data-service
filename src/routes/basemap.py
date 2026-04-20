@@ -103,5 +103,5 @@ async def get_tile(
         )
 
     return create_tile_response(
-        tile_data, etag, settings.cache_control_tile, media_type="image/png"
+        tile_data, etag, settings.basemap_cache_control_tile, media_type="image/png"
     )
