@@ -53,9 +53,12 @@ class BasemapScraperService(BaseSyncService):
     A fully-completed sweep clears all persistent state, so the next
     interval-triggered cycle starts as a fresh full scrape.
 
-    Runs independently of `settings.sync_mode` (which controls satellite /
-    radar / ECMWF) because a basemap backup without full sync defeats the
-    purpose of caching provider tiles locally.
+    Driven by `settings.basemap_sync_mode` (independent of the global
+    `sync_mode`, which only controls satellite/radar/ECMWF). Runs in
+    ``"full"``, ``"on_demand"``, and ``"no_cache"`` — only ``"relay_only"``
+    skips the scraper entirely. The `redis_writes_enabled` flag controls
+    whether the scraper populates Redis during the sweep; it's only True
+    in ``"full"`` mode.
     """
 
     def __init__(
@@ -68,6 +71,7 @@ class BasemapScraperService(BaseSyncService):
         providers: dict[str, BasemapProvider],
         bbox: BoundingBox,
         tile_ttl: int,
+        redis_writes_enabled: bool = True,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         super().__init__(
@@ -82,6 +86,7 @@ class BasemapScraperService(BaseSyncService):
         self._providers = providers
         self._bbox = bbox
         self._tile_ttl = tile_ttl
+        self._redis_writes_enabled = redis_writes_enabled
         self._cache_max_zoom = settings.basemap_cache_max_zoom
         self._checkpoint_every = settings.basemap_scrape_checkpoint_every
         self._checkpoint_seconds = settings.basemap_scrape_checkpoint_seconds
@@ -487,10 +492,11 @@ class BasemapScraperService(BaseSyncService):
             s3_key = S3Client.build_basemap_tile_key(provider.provider_id, z, x, y)
             await self._s3.upload_tile(s3_key, data)
 
-            await self._redis.store_basemap_tile(
-                provider.provider_id, z, x, y, data, ttl=self._tile_ttl
-            )
-            await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
+            if self._redis_writes_enabled:
+                await self._redis.store_basemap_tile(
+                    provider.provider_id, z, x, y, data, ttl=self._tile_ttl
+                )
+                await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
             return True
         except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
             logger.warning(

@@ -103,12 +103,20 @@ class Settings:
     # Cache-Control header returned for missing tiles (datalayer-style: a
     # transparent PNG with a short TTL so the browser stops re-requesting).
     basemap_cache_control_tile_miss: str = "public, max-age=300, immutable"
+    # Per-domain sync mode for basemap, independent of `sync_mode`. One of
+    # "full" (scraper on + Redis cache on), "on_demand" (scraper off, Redis
+    # populated lazily on cold reads), "no_cache" (scraper off, reader
+    # streams straight from S3/relay — nothing lands in Redis).
+    basemap_sync_mode: str = "full"
+
+    _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
 
         self._load_from_json(settings_json_path)
         self._load_from_env()
+        self._validate()
 
     def _load_from_json(self, settings_json_path: Path) -> None:
         """Load operational settings from settings.json."""
@@ -157,6 +165,7 @@ class Settings:
             "basemap_reader_http_max_retries",
             "basemap_request_deadline_seconds",
             "basemap_cache_control_tile_miss",
+            "basemap_sync_mode",
         }
 
         for key in json_keys:
@@ -184,6 +193,7 @@ class Settings:
         return value.strip().lower() in ("1", "true", "yes", "on")
 
     def _load_from_env(self) -> None:
+        # pylint: disable=too-many-statements
         """Load from environment variables (overrides JSON values)."""
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
         self.app_env = os.getenv("APP_ENV", self.app_env)
@@ -329,6 +339,27 @@ class Settings:
         self.basemap_cache_control_tile_miss = os.getenv(
             "BASEMAP_CACHE_CONTROL_TILE_MISS", self.basemap_cache_control_tile_miss
         )
+        self.basemap_sync_mode = (
+            os.getenv("BASEMAP_SYNC_MODE", self.basemap_sync_mode)
+            or self.basemap_sync_mode
+        )
+
+    def _validate(self) -> None:
+        """Fail-fast validation for values with a fixed domain."""
+        if self.basemap_sync_mode not in self._BASEMAP_SYNC_MODES:
+            raise ValueError(
+                f"Invalid basemap_sync_mode={self.basemap_sync_mode!r}; "
+                f"expected one of {self._BASEMAP_SYNC_MODES}"
+            )
+        if (
+            self.basemap_sync_mode == "relay_only"
+            and not self.basemap_online_fallback_enabled
+        ):
+            raise ValueError(
+                "Invalid combination: basemap_sync_mode='relay_only' requires "
+                "basemap_online_fallback_enabled=true; otherwise the service "
+                "has no source of tile data."
+            )
 
     def is_s3_configured(self) -> bool:
         """Check if S3 is properly configured."""

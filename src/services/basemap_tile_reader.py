@@ -36,12 +36,29 @@ class BasemapTileReader:
         relay — prevents repeat probes for the same known-missing tile.
       * Single-flight in-flight dedup keyed on `(provider_id, z, x, y)` so a
         burst of concurrent requests collapses to one S3+relay round-trip.
+
+    Mode behaviour is driven by three independent knobs configured by
+    `main.configure_basemap`:
+      * `redis_cache_enabled=False` skips every Redis interaction in the
+        read path (no GET, no write-through, no tombstone). Used by
+        `basemap_sync_mode = "no_cache"` and `"relay_only"` to keep RAM
+        flat.
+      * `s3_cache_enabled=False` skips the S3 probe and the S3 upload
+        after a relay hit. Used by `"relay_only"` so the reader becomes a
+        pure provider proxy.
+      * `negative_cache_enabled=False` disables the Redis tombstone used to
+        suppress repeat probes of known-missing tiles. Force-off whenever
+        Redis is off (tombstones are Redis writes).
+
+    Why one class instead of a Strategy split like satellite/radar: the read
+    path is identical across modes — only the write side differs by a few
+    branches, so the boolean gates are cleaner than duplicating the reader.
     """
 
     def __init__(
         self,
         redis_client: RedisClient,
-        s3_client: S3Client,
+        s3_client: Optional[S3Client],
         http_client: HttpTileClient,
         providers: dict[str, BasemapProvider],
         tile_ttl: int,
@@ -50,6 +67,8 @@ class BasemapTileReader:
         negative_cache_enabled: bool = True,
         negative_cache_ttl: int = 300,
         request_deadline_seconds: float = 4.0,
+        redis_cache_enabled: bool = True,
+        s3_cache_enabled: bool = True,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
@@ -58,16 +77,30 @@ class BasemapTileReader:
         self._providers = providers
         self._tile_ttl = tile_ttl
         self._online_fallback = online_fallback
-        self._negative_cache_enabled = negative_cache_enabled
+        self._redis_cache_enabled = redis_cache_enabled
+        # An s3_client of None is only valid if S3 is off in both read and
+        # write directions (relay_only mode). Enforce the invariant here.
+        self._s3_cache_enabled = s3_cache_enabled and s3_client is not None
+        if s3_cache_enabled and s3_client is None:
+            raise ValueError(
+                "BasemapTileReader: s3_cache_enabled=True requires an "
+                "s3_client; got None."
+            )
+        # Tombstones are Redis writes; without the Redis cache they make no
+        # sense. Force-disable so callers can't accidentally leave it on.
+        self._negative_cache_enabled = negative_cache_enabled and redis_cache_enabled
         self._negative_cache_ttl = negative_cache_ttl
         self._request_deadline_seconds = request_deadline_seconds
         self._cache_semaphore = asyncio.Semaphore(cache_concurrent)
         self._inflight_cache_tasks: set[asyncio.Task] = set()
         self._inflight: dict[_TileKey, "asyncio.Future[Optional[bytes]]"] = {}
         logger.info(
-            "BasemapTileReader online_fallback=%s negative_cache=%s ttl=%ds deadline=%.1fs",
+            "BasemapTileReader redis=%s s3=%s online_fallback=%s "
+            "negative_cache=%s ttl=%ds deadline=%.1fs",
+            "enabled" if redis_cache_enabled else "disabled",
+            "enabled" if s3_cache_enabled else "disabled",
             online_fallback,
-            "enabled" if negative_cache_enabled else "disabled",
+            "enabled" if self._negative_cache_enabled else "disabled",
             negative_cache_ttl,
             request_deadline_seconds,
         )
@@ -76,10 +109,11 @@ class BasemapTileReader:
         self, provider_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
         """Fetch a tile with Redis → S3 → (optional) external-provider fallback."""
-        data = await self._redis.get_basemap_tile(provider_id, z, x, y)
-        if data:
-            self._log_served("redis", provider_id, z, x, y)
-            return data
+        if self._redis_cache_enabled:
+            data = await self._redis.get_basemap_tile(provider_id, z, x, y)
+            if data:
+                self._log_served("redis", provider_id, z, x, y)
+                return data
 
         key: _TileKey = (provider_id, z, x, y)
         existing = self._inflight.get(key)
@@ -131,12 +165,13 @@ class BasemapTileReader:
         )
 
         if s3_data:
-            self._schedule_cache_write(
-                self._redis.store_basemap_tile(
-                    provider_id, z, x, y, s3_data, ttl=self._tile_ttl
-                ),
-                label=f"redis-after-s3 {s3_key}",
-            )
+            if self._redis_cache_enabled:
+                self._schedule_cache_write(
+                    self._redis.store_basemap_tile(
+                        provider_id, z, x, y, s3_data, ttl=self._tile_ttl
+                    ),
+                    label=f"redis-after-s3 {s3_key}",
+                )
             self._log_served("s3", provider_id, z, x, y)
             return s3_data
 
@@ -151,14 +186,16 @@ class BasemapTileReader:
         url = build_source_url(provider, z, x, y)
         data = await self._http.download_tile(url)
         if data:
-            self._schedule_cache_write(
-                self._cache_tile(provider_id, z, x, y, s3_key, data),
-                label=f"s3+redis-after-provider {s3_key}",
-            )
-            self._schedule_cache_write(
-                self._redis.clear_basemap_tile_miss(provider_id, z, x, y),
-                label=f"clear-miss-after-provider {s3_key}",
-            )
+            if self._s3_cache_enabled or self._redis_cache_enabled:
+                self._schedule_cache_write(
+                    self._cache_tile(provider_id, z, x, y, s3_key, data),
+                    label=f"s3+redis-after-provider {s3_key}",
+                )
+            if self._negative_cache_enabled:
+                self._schedule_cache_write(
+                    self._redis.clear_basemap_tile_miss(provider_id, z, x, y),
+                    label=f"clear-miss-after-provider {s3_key}",
+                )
             self._log_served("relay", provider_id, z, x, y)
             return data
 
@@ -170,6 +207,13 @@ class BasemapTileReader:
     ) -> Tuple[bool, Optional[bytes]]:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Fail-open pipeline: run the neg-cache check and S3 GET concurrently."""
+        if not self._s3_cache_enabled and not self._negative_cache_enabled:
+            # relay_only: skip both probes, go straight to the provider.
+            return False, None
+        if not self._s3_cache_enabled:
+            miss = await self._redis.get_basemap_tile_miss(provider_id, z, x, y)
+            return bool(miss), None
+        assert self._s3 is not None  # guaranteed by _s3_cache_enabled
         if not self._negative_cache_enabled:
             return False, await self._s3.download_tile(s3_key)
 
@@ -236,11 +280,14 @@ class BasemapTileReader:
     async def _cache_tile(
         self, provider_id: str, z: int, x: int, y: int, s3_key: str, data: bytes
     ) -> None:
-        """Persist a freshly-fetched tile into both S3 and Redis."""
-        await self._s3.upload_tile(s3_key, data)
-        await self._redis.store_basemap_tile(
-            provider_id, z, x, y, data, ttl=self._tile_ttl
-        )
+        """Persist a freshly-fetched tile into S3 and Redis (both gated)."""
+        if self._s3_cache_enabled:
+            assert self._s3 is not None  # guaranteed by _s3_cache_enabled
+            await self._s3.upload_tile(s3_key, data)
+        if self._redis_cache_enabled:
+            await self._redis.store_basemap_tile(
+                provider_id, z, x, y, data, ttl=self._tile_ttl
+            )
 
     async def close(self, timeout: float = 5.0) -> None:
         """Drain in-flight cache writes before shutdown."""

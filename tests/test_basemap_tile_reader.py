@@ -56,10 +56,15 @@ def _make_reader(
     negative_cache_enabled=True,
     negative_cache_ttl=300,
     request_deadline_seconds=4.0,
+    redis_cache_enabled=True,
+    s3_cache_enabled=True,
 ) -> BasemapTileReader:
+    # When s3_cache_enabled is False, pass s3=None so the reader goes
+    # straight to the relay (matches production relay_only wiring).
+    s3_arg = s3 if s3 is not None else (_make_s3() if s3_cache_enabled else None)
     return BasemapTileReader(
         redis_client=redis or _make_redis(),
-        s3_client=s3 or _make_s3(),
+        s3_client=s3_arg,
         http_client=http or _make_http(),
         providers=providers if providers is not None else {"fake": _make_provider()},
         tile_ttl=60,
@@ -68,6 +73,8 @@ def _make_reader(
         negative_cache_enabled=negative_cache_enabled,
         negative_cache_ttl=negative_cache_ttl,
         request_deadline_seconds=request_deadline_seconds,
+        redis_cache_enabled=redis_cache_enabled,
+        s3_cache_enabled=s3_cache_enabled,
     )
 
 
@@ -305,6 +312,127 @@ async def test_deadline_releases_single_flight_waiters():
     assert all(r is None for r in results)
     assert elapsed < 1.5, f"waiters not released promptly: {elapsed:.2f}s"
     assert not reader._inflight  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_no_cache_mode_skips_redis_get_on_every_request():
+    """redis_cache_enabled=False must never GET from Redis, even on cold path."""
+    redis = _make_redis()
+    redis.get_basemap_tile = AsyncMock(return_value=b"should-not-be-read")
+    s3 = _make_s3(data=b"from-s3")
+    reader = _make_reader(redis=redis, s3=s3, redis_cache_enabled=False)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+    assert got == b"from-s3"
+    redis.get_basemap_tile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_cache_mode_does_not_write_redis_after_s3_hit():
+    redis = _make_redis()
+    s3 = _make_s3(data=b"from-s3")
+    reader = _make_reader(redis=redis, s3=s3, redis_cache_enabled=False)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+    assert got == b"from-s3"
+    await _drain(reader)
+    redis.store_basemap_tile.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_cache_mode_uploads_s3_but_skips_redis_after_relay_hit():
+    """Relay hit in no_cache still backs up to S3 (cold backup) but not Redis."""
+    redis = _make_redis()
+    s3 = _make_s3(data=None)
+    http = _make_http(data=b"from-relay")
+    reader = _make_reader(redis=redis, s3=s3, http=http, redis_cache_enabled=False)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+    assert got == b"from-relay"
+    await _drain(reader)
+    s3.upload_tile.assert_awaited_once()
+    redis.store_basemap_tile.assert_not_called()
+    redis.clear_basemap_tile_miss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_cache_mode_forces_negative_cache_off():
+    """Even if caller passes negative_cache_enabled=True, no_cache wins."""
+    redis = _make_redis()
+    s3 = _make_s3(data=None)
+    http = _make_http(data=None)
+    reader = _make_reader(
+        redis=redis,
+        s3=s3,
+        http=http,
+        redis_cache_enabled=False,
+        negative_cache_enabled=True,
+    )
+
+    got = await reader.get_tile("fake", 2, 1, 1)
+    assert got is None
+    redis.get_basemap_tile_miss.assert_not_called()
+    redis.mark_basemap_tile_miss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_relay_only_bypasses_redis_and_s3_on_hit():
+    """relay_only: s3 is None, Redis untouched, relay bytes returned as-is."""
+    redis = _make_redis()
+    http = _make_http(data=b"from-relay")
+    reader = _make_reader(
+        redis=redis,
+        http=http,
+        redis_cache_enabled=False,
+        s3_cache_enabled=False,
+    )
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+    assert got == b"from-relay"
+    await _drain(reader)
+    http.download_tile.assert_awaited_once()
+    redis.get_basemap_tile.assert_not_called()
+    redis.get_basemap_tile_miss.assert_not_called()
+    redis.store_basemap_tile.assert_not_called()
+    redis.mark_basemap_tile_miss.assert_not_called()
+    redis.clear_basemap_tile_miss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_relay_only_returns_none_on_relay_miss_with_no_tombstone():
+    """relay_only: relay miss → None, no tombstone write, no S3 write."""
+    redis = _make_redis()
+    http = _make_http(data=None)
+    reader = _make_reader(
+        redis=redis,
+        http=http,
+        redis_cache_enabled=False,
+        s3_cache_enabled=False,
+    )
+
+    got = await reader.get_tile("fake", 2, 1, 1)
+    assert got is None
+    await _drain(reader)
+    redis.mark_basemap_tile_miss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_relay_only_rejects_s3_cache_enabled_without_s3_client():
+    """Guardrail: s3_cache_enabled=True without an s3 client must raise."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="s3_cache_enabled"):
+        BasemapTileReader(
+            redis_client=_make_redis(),
+            s3_client=None,
+            http_client=_make_http(),
+            providers={"fake": _make_provider()},
+            tile_ttl=60,
+            cache_concurrent=4,
+            online_fallback=True,
+            redis_cache_enabled=True,
+            s3_cache_enabled=True,
+        )
 
 
 @pytest.mark.asyncio

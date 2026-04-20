@@ -75,6 +75,8 @@ def _make_scraper(
     http: FakeHttp,
     provider: BasemapProvider,
     bbox: BoundingBox,
+    *,
+    redis_writes_enabled: bool = True,
     **settings_overrides,
 ) -> BasemapScraperService:
     settings = _make_settings(**settings_overrides)
@@ -92,6 +94,7 @@ def _make_scraper(
         providers={provider.provider_id: provider},
         bbox=bbox,
         tile_ttl=60,
+        redis_writes_enabled=redis_writes_enabled,
     )
 
 
@@ -267,6 +270,27 @@ async def test_scraper_clears_negative_cache_after_upload(store):
     }
     actual_calls = {call.args for call in clear_mock.call_args_list}
     assert actual_calls == expected_calls
+
+
+@pytest.mark.asyncio
+async def test_redis_writes_disabled_skips_all_scraper_redis_calls(store):
+    """no_cache mode: scraper uploads to S3 but never touches Redis."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox, redis_writes_enabled=False)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # pylint: disable=protected-access
+    s3_mock = scraper._s3.upload_tile
+    redis_store_mock = scraper._redis.store_basemap_tile
+    redis_clear_mock = scraper._redis.clear_basemap_tile_miss
+
+    # S3 uploads happened (one per tile), but Redis was untouched.
+    assert s3_mock.await_count > 0
+    redis_store_mock.assert_not_called()
+    redis_clear_mock.assert_not_called()
 
 
 @pytest.mark.asyncio

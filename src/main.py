@@ -49,12 +49,14 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 class BasemapRuntime:
     """Lifecycle holder for basemap-scoped resources owned by the app lifespan."""
 
-    s3_client: S3Client
-    scraper_http_client: HttpTileClient
     reader_http_client: HttpTileClient
-    state_store: BasemapStateStore
     reader: BasemapTileReader
-    scraper: BasemapScraperService
+    # S3 is absent in relay_only mode.
+    s3_client: Optional[S3Client] = None
+    # Scraper-only resources. Absent in relay_only mode.
+    scraper_http_client: Optional[HttpTileClient] = None
+    state_store: Optional[BasemapStateStore] = None
+    scraper: Optional[BasemapScraperService] = None
 
 
 async def configure_strategies(
@@ -132,12 +134,21 @@ async def configure_strategies(
 async def configure_basemap(
     client_redis: RedisClient,
 ) -> Optional[BasemapRuntime]:
-    """Bring up the basemap subsystem (reader + mandatory full-sync scraper).
+    """Bring up the basemap subsystem using the active `basemap_sync_mode`.
 
-    Basemap ignores `settings.sync_mode`: a backup of provider tiles requires
-    the scraper to always run when enabled. If S3 is not configured, basemap
-    is refused entirely rather than silently degrading to pure provider-proxy
-    mode — which would defeat the backup purpose.
+    Modes (set via `settings.json::basemap_sync_mode` or `BASEMAP_SYNC_MODE`):
+      * ``full``       — scraper on (writes Redis + S3), reader uses
+                         Redis + S3 + relay, tombstones on.
+      * ``on_demand``  — scraper on but writes only S3; reader still uses
+                         Redis and fills it lazily on cold reads.
+      * ``no_cache``   — scraper on, S3-only. Reader skips Redis entirely.
+      * ``relay_only`` — scraper off, Redis off, S3 off. Reader is a pure
+                         provider proxy.
+
+    `relay_only` is the only mode that skips S3 reads, so an S3 backend
+    outage doesn't take the service down under `relay_only`. For every
+    other mode, S3 must be configured — a cold backup without S3 storage
+    defeats the point of having a backup.
 
     When enabled, populates the module-level `basemap_service` singleton via
     `configure()` and returns its backing runtime for lifespan-scoped shutdown.
@@ -149,32 +160,48 @@ async def configure_basemap(
         logger.info("Basemap disabled: no providers enabled in settings.json")
         return None
 
-    if not settings.is_s3_configured():
+    mode = settings.basemap_sync_mode
+    run_scraper = mode in ("full", "on_demand", "no_cache")
+    scraper_writes_redis = mode == "full"
+    redis_cache_enabled = mode in ("full", "on_demand")
+    s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
+    negative_cache = settings.basemap_negative_cache_enabled and redis_cache_enabled
+
+    if s3_cache_enabled and not settings.is_s3_configured():
         logger.error(
             "Basemap refused to start: S3 is not configured but basemap "
-            "requires full-sync storage. Configure S3 credentials or disable "
-            "basemap_providers in settings.json."
+            "mode=%s requires S3 storage. Configure S3 credentials, switch "
+            "to basemap_sync_mode=relay_only, or disable basemap_providers "
+            "in settings.json.",
+            mode,
         )
         return None
 
-    basemap_s3 = S3Client(
-        endpoint=settings.s3_tiles_data_endpoint,
-        access_key=settings.s3_tiles_data_access_key,
-        secret_key=settings.s3_tiles_data_secret_key,
-        bucket=settings.s3_basemap_bucket_name,
-        secure=settings.s3_tiles_data_secure,
-        max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+    logger.info(
+        "Basemap mode=%s (scraper=%s, scraper_redis=%s, "
+        "reader_redis=%s, reader_s3=%s, negative_cache=%s)",
+        mode,
+        "on" if run_scraper else "off",
+        "on" if scraper_writes_redis else "off",
+        "on" if redis_cache_enabled else "off",
+        "on" if s3_cache_enabled else "off",
+        "on" if negative_cache else "off",
     )
-    await basemap_s3.connect()
-    await basemap_s3.ensure_lifecycle_expiration(settings.basemap_s3_object_ttl_days)
 
-    scraper_http_client = HttpTileClient(
-        max_concurrent=settings.basemap_scrape_concurrent,
-        delay_ms=settings.basemap_scrape_delay_ms,
-        timeout_seconds=settings.basemap_http_timeout_seconds,
-        max_retries=settings.basemap_http_max_retries,
-    )
-    await scraper_http_client.connect()
+    basemap_s3: Optional[S3Client] = None
+    if s3_cache_enabled:
+        basemap_s3 = S3Client(
+            endpoint=settings.s3_tiles_data_endpoint,
+            access_key=settings.s3_tiles_data_access_key,
+            secret_key=settings.s3_tiles_data_secret_key,
+            bucket=settings.s3_basemap_bucket_name,
+            secure=settings.s3_tiles_data_secure,
+            max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        )
+        await basemap_s3.connect()
+        await basemap_s3.ensure_lifecycle_expiration(
+            settings.basemap_s3_object_ttl_days
+        )
 
     # Separate pool for user-facing reads so tile requests can't queue behind
     # the scraper's retry loop. Tight budget: short timeout, minimal retries.
@@ -194,32 +221,50 @@ async def configure_basemap(
         tile_ttl=settings.basemap_tile_ttl,
         cache_concurrent=settings.basemap_cache_concurrent,
         online_fallback=settings.basemap_online_fallback_enabled,
-        negative_cache_enabled=settings.basemap_negative_cache_enabled,
+        negative_cache_enabled=negative_cache,
         negative_cache_ttl=settings.basemap_negative_cache_ttl,
         request_deadline_seconds=settings.basemap_request_deadline_seconds,
+        redis_cache_enabled=redis_cache_enabled,
+        s3_cache_enabled=s3_cache_enabled,
     )
 
-    bbox = BoundingBox(
-        lat_min=settings.basemap_bbox_lat_min,
-        lat_max=settings.basemap_bbox_lat_max,
-        lon_min=settings.basemap_bbox_lon_min,
-        lon_max=settings.basemap_bbox_lon_max,
-    )
+    scraper_http_client: Optional[HttpTileClient] = None
+    state_store: Optional[BasemapStateStore] = None
+    scraper: Optional[BasemapScraperService] = None
+    if run_scraper:
+        scraper_http_client = HttpTileClient(
+            max_concurrent=settings.basemap_scrape_concurrent,
+            delay_ms=settings.basemap_scrape_delay_ms,
+            timeout_seconds=settings.basemap_http_timeout_seconds,
+            max_retries=settings.basemap_http_max_retries,
+        )
+        await scraper_http_client.connect()
 
-    state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
-    await state_store.connect()
+        bbox = BoundingBox(
+            lat_min=settings.basemap_bbox_lat_min,
+            lat_max=settings.basemap_bbox_lat_max,
+            lon_min=settings.basemap_bbox_lon_min,
+            lon_max=settings.basemap_bbox_lon_max,
+        )
 
-    scraper = BasemapScraperService(
-        settings=settings,
-        s3_client=basemap_s3,
-        redis_client=client_redis,
-        http_client=scraper_http_client,
-        state_store=state_store,
-        providers=providers,
-        bbox=bbox,
-        tile_ttl=settings.basemap_tile_ttl,
-    )
-    await scraper.start(logger)
+        state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
+        await state_store.connect()
+
+        # run_scraper implies s3_cache_enabled by construction, so basemap_s3
+        # is guaranteed non-None here. Assert for the benefit of mypy.
+        assert basemap_s3 is not None
+        scraper = BasemapScraperService(
+            settings=settings,
+            s3_client=basemap_s3,
+            redis_client=client_redis,
+            http_client=scraper_http_client,
+            state_store=state_store,
+            providers=providers,
+            bbox=bbox,
+            tile_ttl=settings.basemap_tile_ttl,
+            redis_writes_enabled=scraper_writes_redis,
+        )
+        await scraper.start(logger)
 
     basemap_service.configure(
         reader=reader,
@@ -231,10 +276,10 @@ async def configure_basemap(
     )
     return BasemapRuntime(
         s3_client=basemap_s3,
-        scraper_http_client=scraper_http_client,
         reader_http_client=reader_http_client,
-        state_store=state_store,
         reader=reader,
+        scraper_http_client=scraper_http_client,
+        state_store=state_store,
         scraper=scraper,
     )
 
@@ -243,12 +288,16 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     """Tear down basemap resources in reverse startup order."""
     if not runtime:
         return
-    await runtime.scraper.stop(logger)
-    await runtime.state_store.close()
+    if runtime.scraper is not None:
+        await runtime.scraper.stop(logger)
+    if runtime.state_store is not None:
+        await runtime.state_store.close()
     await runtime.reader.close()
     await runtime.reader_http_client.close()
-    await runtime.scraper_http_client.close()
-    await runtime.s3_client.close()
+    if runtime.scraper_http_client is not None:
+        await runtime.scraper_http_client.close()
+    if runtime.s3_client is not None:
+        await runtime.s3_client.close()
 
 
 async def shutdown_services():

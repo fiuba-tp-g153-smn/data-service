@@ -35,6 +35,7 @@
   "basemap_reader_http_max_retries": 1,
   "basemap_request_deadline_seconds": 4.0,
   "basemap_cache_control_tile_miss": "public, max-age=300, immutable",
+  "basemap_sync_mode": "no_cache",
   "basemap_providers": [
     { "id": "argenmap", "enabled": true },
     { "id": "argenmapGris", "enabled": false },

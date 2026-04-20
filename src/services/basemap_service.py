@@ -43,7 +43,7 @@ class BasemapService:
         reader: BasemapTileReader,
         providers: dict[str, BasemapProvider],
         online_fallback: bool,
-        s3_client: S3Client,
+        s3_client: Optional[S3Client],
         redis_client: RedisClient,
         presence_ttl: int,
     ) -> None:
