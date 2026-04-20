@@ -11,7 +11,7 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, List, Optional, cast
 
 import aioboto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
@@ -277,7 +277,13 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                     content = await stream.read()
 
                 await redis_client.store_ecmwf_tile(
-                    forecast_ts, period_ts, int(z), int(x), int(y), content, ttl=tile_ttl
+                    forecast_ts,
+                    period_ts,
+                    int(z),
+                    int(x),
+                    int(y),
+                    content,
+                    ttl=tile_ttl,
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -404,9 +410,96 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             response = await client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
                 return await stream.read()
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning("Failed to download tile %s: %s", s3_key, e)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                logger.debug("S3 tile miss: %s", s3_key)
+                return None
+            logger.warning("S3 error for tile %s: %s", s3_key, exc)
             return None
+        except (asyncio.TimeoutError, OSError) as exc:
+            logger.warning("Failed to download tile %s: %s", s3_key, exc)
+            return None
+
+    @staticmethod
+    def build_basemap_tile_key(provider_id: str, z: int, x: int, y: int) -> str:
+        """Build S3 key for a base map tile."""
+        return f"basemap/{provider_id}/{z}/{x}/{y}.png"
+
+    async def upload_tile(
+        self, key: str, data: bytes, content_type: str = "image/png"
+    ) -> None:
+        """Upload a tile to S3."""
+        client = await self._ensure_connected()
+        async with self._semaphore:
+            await client.put_object(
+                Bucket=self._bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type,
+            )
+
+    async def ensure_lifecycle_expiration(
+        self, days: int, rule_id: str = "basemap-tile-expiration"
+    ) -> bool:
+        """
+        Idempotently set a bucket-wide lifecycle rule that expires all objects
+        after `days` days from their creation (i.e. last PUT).
+
+        Safe to call on every startup — `put_bucket_lifecycle_configuration`
+        replaces the named rule. Not all S3-compatible backends support this
+        API; failures are logged at WARNING and do not abort startup.
+
+        Returns ``True`` when the policy was applied, ``False`` on a swallowed
+        error. Callers that want "retry until it sticks" semantics (the
+        basemap scraper) poll the return value.
+        """
+        client = await self._ensure_connected()
+        try:
+            await client.put_bucket_lifecycle_configuration(
+                Bucket=self._bucket,
+                LifecycleConfiguration={
+                    "Rules": [
+                        {
+                            "ID": rule_id,
+                            "Status": "Enabled",
+                            "Filter": {"Prefix": ""},
+                            "Expiration": {"Days": days},
+                        }
+                    ]
+                },
+            )
+            logger.info(
+                "S3 lifecycle policy set on bucket %s: expire all objects after %d days",
+                self._bucket,
+                days,
+            )
+            return True
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            # Lifecycle config is best-effort: a missing policy never blocks
+            # tile serving, so an unreachable or non-supporting backend should
+            # degrade to a warning rather than aborting startup.
+            logger.warning(
+                "Could not set lifecycle policy on bucket %s "
+                "(backend unreachable or unsupported): %s",
+                self._bucket,
+                exc,
+            )
+            return False
+
+    async def has_any_object(self, prefix: str) -> bool:
+        """True if at least one object exists under the given prefix."""
+        client = await self._ensure_connected()
+        try:
+            response = await client.list_objects_v2(
+                Bucket=self._bucket, Prefix=prefix, MaxKeys=1
+            )
+            return bool(response.get("Contents"))
+        except ClientError as exc:
+            logger.error(
+                "Unexpected S3 error while checking prefix %s: %s", prefix, exc
+            )
+            raise
 
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""

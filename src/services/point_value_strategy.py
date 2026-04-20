@@ -4,9 +4,9 @@ import asyncio
 import math
 from typing import Optional, Protocol
 
-import rasterio
-from rasterio.errors import RasterioIOError
-from rasterio.windows import Window
+import rasterio  # type: ignore[import-untyped]
+from rasterio.errors import RasterioIOError  # type: ignore[import-untyped]
+from rasterio.windows import Window  # type: ignore[import-untyped]
 
 from clients.s3_client import S3Client
 from dependencies import logger, settings
@@ -46,7 +46,9 @@ class S3CogPointValueStrategy:
         if not await self._s3_client.object_exists(cog_key):
             raise CogObjectNotFoundError()
 
-        return await asyncio.to_thread(self._read_point_from_cog_sync, cog_key, lat, lon)
+        return await asyncio.to_thread(
+            self._read_point_from_cog_sync, cog_key, lat, lon
+        )
 
     def _read_point_from_cog_sync(self, cog_key: str, lat: float, lon: float) -> float:
         """Open remote COG and sample nearest value. Runs in thread."""

@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from services.point_value_service import CogNotFoundError, NoDataOrOutsideError, PointSample
+from services.point_value_service import (
+    CogNotFoundError,
+    NoDataOrOutsideError,
+    PointSample,
+)
 
 client = TestClient(app)
 

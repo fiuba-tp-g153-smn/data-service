@@ -28,6 +28,9 @@ def init_logger(settings: Settings) -> Logger:
     root_logger.handlers.clear()
     root_logger.addHandler(handler)
 
+    # Silence httpx's per-request INFO lines; WARNING+ still surfaces.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
     # Named logger returned for direct use in main/dependencies.
     # No handler attached — inherits from root to avoid duplicate output.
     logger = logging.getLogger("data-service")

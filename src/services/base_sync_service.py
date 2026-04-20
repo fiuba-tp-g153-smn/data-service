@@ -60,6 +60,10 @@ class BaseSyncService:
     def _on_sync_error(self, error: Exception) -> None:
         """Override to handle sync loop errors (e.g., track consecutive failures)."""
 
+    async def _compute_next_sleep(self, default: float) -> float:
+        """Override to shorten sleep when the default would overshoot pending work."""
+        return default
+
     async def start(self, app_logger: Logger) -> None:
         """Start the background sync task."""
         if self._running:
@@ -127,7 +131,8 @@ class BaseSyncService:
 
             if self._running:
                 elapsed = time.monotonic() - cycle_start
-                sleep_time = max(0, self._sync_interval - elapsed)
+                default_sleep = max(0, self._sync_interval - elapsed)
+                sleep_time = await self._compute_next_sleep(default_sleep)
                 await asyncio.sleep(sleep_time)
 
     async def _run_sync(self) -> None:

@@ -5,9 +5,18 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from models.ecmwf import ForecastListResponse, ForecastRunInfo, PeriodInfo, PeriodListResponse
+from models.ecmwf import (
+    ForecastListResponse,
+    ForecastRunInfo,
+    PeriodInfo,
+    PeriodListResponse,
+)
 from services.ecmwf_service import EcmwfService
-from services.point_value_service import CogNotFoundError, NoDataOrOutsideError, PointSample
+from services.point_value_service import (
+    CogNotFoundError,
+    NoDataOrOutsideError,
+    PointSample,
+)
 
 client = TestClient(app)
 
@@ -218,17 +227,13 @@ def test_get_point_value_returns_404_nodata_or_outside():
 
 
 def test_get_point_value_returns_422_for_lat_out_of_range():
-    response = client.get(
-        f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-95.0&lon=-58.4"
-    )
+    response = client.get(f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-95.0&lon=-58.4")
 
     assert response.status_code == 422
 
 
 def test_get_point_value_returns_422_for_lon_out_of_range():
-    response = client.get(
-        f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-34.6&lon=200.0"
-    )
+    response = client.get(f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-34.6&lon=200.0")
 
     assert response.status_code == 422
 

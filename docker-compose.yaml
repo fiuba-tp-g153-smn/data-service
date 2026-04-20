@@ -43,6 +43,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - data:/app/data
     environment:
       - LOG_LEVEL=${LOG_LEVEL}
       - APP_ENV=${APP_ENV}
@@ -56,6 +58,16 @@ services:
       - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
       - WEB_CONCURRENCY=${WEB_CONCURRENCY}
       - REDIS_URL=${REDIS_URL}
+      # Basemap tile backup bucket + per-provider source URLs
+      - S3_BASEMAP_BUCKET_NAME=${S3_BASEMAP_BUCKET_NAME}
+      - BASEMAP_ARGENMAP_URL=${BASEMAP_ARGENMAP_URL}
+      - BASEMAP_ARGENMAPGRIS_URL=${BASEMAP_ARGENMAPGRIS_URL}
+      - BASEMAP_ARGENMAPOSCURO_URL=${BASEMAP_ARGENMAPOSCURO_URL}
+      - BASEMAP_ARGENMAPTOPOGRAFICO_URL=${BASEMAP_ARGENMAPTOPOGRAFICO_URL}
+      - BASEMAP_SATELLITE_URL=${BASEMAP_SATELLITE_URL}
+      - BASEMAP_TOPOGRAPHIC_URL=${BASEMAP_TOPOGRAPHIC_URL}
+      - BASEMAP_GOOGLESATELLITE_URL=${BASEMAP_GOOGLESATELLITE_URL}
+      - BASEMAP_OCEANBASE_URL=${BASEMAP_OCEANBASE_URL}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -68,6 +80,7 @@ services:
 
 volumes:
   redis_data:
+  data:
 
 networks:
   data_service_network:

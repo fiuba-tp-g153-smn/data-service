@@ -27,6 +27,7 @@ redis = { version = "^7.1.0", extras = ["hiredis"] }
 pillow = "^12.1.1"
 types-aiobotocore-s3 = "^3.2.0"
 rasterio = "^1.4.3"
+tenacity = "^9.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"
@@ -58,6 +59,7 @@ max-attributes = 10
 max-args = 10
 max-positional-arguments = 8
 max-locals = 20
+min-public-methods = 1
 
 [[tool.mypy.overrides]]
 module = "newrelic.*"

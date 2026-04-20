@@ -9,10 +9,18 @@ from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
-from models.ecmwf import EcmwfPointValueResponse, ForecastListResponse, PeriodListResponse
+from models.ecmwf import (
+    EcmwfPointValueResponse,
+    ForecastListResponse,
+    PeriodListResponse,
+)
 from routes.utils import create_tile_response
 from services.ecmwf_service import ecmwf_service
-from services.point_value_service import CogNotFoundError, NoDataOrOutsideError, point_value_service
+from services.point_value_service import (
+    CogNotFoundError,
+    NoDataOrOutsideError,
+    point_value_service,
+)
 
 router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF"])
 
@@ -30,7 +38,9 @@ async def list_forecasts(request: Request):
     """List available ECMWF total precipitation forecast runs."""
     data = await ecmwf_service.list_forecasts()
     payload = data.model_dump()
-    etag = f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
+    etag = (
+        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
+    )
 
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match == etag:
@@ -50,7 +60,9 @@ async def list_forecasts(request: Request):
 )
 async def list_periods(
     request: Request,
-    forecast_ts: str = PathParam(..., description="Forecast run timestamp (e.g. 20260328T1200Z)"),
+    forecast_ts: str = PathParam(
+        ..., description="Forecast run timestamp (e.g. 20260328T1200Z)"
+    ),
 ):
     """List all 3-hour periods available for a given ECMWF forecast run."""
     data = await ecmwf_service.list_periods(forecast_ts)
@@ -61,7 +73,9 @@ async def list_periods(
         )
 
     payload = data.model_dump()
-    etag = f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
+    etag = (
+        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
+    )
 
     if_none_match = request.headers.get("if-none-match")
     if if_none_match and if_none_match == etag:
@@ -81,7 +95,9 @@ async def list_periods(
 async def get_tile(
     request: Request,
     forecast_ts: str = PathParam(..., description="Forecast run timestamp"),
-    period_ts: str = PathParam(..., description="Period timestamp (e.g. 20260329T0300Z-20260329T0600Z)"),
+    period_ts: str = PathParam(
+        ..., description="Period timestamp (e.g. 20260329T0300Z-20260329T0600Z)"
+    ),
     z: int = PathParam(..., description="Zoom level"),
     x: int = PathParam(..., description="Tile X coordinate"),
     y: int = PathParam(..., description="Tile Y coordinate"),
@@ -101,8 +117,12 @@ async def get_tile(
 
     tile_data = await ecmwf_service.get_tile_data(forecast_ts, period_ts, z, x, y)
     if not tile_data:
-        logger.warning("ECMWF tile not found: %s/%s/%s/%s/%s", forecast_ts, period_ts, z, x, y)
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found")
+        logger.warning(
+            "ECMWF tile not found: %s/%s/%s/%s/%s", forecast_ts, period_ts, z, x, y
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"
+        )
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)
 
@@ -121,7 +141,9 @@ async def get_point_value(
 ):
     """Sample nearest precipitation value (mm) from the ECMWF COG at a lat/lon point."""
     try:
-        sample = await point_value_service.sample_ecmwf_point(forecast_ts, period_ts, lat, lon)
+        sample = await point_value_service.sample_ecmwf_point(
+            forecast_ts, period_ts, lat, lon
+        )
     except CogNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="cog_not_found"
