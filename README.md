@@ -56,12 +56,12 @@ The Data Service is a FastAPI microservice (Python 3.13) that serves satellite i
 The service exposes four independent data domains, each with its own
 route prefix, service, and sync mechanism:
 
-| Domain        | Route prefix                                                          | Source                                   | Sync control                                                                |
-| :------------ | :-------------------------------------------------------------------- | :--------------------------------------- | :-------------------------------------------------------------------------- |
-| **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`             | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                                          |
-| **Radar**     | `/products/radar/{radar_id}/{variable_id}/{elevation_id}/...`         | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                                          |
-| **ECMWF**     | `/ecmwf/...`                                                          | ECMWF precipitation forecast tiles       | `sync_mode` (`full` / `on_demand`)                                          |
-| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers`        | External providers (IGN, ArcGIS, Google) | `basemap_sync_mode` (independent of `sync_mode`; see below)                 |
+| Domain        | Route prefix                                                   | Source                                   | Sync control                                                |
+| :------------ | :------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------- |
+| **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                          |
+| **Radar**     | `/products/radar/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
+| **ECMWF**     | `/ecmwf/...`                                                   | ECMWF precipitation forecast tiles       | `sync_mode` (`full` / `on_demand`)                          |
+| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_sync_mode` (independent of `sync_mode`; see below) |
 
 Satellite, radar, and ECMWF share the same `sync_mode` knob. Basemap
 has its own `basemap_sync_mode` because the volume and caching
@@ -75,12 +75,12 @@ that can blow up memory if left uncapped.
 the basemap subsystem uses Redis, S3, and the external-provider relay.
 Set it in `settings.json` or via the `BASEMAP_SYNC_MODE` env var.
 
-| Mode          | Scraper runs | Scraper writes S3 | Scraper writes Redis | Reader Redis | Reader S3 | Reader relay |
-| :------------ | :----------: | :---------------: | :------------------: | :----------: | :-------: | :----------: |
-| `full` *(default)* | yes     | yes               | yes                  | yes          | yes       | yes          |
-| `on_demand`   | yes          | yes               | **no**               | yes          | yes       | yes          |
-| `no_cache`    | yes          | yes               | no                   | **no**       | yes       | yes          |
-| `relay_only`  | **no**       | —                 | —                    | no           | **no**    | yes          |
+| Mode               | Scraper runs | Scraper writes S3 | Scraper writes Redis | Reader Redis | Reader S3 | Reader relay |
+| :----------------- | :----------: | :---------------: | :------------------: | :----------: | :-------: | :----------: |
+| `full` _(default)_ |     yes      |        yes        |         yes          |     yes      |    yes    |     yes      |
+| `on_demand`        |     yes      |        yes        |        **no**        |     yes      |    yes    |     yes      |
+| `no_cache`         |     yes      |        yes        |          no          |    **no**    |    yes    |     yes      |
+| `relay_only`       |    **no**    |         —         |          —           |      no      |  **no**   |     yes      |
 
 - **`full`** — the default. Scraper pre-warms both Redis and S3; reader
   uses Redis → S3 → relay. Best read-path latency, highest Redis RAM.
@@ -324,47 +324,65 @@ All images use Python 3.13.12-alpine as the base for minimal size.
 
 Operational tuning settings live in `settings.json` at the project root. Edit this file to adjust sync behavior, caching, and retention without touching environment variables. `src/settings.py` is the authoritative source of defaults and loaders — consult it for any key not documented below.
 
+Per-domain knobs are grouped under a namespace object (`basemap`, `ecmwf`, `radar`); the loader flattens one level so the inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`sync_mode`, `tile_ttl`, `cache_control_*`, …) stay at the root because they apply across satellite/radar/ECMWF or have no domain. Example:
+
+```jsonc
+{
+  "sync_mode": "full",
+  "tile_ttl": 21600,
+  "basemap": {
+    "sync_mode": "no_cache",
+    "tile_ttl": 604800,
+    "providers": [{ "id": "argenmap", "enabled": true }],
+  },
+  "ecmwf": { "tile_ttl": 86400, "forecasts_to_keep": 2 },
+  "radar": { "tile_ttl": 2592000, "sync_interval_seconds": 30 },
+}
+```
+
+Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still load for backward compatibility; nested values win when both are present.
+
 **Shared / satellite / radar / ECMWF:**
 
-| Key                             | Description                                                                                                                                                                                                              |
-| :------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync_mode`                     | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, and ECMWF.                                                                                                                 |
-| `tile_ttl`                      | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h).                                                                                |
-| `radar_tile_ttl`                | Redis TTL in seconds for cached **radar** tiles (default: 2592000 = 30 days).                                                                                                                                            |
-| `ecmwf_tile_ttl`                | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                                                                                                |
-| `ecmwf_forecasts_to_keep`       | How many ECMWF forecast cycles to retain in the hot cache.                                                                                                                                                               |
-| `tileset_listing_ttl`           | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                                                                                                 |
-| `sync_interval_seconds`         | Seconds between satellite background sync cycles (`full` mode).                                                                                                                                                          |
-| `radar_sync_interval_seconds`   | Seconds between radar background sync cycles (`full` mode).                                                                                                                                                              |
-| `ecmwf_sync_interval_seconds`   | Seconds between ECMWF background sync cycles (`full` mode).                                                                                                                                                              |
-| `s3_max_concurrent_downloads`   | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                                                                                                |
-| `cache_control_config`          | `Cache-Control` header for configuration/listing endpoints.                                                                                                                                                              |
-| `cache_control_tile`            | `Cache-Control` header for tile endpoints.                                                                                                                                                                               |
+| Key                           | Description                                                                                                                               |
+| :---------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
+| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, and ECMWF.                                   |
+| `tile_ttl`                    | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
+| `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles (default: 2592000 = 30 days).                                                             |
+| `ecmwf_tile_ttl`              | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                 |
+| `ecmwf_forecasts_to_keep`     | How many ECMWF forecast cycles to retain in the hot cache.                                                                                |
+| `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                  |
+| `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).                                                                           |
+| `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).                                                                               |
+| `ecmwf_sync_interval_seconds` | Seconds between ECMWF background sync cycles (`full` mode).                                                                               |
+| `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                 |
+| `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                               |
+| `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                |
 
 **Basemap subsystem** (all independent of `sync_mode`):
 
-| Key                                       | Description                                                                                                                                                                                                      |
-| :---------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `basemap_sync_mode`                       | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); default: `"full"`).                                                                                    |
-| `basemap_providers`                       | List of `{ "id": ..., "enabled": ... }` selecting which external providers are served. URLs live in `.env` (`BASEMAP_*_URL`).                                                                                    |
-| `basemap_tile_ttl`                        | Redis TTL for cached basemap tiles (default: 604800 = 7 days).                                                                                                                                                   |
-| `basemap_scrape_interval_seconds`         | Seconds between full-sweep scrape cycles (default: 604800 = weekly). Must be strictly less than `basemap_s3_object_ttl_days` so S3 objects are refreshed before the lifecycle expires them.                      |
-| `basemap_scrape_concurrent`               | HTTP concurrency budget for the scraper (default: 20).                                                                                                                                                           |
-| `basemap_scrape_delay_ms`                 | Per-request delay in the scraper to be a polite scraping citizen (default: 30 ms).                                                                                                                               |
-| `basemap_cache_max_zoom`                  | Maximum zoom level the scraper backs up (default: 11). Deeper zooms are relay-only even in `full` mode.                                                                                                          |
-| `basemap_cache_concurrent`                | Semaphore limit for reader-side background cache writes (default: 10).                                                                                                                                           |
-| `basemap_bbox_lat_min/max`, `basemap_bbox_lon_min/max` | Bounding box the scraper walks (default: Argentina + surrounding region).                                                                                                                           |
-| `basemap_http_timeout_seconds` / `basemap_http_max_retries` | Scraper-side HTTP client tuning.                                                                                                                                                                |
-| `basemap_reader_http_concurrent` / `basemap_reader_http_timeout_seconds` / `basemap_reader_http_max_retries` | Reader-side HTTP pool (kept isolated from the scraper's pool so user reads don't queue behind retries).                                              |
-| `basemap_request_deadline_seconds`        | Hard wall-clock deadline per reader request, bounding single-flight waiters and the relay fallback (default: 4.0).                                                                                               |
-| `basemap_s3_object_ttl_days`              | Lifecycle policy applied at startup to the basemap S3 bucket (default: 14 days).                                                                                                                                 |
-| `basemap_online_fallback_enabled`         | When `false`, disables tier-3 provider proxy — the service serves only from Redis/S3 (fully offline reads). Always required in `relay_only`.                                                                     |
-| `basemap_provider_presence_ttl`           | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                              |
-| `basemap_negative_cache_enabled` / `basemap_negative_cache_ttl` | Redis tombstones suppressing repeat probes for known-missing tiles. Force-off in `no_cache` / `relay_only`.                                                                                |
-| `basemap_scrape_state_db_path`            | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                              |
-| `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds` | How often the scraper flushes its watermark to SQLite.                                                                                                                              |
-| `basemap_cache_control_tile_miss`         | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                            |
-| `basemap_cache_control_tile`              | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=604800, immutable` = 1 week — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
+| Key                                                                                                          | Description                                                                                                                                                                                                                                                                     |
+| :----------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `basemap_sync_mode`                                                                                          | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); default: `"full"`).                                                                                                                                                  |
+| `basemap_providers`                                                                                          | List of `{ "id": ..., "enabled": ... }` selecting which external providers are served. URLs live in `.env` (`BASEMAP_*_URL`).                                                                                                                                                   |
+| `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (default: 604800 = 7 days).                                                                                                                                                                                                                  |
+| `basemap_scrape_interval_seconds`                                                                            | Seconds between full-sweep scrape cycles (default: 604800 = weekly). Must be strictly less than `basemap_s3_object_ttl_days` so S3 objects are refreshed before the lifecycle expires them.                                                                                     |
+| `basemap_scrape_concurrent`                                                                                  | HTTP concurrency budget for the scraper (default: 20).                                                                                                                                                                                                                          |
+| `basemap_scrape_delay_ms`                                                                                    | Per-request delay in the scraper to be a polite scraping citizen (default: 30 ms).                                                                                                                                                                                              |
+| `basemap_cache_max_zoom`                                                                                     | Maximum zoom level the scraper backs up (default: 11). Deeper zooms are relay-only even in `full` mode.                                                                                                                                                                         |
+| `basemap_cache_concurrent`                                                                                   | Semaphore limit for reader-side background cache writes (default: 10).                                                                                                                                                                                                          |
+| `basemap_bbox_lat_min/max`, `basemap_bbox_lon_min/max`                                                       | Bounding box the scraper walks (default: Argentina + surrounding region).                                                                                                                                                                                                       |
+| `basemap_http_timeout_seconds` / `basemap_http_max_retries`                                                  | Scraper-side HTTP client tuning.                                                                                                                                                                                                                                                |
+| `basemap_reader_http_concurrent` / `basemap_reader_http_timeout_seconds` / `basemap_reader_http_max_retries` | Reader-side HTTP pool (kept isolated from the scraper's pool so user reads don't queue behind retries).                                                                                                                                                                         |
+| `basemap_request_deadline_seconds`                                                                           | Hard wall-clock deadline per reader request, bounding single-flight waiters and the relay fallback (default: 4.0).                                                                                                                                                              |
+| `basemap_s3_object_ttl_days`                                                                                 | Lifecycle policy applied at startup to the basemap S3 bucket (default: 14 days).                                                                                                                                                                                                |
+| `basemap_online_fallback_enabled`                                                                            | When `false`, disables tier-3 provider proxy — the service serves only from Redis/S3 (fully offline reads). Always required in `relay_only`.                                                                                                                                    |
+| `basemap_provider_presence_ttl`                                                                              | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                                                                                             |
+| `basemap_negative_cache_enabled` / `basemap_negative_cache_ttl`                                              | Redis tombstones suppressing repeat probes for known-missing tiles. Force-off in `no_cache` / `relay_only`.                                                                                                                                                                     |
+| `basemap_scrape_state_db_path`                                                                               | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                                                                                             |
+| `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds`                                      | How often the scraper flushes its watermark to SQLite.                                                                                                                                                                                                                          |
+| `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                                                                                           |
+| `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=604800, immutable` = 1 week — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
 
 Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
 
@@ -382,23 +400,23 @@ About cache-control headers:
 
 Environment variables configure secrets, infrastructure, and runtime params. Set them in `.env` (see `.env.example`). Any `settings.json` key has a matching uppercase env var that takes precedence.
 
-| Variable                      | Description                                                                   | Default                    |
-| :---------------------------- | :---------------------------------------------------------------------------- | :------------------------- |
-| `LOG_LEVEL`                   | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                              | `INFO`                     |
-| `APP_ENV`                     | Application environment (development, production).                            | `production`               |
-| `APP_HOST_PORT`               | Host port for the API service.                                                | `6006`                     |
-| `S3_TILES_DATA_ENDPOINT`      | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
-| `S3_TILES_DATA_ACCESS_KEY`    | S3/SeaweedFS access key.                                                      | Required for sync          |
-| `S3_TILES_DATA_SECRET_KEY`    | S3/SeaweedFS secret key.                                                      | Required for sync          |
-| `S3_TILES_DATA_BUCKET_NAME`   | S3 bucket name for satellite / radar / ECMWF tiles.                           | `tiles-data`               |
-| `S3_TILES_DATA_SECURE`        | Use HTTPS for S3 connection (`true`/`false`).                                 | `false`                    |
-| `S3_BASEMAP_BUCKET_NAME`      | S3 bucket name for the basemap cold backup.                                   | `basemap-tiles`            |
-| `REDIS_URL`                   | Redis connection URL.                                                         | `redis://localhost:6379/0` |
-| `WEB_CONCURRENCY`             | Number of Uvicorn workers.                                                    | `1`                        |
-| `SYNC_MODE`                   | `full` / `on_demand` — applies to satellite, radar, ECMWF.                    | `full`                     |
-| `BASEMAP_SYNC_MODE`           | `full` / `on_demand` / `no_cache` / `relay_only`.                             | `full`                     |
-| `BASEMAP_ONLINE_FALLBACK_ENABLED` | When `false`, disables tier-3 provider relay.                             | `true`                     |
-| `BASEMAP_{PROVIDER}_URL`      | Per-provider URL template (one per enabled provider in `basemap_providers`).  | See `.env.example`         |
+| Variable                          | Description                                                                   | Default                    |
+| :-------------------------------- | :---------------------------------------------------------------------------- | :------------------------- |
+| `LOG_LEVEL`                       | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                              | `INFO`                     |
+| `APP_ENV`                         | Application environment (development, production).                            | `production`               |
+| `APP_HOST_PORT`                   | Host port for the API service.                                                | `6006`                     |
+| `S3_TILES_DATA_ENDPOINT`          | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local. | Required for sync          |
+| `S3_TILES_DATA_ACCESS_KEY`        | S3/SeaweedFS access key.                                                      | Required for sync          |
+| `S3_TILES_DATA_SECRET_KEY`        | S3/SeaweedFS secret key.                                                      | Required for sync          |
+| `S3_TILES_DATA_BUCKET_NAME`       | S3 bucket name for satellite / radar / ECMWF tiles.                           | `tiles-data`               |
+| `S3_TILES_DATA_SECURE`            | Use HTTPS for S3 connection (`true`/`false`).                                 | `false`                    |
+| `S3_BASEMAP_BUCKET_NAME`          | S3 bucket name for the basemap cold backup.                                   | `basemap-tiles`            |
+| `REDIS_URL`                       | Redis connection URL.                                                         | `redis://localhost:6379/0` |
+| `WEB_CONCURRENCY`                 | Number of Uvicorn workers.                                                    | `1`                        |
+| `SYNC_MODE`                       | `full` / `on_demand` — applies to satellite, radar, ECMWF.                    | `full`                     |
+| `BASEMAP_SYNC_MODE`               | `full` / `on_demand` / `no_cache` / `relay_only`.                             | `full`                     |
+| `BASEMAP_ONLINE_FALLBACK_ENABLED` | When `false`, disables tier-3 provider relay.                                 | `true`                     |
+| `BASEMAP_{PROVIDER}_URL`          | Per-provider URL template (one per enabled provider in `basemap_providers`).  | See `.env.example`         |
 
 Basemap tuning (scrape cadence, HTTP client budgets, bounding box,
 negative-cache TTL, etc.) is also settable via env; see `settings.py`

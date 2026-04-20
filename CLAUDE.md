@@ -102,7 +102,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 | `WEB_CONCURRENCY` | Uvicorn worker count |
 | `APP_ENV` | `development` = human logs; `production` = NewRelic formatter |
 
-**Runtime tuning** — `settings.json` is merged with env vars (env wins). `src/settings.py` is the source of truth for defaults. Every key has a matching `UPPERCASE` env override. Groups:
+**Runtime tuning** — `settings.json` is merged with env vars (env wins). `src/settings.py` is the source of truth for defaults. Every key has a matching `UPPERCASE` env override. Per-domain JSON keys are grouped under a namespace object (`basemap`, `ecmwf`, `radar`); the loader flattens one level back to `<namespace>_<key>` so Python attrs and env vars stay flat (`basemap.tile_ttl` → `settings.basemap_tile_ttl` / `BASEMAP_TILE_TTL`). Groups:
 
 - Shared: `sync_mode`, `tile_ttl`, `radar_tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
 - Sync cadence: `sync_interval_seconds`, `radar_sync_interval_seconds`, `ecmwf_sync_interval_seconds`.

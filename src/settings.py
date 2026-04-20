@@ -116,6 +116,7 @@ class Settings:
     basemap_sync_mode: str = "full"
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
+    _JSON_NAMESPACES = ("basemap", "ecmwf", "radar")
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -131,6 +132,15 @@ class Settings:
 
         with open(settings_json_path, encoding="utf-8") as f:
             data = json.load(f)
+
+        # Flatten one level of per-domain nesting so the rest of the loader
+        # (and every `settings.basemap_*` call site) keeps working unchanged.
+        # Nested values win over flat ones when both are present.
+        for namespace in self._JSON_NAMESPACES:
+            section = data.pop(namespace, None)
+            if isinstance(section, dict):
+                for inner_key, inner_value in section.items():
+                    data[f"{namespace}_{inner_key}"] = inner_value
 
         json_keys = {
             "sync_mode",
