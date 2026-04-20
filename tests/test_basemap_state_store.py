@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 import pytest_asyncio
 
-from clients.basemap_state_store import BasemapStateStore, Cursor
+from clients.basemap_state_store import BasemapStateStore, Cursor, ProviderHealth
 
 
 @pytest_asyncio.fixture
@@ -204,3 +204,55 @@ async def test_wal_mode_enabled(tmp_path):
         assert mode.lower() == "wal"
     finally:
         await s.close()
+
+
+# --------------------------------------------------------------------------- #
+# Provider health table
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_get_health_missing_returns_none(store):
+    """No row yet → closed circuit (None)."""
+    assert await store.get_health("novel") is None
+
+
+@pytest.mark.asyncio
+async def test_open_circuit_upserts_row(store):
+    """open_circuit persists the circuit-breaker state."""
+    await store.open_circuit(
+        "p", consecutive_trips=2, cooldown_until=123456, reason="boom"
+    )
+    health = await store.get_health("p")
+    assert isinstance(health, ProviderHealth)
+    assert health.consecutive_trips == 2
+    assert health.cooldown_until == 123456
+    assert health.last_reason == "boom"
+    assert health.last_tripped_at > 0
+
+
+@pytest.mark.asyncio
+async def test_open_circuit_is_idempotent_and_updates(store):
+    """A second open_circuit call replaces the prior row rather than duplicating."""
+    await store.open_circuit("p", 1, 100, "first")
+    await store.open_circuit("p", 3, 900, "second")
+    health = await store.get_health("p")
+    assert health is not None
+    assert health.consecutive_trips == 3
+    assert health.cooldown_until == 900
+    assert health.last_reason == "second"
+
+
+@pytest.mark.asyncio
+async def test_close_circuit_deletes_row(store):
+    """close_circuit removes the health row entirely."""
+    await store.open_circuit("p", 1, 100, "reason")
+    await store.close_circuit("p")
+    assert await store.get_health("p") is None
+
+
+@pytest.mark.asyncio
+async def test_close_circuit_on_missing_is_a_noop(store):
+    """Closing a never-opened circuit is safe."""
+    await store.close_circuit("never-tripped")
+    assert await store.get_health("never-tripped") is None

@@ -2,9 +2,10 @@
 
 import asyncio
 
+import httpx
 import pytest
 
-from clients.http_tile_client import HttpTileClient
+from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
 
 
 class _FakeResponse:
@@ -108,3 +109,86 @@ async def test_disabled_per_host_limit_does_not_bottleneck():
 
     gate.set()
     await asyncio.gather(*tasks)
+
+
+# --------------------------------------------------------------------------- #
+# Failure mode semantics: MISSING (None) vs UNAVAILABLE (exception)
+# --------------------------------------------------------------------------- #
+
+
+class _ScriptedHttpxClient:
+    """Minimal httpx stand-in that returns / raises per scripted response."""
+
+    def __init__(self, response_factory):
+        self._response_factory = response_factory
+
+    async def get(self, url: str):
+        return self._response_factory(url)
+
+    async def aclose(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_404_returns_none_as_missing():
+    """A 404 is a permanent MISS — returns None without raising."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=5, max_retries=1
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(status_code=404)
+    )
+    assert await client.download_tile("https://host.test/1/2/3.png") is None
+
+
+@pytest.mark.asyncio
+async def test_403_returns_none_as_missing():
+    """403 is treated the same as 404 (permanent MISS)."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=5, max_retries=1
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(status_code=403)
+    )
+    assert await client.download_tile("https://host.test/1/2/3.png") is None
+
+
+@pytest.mark.asyncio
+async def test_exhausted_5xx_raises_provider_unavailable():
+    """Retry budget exhausted against 500s → UNAVAILABLE (not None)."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=1, max_retries=2
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(status_code=503)
+    )
+    with pytest.raises(ProviderUnavailableError) as excinfo:
+        await client.download_tile("https://host.test/1/2/3.png")
+    assert "host.test" in excinfo.value.url
+
+
+@pytest.mark.asyncio
+async def test_network_error_raises_provider_unavailable():
+    """httpx.ConnectError path surfaces as UNAVAILABLE."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=1, max_retries=1
+    )
+
+    def _boom(_url: str):
+        raise httpx.ConnectError("nope", request=httpx.Request("GET", _url))
+
+    client._client = _ScriptedHttpxClient(_boom)  # type: ignore[assignment]
+    with pytest.raises(ProviderUnavailableError):
+        await client.download_tile("https://host.test/1/2/3.png")
+
+
+@pytest.mark.asyncio
+async def test_success_still_returns_bytes():
+    """Happy path unchanged: 200 → raw bytes."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=5, max_retries=1
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(status_code=200, content=b"bytes")
+    )
+    assert await client.download_tile("https://host.test/1/2/3.png") == b"bytes"

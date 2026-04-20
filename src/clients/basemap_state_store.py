@@ -19,6 +19,23 @@ class Cursor:
     tile_index: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderHealth:
+    """
+    Circuit-breaker state for a single provider.
+
+    When `cooldown_until` is in the future, the scraper skips the provider
+    for this cycle; the number of `consecutive_trips` drives exponential
+    backoff in :meth:`BasemapScraperService._compute_cooldown`. A clean
+    sweep completion deletes the row (state = closed).
+    """
+
+    consecutive_trips: int
+    cooldown_until: int
+    last_tripped_at: int
+    last_reason: str
+
+
 _SCHEMA_SQL = (
     """
     CREATE TABLE IF NOT EXISTS basemap_scrape_cursor (
@@ -45,6 +62,16 @@ _SCHEMA_SQL = (
     CREATE TABLE IF NOT EXISTS basemap_scrape_last_completed (
         provider_id  TEXT PRIMARY KEY,
         completed_at INTEGER NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS basemap_provider_health (
+        provider_id       TEXT PRIMARY KEY,
+        consecutive_trips INTEGER NOT NULL,
+        cooldown_until    INTEGER NOT NULL,
+        last_tripped_at   INTEGER NOT NULL,
+        last_reason       TEXT    NOT NULL,
+        updated_at        INTEGER NOT NULL
     );
     """,
 )
@@ -254,4 +281,83 @@ class BasemapStateStore:
                 completed_at = excluded.completed_at
             """,
             (provider_id, timestamp),
+        )
+
+    async def get_health(self, provider_id: str) -> Optional[ProviderHealth]:
+        """Return the circuit-breaker state for a provider, or None if closed."""
+        return await asyncio.to_thread(self._get_health_sync, provider_id)
+
+    def _get_health_sync(self, provider_id: str) -> Optional[ProviderHealth]:
+        row = (
+            self._require_conn()
+            .execute(
+                """
+                SELECT consecutive_trips, cooldown_until, last_tripped_at, last_reason
+                FROM basemap_provider_health
+                WHERE provider_id = ?
+                """,
+                (provider_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return ProviderHealth(
+            consecutive_trips=int(row[0]),
+            cooldown_until=int(row[1]),
+            last_tripped_at=int(row[2]),
+            last_reason=str(row[3]),
+        )
+
+    async def open_circuit(
+        self,
+        provider_id: str,
+        consecutive_trips: int,
+        cooldown_until: int,
+        reason: str,
+    ) -> None:
+        """Upsert the health row marking the provider's circuit open."""
+        async with self._write_lock:
+            await asyncio.to_thread(
+                self._open_circuit_sync,
+                provider_id,
+                consecutive_trips,
+                cooldown_until,
+                reason,
+            )
+
+    def _open_circuit_sync(
+        self,
+        provider_id: str,
+        consecutive_trips: int,
+        cooldown_until: int,
+        reason: str,
+    ) -> None:
+        now = int(time.time())
+        self._require_conn().execute(
+            """
+            INSERT INTO basemap_provider_health (
+                provider_id, consecutive_trips, cooldown_until,
+                last_tripped_at, last_reason, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id) DO UPDATE SET
+                consecutive_trips = excluded.consecutive_trips,
+                cooldown_until    = excluded.cooldown_until,
+                last_tripped_at   = excluded.last_tripped_at,
+                last_reason       = excluded.last_reason,
+                updated_at        = excluded.updated_at
+            """,
+            (provider_id, consecutive_trips, cooldown_until, now, reason, now),
+        )
+
+    async def close_circuit(self, provider_id: str) -> None:
+        """Clear the health row: provider is healthy again."""
+        async with self._write_lock:
+            await asyncio.to_thread(self._close_circuit_sync, provider_id)
+
+    def _close_circuit_sync(self, provider_id: str) -> None:
+        self._require_conn().execute(
+            "DELETE FROM basemap_provider_health WHERE provider_id = ?",
+            (provider_id,),
         )

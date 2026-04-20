@@ -109,7 +109,7 @@ def test_real_settings_json_round_trip():
     repo_path = Path(__file__).resolve().parent.parent / "settings.json"
     s = Settings.__new__(Settings)
     s._load_from_json(repo_path)  # pylint: disable=protected-access
-    assert s.basemap_tile_ttl == 604800
+    assert s.basemap_tile_ttl == 2592000
     assert s.basemap_sync_mode == "no_cache"
     assert s.ecmwf_tile_ttl == 86400
     assert s.radar_tile_ttl == 2592000
@@ -168,6 +168,81 @@ def test_per_host_concurrent_exceeding_global_rejected(tmp_path):
                     "scrape_parallelism_mode": "sequential",
                     "scrape_concurrent": 4,
                     "scrape_per_host_concurrent": 8,
+                }
+            },
+        )
+
+
+def test_provider_cooldown_schedule_round_trips(tmp_path):
+    s = _built_settings(
+        tmp_path,
+        {
+            "basemap": {
+                "sync_mode": "full",
+                "provider_unhealthy_threshold": 7,
+                "provider_cooldown_schedule": [60, 120, 300],
+            }
+        },
+    )
+    assert s.basemap_provider_unhealthy_threshold == 7
+    assert s.basemap_provider_cooldown_schedule == [60, 120, 300]
+
+
+def test_provider_unhealthy_threshold_must_be_positive(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="basemap_provider_unhealthy_threshold"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "provider_unhealthy_threshold": 0,
+                }
+            },
+        )
+
+
+def test_provider_cooldown_schedule_rejects_empty(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="non-empty"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "provider_cooldown_schedule": [],
+                }
+            },
+        )
+
+
+def test_provider_cooldown_schedule_rejects_non_positive(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="must all be"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "provider_cooldown_schedule": [60, 0, 300],
+                }
+            },
+        )
+
+
+def test_provider_cooldown_schedule_rejects_non_monotonic(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="monotonically"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "provider_cooldown_schedule": [600, 300, 900],
                 }
             },
         )

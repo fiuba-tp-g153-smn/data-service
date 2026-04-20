@@ -24,6 +24,25 @@ class _RetryableHttpStatus(Exception):
     """Raised for HTTP status codes worth retrying (5xx / 429)."""
 
 
+class ProviderUnavailableError(Exception):
+    """
+    Raised when a tile URL cannot be served because the upstream provider
+    appears to be down or unreachable (DNS/connection failures, timeouts,
+    or exhausted retries against 5xx/429). Distinct from a permanent miss
+    (404/403), which still returns `None`.
+
+    Callers that care about provider health (the scraper's circuit breaker,
+    primarily) catch this to drive their own cool-down logic. Callers that
+    only care about "did I get bytes back" (the reader) catch it and
+    degrade to a normal miss.
+    """
+
+    def __init__(self, url: str, cause: str):
+        super().__init__(f"{url}: {cause}")
+        self.url = url
+        self.cause = cause
+
+
 class HttpTileClient:
     """
     Async HTTP client for fetching tiles from external providers.
@@ -32,6 +51,12 @@ class HttpTileClient:
     delay, and retries transient failures (network errors, timeouts, 429s,
     5xx) using tenacity with exponential backoff + jitter. 404/403 are
     treated as permanent misses and not retried.
+
+    Failure semantics:
+      * 404 / 403 / other non-retryable non-200 → returns ``None`` (MISSING).
+      * Exhausted retries, network errors, timeouts → raises
+        :class:`ProviderUnavailableError` (UNAVAILABLE). Callers that don't
+        care about the distinction (e.g. reader) should catch and degrade.
     """
 
     def __init__(
@@ -96,8 +121,10 @@ class HttpTileClient:
         """
         Download a tile from a URL with rate limiting and retry.
 
-        Returns raw bytes on success, None on permanent failure (404/403,
-        exhausted retries, or budget exceeded).
+        Returns raw bytes on success, ``None`` for a permanent miss
+        (404/403 or other non-retryable non-200). Raises
+        :class:`ProviderUnavailableError` when the upstream looks
+        unreachable (exhausted retries, network errors, timeouts).
         """
         if not self._client:
             raise RuntimeError("HTTP tile client not connected")
@@ -122,12 +149,12 @@ class HttpTileClient:
                 ):
                     with attempt:
                         return await self._fetch_once(url)
-            except _RetryableHttpStatus:
-                logger.error("Gave up on retryable status for %s", url)
-                return None
+            except _RetryableHttpStatus as exc:
+                logger.error("Gave up on retryable status for %s: %s", url, exc)
+                raise ProviderUnavailableError(url, str(exc)) from exc
             except (httpx.HTTPError, asyncio.TimeoutError, RetryError) as exc:
                 logger.error("Failed to download tile %s: %s", url, exc)
-                return None
+                raise ProviderUnavailableError(url, str(exc)) from exc
 
         return None
 

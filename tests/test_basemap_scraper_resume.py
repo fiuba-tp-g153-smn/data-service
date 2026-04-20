@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 
 from clients.basemap_state_store import BasemapStateStore, Cursor
+from clients.http_tile_client import ProviderUnavailableError
 from services.basemap_config import BasemapProvider, BoundingBox, count_tiles
 from services.basemap_scraper_service import BasemapScraperService
 
@@ -39,22 +40,41 @@ def _make_settings(**overrides) -> SimpleNamespace:
         "basemap_scrape_lock_path": "/tmp/test_basemap_scrape.lock",
         "basemap_scrape_checkpoint_every": 1,
         "basemap_scrape_checkpoint_seconds": 0.001,
+        # Circuit breaker: threshold tuned low so tests can provoke trips
+        # cheaply; schedule keeps first cooldown short enough to exercise.
+        "basemap_provider_unhealthy_threshold": 5,
+        "basemap_provider_cooldown_schedule": [300, 900, 3600, 10800, 21600],
     }
     base.update(overrides)
     return SimpleNamespace(**base)
 
 
 class FakeHttp:
-    """Stand-in for `HttpTileClient.download_tile` with scripted outcomes."""
+    """Stand-in for `HttpTileClient.download_tile` with scripted outcomes.
 
-    def __init__(self, fail_tiles: Iterable[Tuple[int, int, int]] = ()):
+    Three per-tile dispositions:
+      * default → returns bytes (OK)
+      * listed in ``fail_tiles``     → returns ``None`` (MISSING, e.g. 404)
+      * listed in ``unavailable_tiles`` → raises ``ProviderUnavailableError``
+    """
+
+    def __init__(
+        self,
+        fail_tiles: Iterable[Tuple[int, int, int]] = (),
+        unavailable_tiles: Iterable[Tuple[int, int, int]] = (),
+        all_unavailable: bool = False,
+    ):
         self._fail_tiles: Set[Tuple[int, int, int]] = set(fail_tiles)
+        self._unavailable_tiles: Set[Tuple[int, int, int]] = set(unavailable_tiles)
+        self._all_unavailable = all_unavailable
         self.calls: list[str] = []
 
     async def download_tile(self, url: str):
         self.calls.append(url)
         parts = url.rstrip(".png").split("/")
         z, x, y = int(parts[-3]), int(parts[-2]), int(parts[-1])
+        if self._all_unavailable or (z, x, y) in self._unavailable_tiles:
+            raise ProviderUnavailableError(url, "scripted outage")
         if (z, x, y) in self._fail_tiles:
             return None
         return b"fake-bytes"
@@ -588,3 +608,223 @@ async def test_run_sync_end_to_end_across_modes(store, mode):
         assert await store.get_cursor(pid) is None
         assert await store.list_failed(pid, 5) == []
         assert await store.get_last_completed(pid) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Circuit breaker (provider health)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_circuit_opens_after_threshold_unavailables(store):
+    """5 consecutive UNAVAILABLE fetches trip the provider; state persisted."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp(all_unavailable=True)
+    scraper = _make_scraper(
+        store,
+        http,
+        provider,
+        bbox,
+        basemap_provider_unhealthy_threshold=3,
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    health = await store.get_health(provider.provider_id)
+    assert health is not None
+    assert health.consecutive_trips == 1
+    assert health.cooldown_until > int(time.time())
+    assert "unavailable" in health.last_reason.lower()
+
+    # Cursor preserved so the next (post-cooldown) cycle resumes.
+    assert await store.get_cursor(provider.provider_id) is not None
+    # last_completed NOT stamped — the sweep didn't actually finish.
+    assert await store.get_last_completed(provider.provider_id) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_in_cooldown_is_skipped(store):
+    """Active cooldown → zero HTTP calls for that provider this cycle."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    future = int(time.time()) + 3600
+    await store.open_circuit(
+        provider.provider_id,
+        consecutive_trips=2,
+        cooldown_until=future,
+        reason="seeded",
+    )
+
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    assert http.calls == []
+    # Health row untouched.
+    health = await store.get_health(provider.provider_id)
+    assert health is not None
+    assert health.cooldown_until == future
+
+
+@pytest.mark.asyncio
+async def test_expired_cooldown_allows_retry_and_clean_finish(store):
+    """Once cooldown elapses and the sweep finishes cleanly, the circuit closes."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    # Seed an expired cooldown.
+    await store.open_circuit(
+        provider.provider_id,
+        consecutive_trips=1,
+        cooldown_until=int(time.time()) - 1,
+        reason="seeded-expired",
+    )
+
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # Sweep actually ran, and on clean finish the health row is cleared.
+    assert len(http.calls) > 0
+    assert await store.get_health(provider.provider_id) is None
+    assert await store.get_last_completed(provider.provider_id) is not None
+
+
+def test_consecutive_counter_resets_on_success(store):
+    """Direct unit test of the counter mechanics: OK resets, MISSING is neutral."""
+    # pylint: disable=protected-access
+    from services.basemap_scraper_service import (  # local import to avoid clutter
+        _ProviderSweepState,
+        _TileOutcome,
+    )
+
+    provider = _make_provider()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store,
+        http,
+        provider,
+        _make_bbox(),
+        basemap_provider_unhealthy_threshold=3,
+    )
+    state = _ProviderSweepState()
+
+    # 2 UNAVAILABLE — counter at 2, no trip.
+    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 0, 0)
+    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 0, 1)
+    assert state.consecutive_unavailable == 2
+    assert not state.tripped
+
+    # OK resets to 0.
+    scraper._update_sweep_state(state, _TileOutcome.OK, 5, 0, 2)
+    assert state.consecutive_unavailable == 0
+
+    # 2 more UNAVAILABLE — again at 2, still no trip.
+    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 0)
+    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 1)
+    assert not state.tripped
+
+    # MISSING is neutral — does not reset counter but also doesn't increment.
+    scraper._update_sweep_state(state, _TileOutcome.MISSING, 5, 1, 2)
+    assert state.consecutive_unavailable == 2
+
+    # One more UNAVAILABLE crosses the threshold.
+    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 3)
+    assert state.tripped
+    assert "consecutive unavailable" in state.last_reason
+
+
+@pytest.mark.asyncio
+async def test_missing_tiles_do_not_trip_circuit(store):
+    """404-style misses (return None) never count as unhealthy — only exceptions do."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    from services.basemap_config import iter_tiles
+
+    coords = list(iter_tiles(5, bbox))
+    # Make the first ten tiles miss as 404s (MISSING, not UNAVAILABLE).
+    http = FakeHttp(fail_tiles=coords[:10])
+    scraper = _make_scraper(
+        store,
+        http,
+        provider,
+        bbox,
+        basemap_provider_unhealthy_threshold=3,
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # No trip despite many misses — sweep completed cleanly.
+    assert await store.get_health(provider.provider_id) is None
+    assert await store.get_last_completed(provider.provider_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_exponential_backoff_schedule_escalates(store):
+    """A second trip uses schedule[1], not schedule[0]."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp(all_unavailable=True)
+    scraper = _make_scraper(
+        store,
+        http,
+        provider,
+        bbox,
+        basemap_provider_unhealthy_threshold=2,
+        basemap_provider_cooldown_schedule=[60, 600, 3600],
+    )
+
+    # Pretend a prior trip already happened.
+    now = int(time.time())
+    await store.open_circuit(
+        provider.provider_id,
+        consecutive_trips=1,
+        cooldown_until=now - 1,  # expired so the sweep runs now
+        reason="prior",
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    health = await store.get_health(provider.provider_id)
+    assert health is not None
+    assert health.consecutive_trips == 2
+    # Second cooldown must be at least schedule[1] = 600 seconds away.
+    assert health.cooldown_until - int(time.time()) >= 590
+
+
+@pytest.mark.asyncio
+async def test_tripped_provider_does_not_block_healthy_peers(store):
+    """In per_origin parallelism, a tripped provider doesn't hold up others."""
+    providers = {
+        "bad": _provider_with_url("bad", "https://bad-host.test/{z}/{x}/{y}.png"),
+        "good": _provider_with_url("good", "https://good-host.test/{z}/{x}/{y}.png"),
+    }
+    bbox = _make_bbox()
+
+    class _MixedHttp(FakeHttp):
+        async def download_tile(self, url: str):
+            self.calls.append(url)
+            if "bad-host" in url:
+                raise ProviderUnavailableError(url, "dead host")
+            parts = url.rstrip(".png").split("/")
+            _ = parts  # keep structure identical
+            return b"fake-bytes"
+
+    http = _MixedHttp()
+    scraper = _make_scraper(
+        store,
+        http,
+        providers["bad"],
+        bbox,
+        parallelism_mode="per_origin",
+        providers=providers,
+        basemap_provider_unhealthy_threshold=3,
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # Bad provider tripped, good provider completed cleanly.
+    assert await store.get_health("bad") is not None
+    assert await store.get_health("good") is None
+    assert await store.get_last_completed("good") is not None
+    assert await store.get_last_completed("bad") is None

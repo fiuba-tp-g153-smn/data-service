@@ -4,6 +4,8 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from dataclasses import dataclass, field
+from enum import Enum
 from logging import Logger
 from typing import List, Set, Tuple
 from urllib.parse import urlparse
@@ -11,7 +13,7 @@ from urllib.parse import urlparse
 import httpx
 
 from clients.basemap_state_store import BasemapStateStore
-from clients.http_tile_client import HttpTileClient
+from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
@@ -26,6 +28,31 @@ from settings import Settings
 _PROGRESS_PCT_STEP = 10
 _PROGRESS_TIME_INTERVAL_S = 30.0
 _PROGRESS_MIN_INTERVAL_S = 1.0
+
+
+class _TileOutcome(Enum):
+    """Result shape of a single tile fetch from the scraper's perspective."""
+
+    OK = "ok"  # downloaded + persisted successfully
+    MISSING = "missing"  # permanent miss (404/403) or non-provider write failure
+    UNAVAILABLE = "unavailable"  # provider appears down (network / exhausted retries)
+
+
+@dataclass
+class _ProviderSweepState:
+    """
+    Mutable per-provider sweep state threaded through the scrape call chain.
+
+    Tracks consecutive unavailable fetches to drive the circuit breaker, and
+    carries the final "tripped" verdict back up to ``_scrape_provider``.
+    Scoped to one provider's sweep — concurrent providers (per_origin /
+    full parallelism modes) each own their own instance, so no cross-talk.
+    """
+
+    consecutive_unavailable: int = 0
+    tripped: bool = False
+    last_reason: str = ""
+    failure_samples: List[str] = field(default_factory=list)
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -95,6 +122,13 @@ class BasemapScraperService(BaseSyncService):
         self._cache_max_zoom = settings.basemap_cache_max_zoom
         self._checkpoint_every = settings.basemap_scrape_checkpoint_every
         self._checkpoint_seconds = settings.basemap_scrape_checkpoint_seconds
+        # Circuit-breaker knobs. Threshold = N consecutive UNAVAILABLE fetches
+        # within one provider sweep before we trip the provider and move on.
+        # Cooldown schedule is indexed by consecutive trip count (capped at
+        # the last element) so a repeatedly-flapping provider backs off
+        # exponentially.
+        self._unhealthy_threshold = settings.basemap_provider_unhealthy_threshold
+        self._cooldown_schedule = list(settings.basemap_provider_cooldown_schedule)
 
     def _get_lock_path(self) -> str:
         return self._settings.basemap_scrape_lock_path
@@ -147,18 +181,40 @@ class BasemapScraperService(BaseSyncService):
             app_logger.warning("Basemap startup summary failed: %s", exc)
 
     async def _compute_next_sleep(self, default: float) -> float:
-        """Sleep only until the soonest-due provider, floored at 60s."""
+        """Sleep only until the soonest-due provider, floored at 60s.
+
+        A provider in cooldown (circuit open) doesn't count as "due" — the
+        soonest time we'd consider it ready again is its ``cooldown_until``.
+        A cursored provider that's also in cooldown waits for the cooldown;
+        a cursored healthy provider is due now.
+        """
         now = int(time.time())
         interval = self._sync_interval
         soonest = default
+        any_ready = False
         for pid in self._providers:
+            health = await self._state.get_health(pid)
+            cooldown_remaining = (
+                float(health.cooldown_until - now)
+                if health and health.cooldown_until > now
+                else 0.0
+            )
+            if cooldown_remaining > 0:
+                soonest = min(soonest, cooldown_remaining)
+                continue
             if await self._state.get_cursor(pid) is not None:
-                return 0.0
+                any_ready = True
+                continue
             last = await self._state.get_last_completed(pid)
             remaining = (
                 float(interval) if last is None else max(0.0, (last + interval) - now)
             )
+            if remaining <= 0:
+                any_ready = True
+                continue
             soonest = min(soonest, remaining)
+        if any_ready:
+            return 0.0
         return max(60.0, soonest)
 
     async def _run_sync(self) -> None:
@@ -212,6 +268,23 @@ class BasemapScraperService(BaseSyncService):
 
     async def _scrape_provider(self, provider: BasemapProvider) -> tuple[int, int]:
         """Scrape all tiles for a single provider within the bounding box."""
+        # pylint: disable=too-many-locals
+        now = int(time.time())
+
+        # Circuit-breaker gate: skip providers whose cooldown hasn't expired.
+        # Persistent across restarts — state lives in SQLite.
+        health = await self._state.get_health(provider.provider_id)
+        if health is not None and health.cooldown_until > now:
+            remaining = health.cooldown_until - now
+            logger.info(
+                "Skipping %s: circuit open (trips=%d), reopens in %s — last: %s",
+                provider.provider_id,
+                health.consecutive_trips,
+                _fmt_duration(remaining),
+                health.last_reason,
+            )
+            return 0, 0
+
         max_zoom = min(provider.cache_max_zoom, self._cache_max_zoom)
         downloaded = 0
         failed = 0
@@ -220,7 +293,7 @@ class BasemapScraperService(BaseSyncService):
         if cursor is None:
             last_completed = await self._state.get_last_completed(provider.provider_id)
             if last_completed is not None:
-                remaining = (last_completed + self._sync_interval) - int(time.time())
+                remaining = (last_completed + self._sync_interval) - now
                 if remaining > 0:
                     logger.info(
                         "Skipping %s: next scrape in %s",
@@ -249,17 +322,46 @@ class BasemapScraperService(BaseSyncService):
                 max_zoom,
             )
 
+        sweep_state = _ProviderSweepState()
         for zoom in range(zoom_start, max_zoom + 1):
             resume_index = index_start if zoom == zoom_start else 0
-            zoom_ok, zoom_failed = await self._scrape_zoom(provider, zoom, resume_index)
+            zoom_ok, zoom_failed = await self._scrape_zoom(
+                provider, zoom, resume_index, sweep_state
+            )
             downloaded += zoom_ok
             failed += zoom_failed
+            if sweep_state.tripped:
+                break
 
-        # Provider fully scraped — clear resume state and stamp completion so
-        # the next cycle respects the configured scrape interval.
+        if sweep_state.tripped:
+            # Preserve cursor + failed queue so the next cycle (after the
+            # cooldown) resumes from exactly where we left off.
+            prior_trips = health.consecutive_trips if health else 0
+            trips = prior_trips + 1
+            cooldown_seconds = self._compute_cooldown(trips)
+            cooldown_until = int(time.time()) + cooldown_seconds
+            await self._state.open_circuit(
+                provider.provider_id,
+                consecutive_trips=trips,
+                cooldown_until=cooldown_until,
+                reason=sweep_state.last_reason,
+            )
+            logger.warning(
+                "Provider %s circuit opened (trips=%d): cooldown %s — %s",
+                provider.provider_id,
+                trips,
+                _fmt_duration(cooldown_seconds),
+                sweep_state.last_reason,
+            )
+            return downloaded, failed
+
+        # Provider fully scraped — clear resume state, stamp completion, and
+        # clear any stale health row so the next cycle starts with a closed
+        # circuit.
         await self._state.clear_cursor(provider.provider_id)
         await self._state.clear_failed_for_provider(provider.provider_id)
         await self._state.set_last_completed(provider.provider_id, int(time.time()))
+        await self._state.close_circuit(provider.provider_id)
 
         logger.info(
             "Provider %s: %d downloaded, %d failed",
@@ -269,11 +371,29 @@ class BasemapScraperService(BaseSyncService):
         )
         return downloaded, failed
 
+    def _compute_cooldown(self, consecutive_trips: int) -> int:
+        """Lookup the cooldown (seconds) for the current trip count, capped."""
+        if not self._cooldown_schedule:
+            return 300  # defensive; schedule validation should prevent this
+        idx = min(consecutive_trips - 1, len(self._cooldown_schedule) - 1)
+        return int(self._cooldown_schedule[max(idx, 0)])
+
     async def _scrape_zoom(
-        self, provider: BasemapProvider, zoom: int, resume_index: int
+        self,
+        provider: BasemapProvider,
+        zoom: int,
+        resume_index: int,
+        sweep_state: _ProviderSweepState,
     ) -> tuple[int, int]:
         """Scrape one zoom level for a provider with retry + checkpointing."""
-        retry_ok, retry_failed = await self._retry_failed_tiles(provider, zoom)
+        retry_ok, retry_failed = await self._retry_failed_tiles(
+            provider, zoom, sweep_state
+        )
+
+        if sweep_state.tripped:
+            # Circuit tripped during failed-tile retry — don't start the
+            # main sweep; _scrape_provider handles cooldown bookkeeping.
+            return retry_ok, retry_failed
 
         coords = list(iter_tiles(zoom, self._bbox))
         total = len(coords)
@@ -294,7 +414,7 @@ class BasemapScraperService(BaseSyncService):
             )
 
         sweep_ok, sweep_failed = await self._run_indexed_sweep(
-            provider, zoom, coords, resume_index
+            provider, zoom, coords, resume_index, sweep_state
         )
 
         # End-of-zoom cleanup: if no failures remain, drop the zoom's failed rows.
@@ -317,9 +437,16 @@ class BasemapScraperService(BaseSyncService):
         return ok, failed
 
     async def _retry_failed_tiles(
-        self, provider: BasemapProvider, zoom: int
+        self,
+        provider: BasemapProvider,
+        zoom: int,
+        sweep_state: _ProviderSweepState,
     ) -> tuple[int, int]:
-        """Drain previously-failed tiles for this (provider, zoom). Returns (ok, failed)."""
+        """Drain previously-failed tiles for this (provider, zoom). Returns (ok, failed).
+
+        Short-circuits when the circuit-breaker trips so we stop pounding a
+        known-unhealthy provider.
+        """
         failed_tiles = await self._state.list_failed(provider.provider_id, zoom)
         if not failed_tiles:
             return 0, 0
@@ -333,12 +460,44 @@ class BasemapScraperService(BaseSyncService):
         ok = 0
         failed = 0
         for x, y in failed_tiles:
-            if await self._download_and_store(provider, zoom, x, y):
+            outcome = await self._download_and_store(provider, zoom, x, y)
+            self._update_sweep_state(sweep_state, outcome, zoom, x, y)
+            if outcome is _TileOutcome.OK:
                 await self._state.remove_failed(provider.provider_id, zoom, x, y)
                 ok += 1
             else:
                 failed += 1
+            if sweep_state.tripped:
+                break
         return ok, failed
+
+    def _update_sweep_state(
+        self,
+        sweep_state: _ProviderSweepState,
+        outcome: _TileOutcome,
+        z: int,
+        x: int,
+        y: int,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Advance the sweep-local failure counter and flip ``tripped`` at threshold."""
+        if outcome is _TileOutcome.OK:
+            sweep_state.consecutive_unavailable = 0
+            return
+        if outcome is _TileOutcome.MISSING:
+            # Legitimately-missing tiles (404/403) don't count as upstream
+            # health signals — a sparse bbox would false-positive otherwise.
+            return
+        sweep_state.consecutive_unavailable += 1
+        sample = f"z={z} x={x} y={y}"
+        if len(sweep_state.failure_samples) < 3:
+            sweep_state.failure_samples.append(sample)
+        if sweep_state.consecutive_unavailable >= self._unhealthy_threshold:
+            sweep_state.tripped = True
+            sweep_state.last_reason = (
+                f"{sweep_state.consecutive_unavailable} consecutive unavailable "
+                f"tile fetches (samples: {', '.join(sweep_state.failure_samples)})"
+            )
 
     async def _run_indexed_sweep(
         self,
@@ -346,9 +505,10 @@ class BasemapScraperService(BaseSyncService):
         zoom: int,
         coords: List[Tuple[int, int, int]],
         resume_index: int,
+        sweep_state: _ProviderSweepState,
     ) -> tuple[int, int]:
         """Fan out the main sweep with watermark-based cursor checkpointing."""
-        # pylint: disable=too-many-locals
+        # pylint: disable=too-many-locals,too-many-arguments
         total = len(coords)
         if resume_index >= total:
             # Nothing left at this zoom; advance cursor to next zoom boundary.
@@ -376,8 +536,9 @@ class BasemapScraperService(BaseSyncService):
 
         try:
             for fut in asyncio.as_completed(tasks):
-                idx, z_done, x_done, y_done, was_ok = await fut
-                if was_ok:
+                idx, z_done, x_done, y_done, outcome = await fut
+                self._update_sweep_state(sweep_state, outcome, z_done, x_done, y_done)
+                if outcome is _TileOutcome.OK:
                     ok += 1
                 else:
                     failed += 1
@@ -419,7 +580,20 @@ class BasemapScraperService(BaseSyncService):
                         next_pct += _PROGRESS_PCT_STEP
                     next_time = now + _PROGRESS_TIME_INTERVAL_S
                     last_log = now
+
+                if sweep_state.tripped:
+                    # Stop consuming completions the moment we trip; the
+                    # finally block cancels everything still in-flight so
+                    # we stop hitting the unhealthy upstream immediately.
+                    break
         finally:
+            # Cancel any still-running tile tasks so a tripped breaker
+            # actually stops traffic instead of letting the fan-out drain.
+            pending = [t for t in tasks if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
             # Cancellation-safe: checkpoint the current watermark before
             # propagating CancelledError. Also advances cursor to next zoom
             # on a clean finish (watermark == total).
@@ -508,22 +682,39 @@ class BasemapScraperService(BaseSyncService):
 
     async def _download_indexed(
         self, provider: BasemapProvider, idx: int, z: int, x: int, y: int
-    ) -> Tuple[int, int, int, int, bool]:
+    ) -> Tuple[int, int, int, int, _TileOutcome]:
         # pylint: disable=too-many-arguments
         """Wrap `_download_and_store` so completions carry their absolute index."""
-        ok = await self._download_and_store(provider, z, x, y)
-        return idx, z, x, y, ok
+        outcome = await self._download_and_store(provider, z, x, y)
+        return idx, z, x, y, outcome
 
     async def _download_and_store(
         self, provider: BasemapProvider, z: int, x: int, y: int
-    ) -> bool:
-        """Download a single tile from the external provider and store in S3 + Redis."""
-        try:
-            url = build_source_url(provider, z, x, y)
-            data = await self._http.download_tile(url)
-            if not data:
-                return False
+    ) -> _TileOutcome:
+        """Download a single tile from the external provider and store in S3 + Redis.
 
+        Returns the fetch outcome so the caller can drive the circuit breaker.
+        Storage-side failures (S3 / Redis hiccups) count as ``MISSING`` — they
+        are not an upstream health signal.
+        """
+        url = build_source_url(provider, z, x, y)
+        try:
+            data = await self._http.download_tile(url)
+        except ProviderUnavailableError as exc:
+            logger.warning(
+                "Provider unavailable for tile %s/%d/%d/%d: %s",
+                provider.provider_id,
+                z,
+                x,
+                y,
+                exc.cause,
+            )
+            return _TileOutcome.UNAVAILABLE
+
+        if not data:
+            return _TileOutcome.MISSING
+
+        try:
             s3_key = S3Client.build_basemap_tile_key(provider.provider_id, z, x, y)
             await self._s3.upload_tile(s3_key, data)
 
@@ -532,14 +723,14 @@ class BasemapScraperService(BaseSyncService):
                     provider.provider_id, z, x, y, data, ttl=self._tile_ttl
                 )
                 await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
-            return True
+            return _TileOutcome.OK
         except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
             logger.warning(
-                "Failed to scrape tile %s/%d/%d/%d: %s",
+                "Failed to persist tile %s/%d/%d/%d: %s",
                 provider.provider_id,
                 z,
                 x,
                 y,
                 exc,
             )
-            return False
+            return _TileOutcome.MISSING

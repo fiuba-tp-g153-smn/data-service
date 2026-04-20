@@ -115,6 +115,49 @@ in `full` mode with 4 providers sharing one host, that host will see
 at most `per_host_concurrent` concurrent requests from us. The
 per-host budget must be ≤ the global budget (enforced at startup).
 
+#### Provider health and cooldown
+
+External basemap providers (notably Argenmap / `wms.ign.gob.ar`) have
+uneven reliability — they can go fully dark for minutes or hours at a
+time. The scraper detects this per provider and backs off instead of
+hammering a dead upstream:
+
+- The scraper's `HttpTileClient` classifies every failed fetch as
+  either **MISSING** (404/403 — that specific tile doesn't exist) or
+  **UNAVAILABLE** (DNS/connection/timeout, or 5xx/429 with the retry
+  budget exhausted — the provider itself appears down). Only
+  UNAVAILABLE contributes to the health signal, so a sparse bbox with
+  legitimate 404s never false-positives.
+- When a provider returns `basemap_provider_unhealthy_threshold`
+  consecutive UNAVAILABLE tiles within one sweep (default **5**), the
+  scraper **trips the circuit**: in-flight tile tasks for that
+  provider are cancelled, the resume cursor is preserved so the next
+  attempt picks up exactly where we left off, and the provider's
+  `last_completed` stamp is left untouched.
+- The cooldown is chosen from `basemap_provider_cooldown_schedule`,
+  indexed by the consecutive-trip count and capped at the last entry.
+  Default: `[5 min, 15 min, 1 h, 3 h, 6 h]`. A provider that stays
+  flaky for a long time settles at 6-hour probes, so operators can
+  notice it came back without anyone manually intervening.
+- **State persists across restarts.** Circuit state lives in the same
+  SQLite cold store as the resume cursor (`basemap_provider_health`
+  table). A pod restart mid-cooldown doesn't reset the backoff.
+- **One clean sweep closes the circuit.** When a provider completes a
+  full sweep without re-tripping, its health row is deleted and the
+  consecutive-trip counter resets to zero. The next outage starts
+  over at `cooldown_schedule[0]`.
+
+The scrape loop's sleep also respects cooldowns: it wakes precisely
+when the soonest-due provider is next eligible (either its scrape
+interval elapses or its cooldown ends).
+
+Reader-side: the `/basemap/.../*.png` endpoint does not participate
+in the circuit directly. Its short relay timeout
+(`basemap_reader_http_timeout_seconds=3`) plus the Redis negative-
+cache tombstone (`basemap_negative_cache_ttl=300`) already bound the
+per-request cost of a dead provider. A `ProviderUnavailableError`
+from the relay is caught and degraded to a normal miss + tombstone.
+
 #### Switching modes at runtime: Redis rehydration caveat
 
 There is **no dedicated service that rehydrates Redis from the S3 cold
@@ -220,8 +263,11 @@ basemap-tiles/                           # S3_BASEMAP_BUCKET_NAME
 ```
 
 The basemap bucket has a lifecycle policy automatically applied at
-startup (`basemap_s3_object_ttl_days`, default 14 days) so objects are
-refreshed by the next weekly sweep before expiring.
+startup (`basemap_s3_object_ttl_days`, default 35 days) so objects are
+refreshed by the next weekly sweep before expiring. The 5x headroom
+over the 7-day scrape cadence means a few consecutive missed sweeps
+(e.g. an outage while the provider is in cooldown) don't risk data
+loss.
 
 ### Connecting to tiles-processor S3/SeaweedFS
 
@@ -383,7 +429,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | :----------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `basemap_sync_mode`                                                                                          | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); default: `"full"`).                                                                                                                                                  |
 | `basemap_providers`                                                                                          | List of `{ "id": ..., "enabled": ... }` selecting which external providers are served. URLs live in `.env` (`BASEMAP_*_URL`).                                                                                                                                                   |
-| `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (default: 604800 = 7 days).                                                                                                                                                                                                                  |
+| `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (default: 2592000 = 30 days).                                                                                                                                                                                                                |
 | `basemap_scrape_interval_seconds`                                                                            | Seconds between full-sweep scrape cycles (default: 604800 = weekly). Must be strictly less than `basemap_s3_object_ttl_days` so S3 objects are refreshed before the lifecycle expires them.                                                                                     |
 | `basemap_scrape_concurrent`                                                                                  | HTTP concurrency budget for the scraper (default: 20).                                                                                                                                                                                                                          |
 | `basemap_scrape_parallelism_mode`                                                                            | `"sequential"` (default; one provider at a time) / `"per_origin"` (providers sharing a host stay serial, different hosts run in parallel) / `"full"` (all providers concurrent).                                                                                                |
@@ -395,14 +441,16 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_http_timeout_seconds` / `basemap_http_max_retries`                                                  | Scraper-side HTTP client tuning.                                                                                                                                                                                                                                                |
 | `basemap_reader_http_concurrent` / `basemap_reader_http_timeout_seconds` / `basemap_reader_http_max_retries` | Reader-side HTTP pool (kept isolated from the scraper's pool so user reads don't queue behind retries).                                                                                                                                                                         |
 | `basemap_request_deadline_seconds`                                                                           | Hard wall-clock deadline per reader request, bounding single-flight waiters and the relay fallback (default: 4.0).                                                                                                                                                              |
-| `basemap_s3_object_ttl_days`                                                                                 | Lifecycle policy applied at startup to the basemap S3 bucket (default: 14 days).                                                                                                                                                                                                |
+| `basemap_s3_object_ttl_days`                                                                                 | Lifecycle policy applied at startup to the basemap S3 bucket (default: 35 days — one scrape cycle of headroom over the 30-day Redis TTL).                                                                                                                                       |
 | `basemap_online_fallback_enabled`                                                                            | When `false`, disables tier-3 provider proxy — the service serves only from Redis/S3 (fully offline reads). Always required in `relay_only`.                                                                                                                                    |
 | `basemap_provider_presence_ttl`                                                                              | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                                                                                             |
 | `basemap_negative_cache_enabled` / `basemap_negative_cache_ttl`                                              | Redis tombstones suppressing repeat probes for known-missing tiles. Force-off in `no_cache` / `relay_only`.                                                                                                                                                                     |
 | `basemap_scrape_state_db_path`                                                                               | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                                                                                             |
 | `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds`                                      | How often the scraper flushes its watermark to SQLite.                                                                                                                                                                                                                          |
 | `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                                                                                           |
-| `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=604800, immutable` = 1 week — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
+| `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=2592000, immutable` = 30 days — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
+| `basemap_provider_unhealthy_threshold`                                                                       | Consecutive UNAVAILABLE tile fetches inside one sweep before the circuit breaker trips (default: 5).                                                                                                                                                                            |
+| `basemap_provider_cooldown_schedule`                                                                         | Exponential backoff list (seconds) indexed by consecutive trip count, capped at the last element (default: `[300, 900, 3600, 10800, 21600]` = 5 min → 6 h). Must be non-empty, positive, monotonically non-decreasing. Persists across restarts via SQLite.                     |
 
 Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
 
@@ -437,6 +485,8 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `BASEMAP_SYNC_MODE`                  | `full` / `on_demand` / `no_cache` / `relay_only`.                                          | `full`                     |
 | `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
 | `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |
+| `BASEMAP_PROVIDER_UNHEALTHY_THRESHOLD` | Consecutive UNAVAILABLE tile fetches that trip the circuit breaker.                       | `5`                        |
+| `BASEMAP_PROVIDER_COOLDOWN_SCHEDULE` | Comma-separated seconds, indexed by consecutive trip count, capped at last.                | `300,900,3600,10800,21600` |
 | `BASEMAP_ONLINE_FALLBACK_ENABLED`    | When `false`, disables tier-3 provider relay.                                              | `true`                     |
 | `BASEMAP_{PROVIDER}_URL`             | Per-provider URL template (one per enabled provider in `basemap_providers`).               | See `.env.example`         |
 

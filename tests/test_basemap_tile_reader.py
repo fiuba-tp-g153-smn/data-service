@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from clients.http_tile_client import ProviderUnavailableError
 from services.basemap_config import BasemapProvider
 from services.basemap_tile_reader import BasemapTileReader
 
@@ -458,3 +459,27 @@ async def test_s3_nosuchkey_logged_at_debug(caplog):
     assert not warn_messages, f"expected no warnings, got: {warn_messages}"
     debug_messages = [r for r in caplog.records if r.levelno == logging.DEBUG]
     assert any("S3 tile miss" in r.message for r in debug_messages)
+
+
+@pytest.mark.asyncio
+async def test_relay_provider_unavailable_degrades_to_miss():
+    """ProviderUnavailableError from the relay is swallowed as a miss + tombstone."""
+    redis = _make_redis()
+    s3 = _make_s3(data=None)  # S3 miss → relay path
+    http = MagicMock()
+    http.download_tile = AsyncMock(
+        side_effect=ProviderUnavailableError(
+            "https://example.test/5/10/20.png", "upstream outage"
+        )
+    )
+    reader = _make_reader(redis=redis, s3=s3, http=http)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+
+    assert got is None
+    await _drain(reader)
+    # A tombstone must be set so repeat requests don't keep retrying the relay.
+    redis.mark_basemap_tile_miss.assert_awaited_once_with("fake", 5, 10, 20, ttl=300)
+    # No write-through on unavailable.
+    s3.upload_tile.assert_not_called()
+    redis.store_basemap_tile.assert_not_called()

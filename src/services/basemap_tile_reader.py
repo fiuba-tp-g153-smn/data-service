@@ -6,7 +6,7 @@ from typing import Optional, Tuple
 
 import httpx
 
-from clients.http_tile_client import HttpTileClient
+from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.basemap_config import BasemapProvider, build_source_url
@@ -184,7 +184,18 @@ class BasemapTileReader:
             return None
 
         url = build_source_url(provider, z, x, y)
-        data = await self._http.download_tile(url)
+        try:
+            data = await self._http.download_tile(url)
+        except ProviderUnavailableError as exc:
+            # Upstream provider is unreachable — degrade to a miss rather than
+            # surfacing the error to the user. The scraper's circuit breaker
+            # handles the health signal; the reader's job is just to get
+            # bytes or return None.
+            logger.info(
+                "Relay unavailable for %s/%d/%d/%d: %s", provider_id, z, x, y, exc.cause
+            )
+            await self._mark_miss(provider_id, z, x, y)
+            return None
         if data:
             if self._s3_cache_enabled or self._redis_cache_enabled:
                 self._schedule_cache_write(

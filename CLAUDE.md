@@ -61,7 +61,7 @@ Four independent services, all started in the FastAPI `lifespan` and gated by fi
 - **`SyncService`** (`services/sync_service.py`) — satellite tile sync from SeaweedFS. Runs in `sync_mode=full`. Strategies: `SatelliteFullSyncStrategy` / `SatelliteOnDemandStrategy`.
 - **`RadarService` sync** — same pattern. Strategies: `RadarFullSyncStrategy` / `RadarOnDemandStrategy`.
 - **`EcmwfService.start_sync`** — ECMWF precipitation forecast tiles. Strategies: `EcmwfFullSyncStrategy` / `EcmwfOnDemandStrategy`. Retention controlled by `ecmwf_forecasts_to_keep`.
-- **`BasemapScraperService`** — periodic full-sweep scrape of external providers (IGN, ArcGIS, Google) writing to the `basemap-tiles` bucket + Redis. Resumable via SQLite cursor (`basemap_scrape_state_db_path`). Runs in `basemap_sync_mode ∈ {full, on_demand, no_cache}`; only `full` also writes Redis.
+- **`BasemapScraperService`** — periodic full-sweep scrape of external providers (IGN, ArcGIS, Google) writing to the `basemap-tiles` bucket + Redis. Resumable via SQLite cursor (`basemap_scrape_state_db_path`). Runs in `basemap_sync_mode ∈ {full, on_demand, no_cache}`; only `full` also writes Redis. Per-provider **circuit breaker** (`basemap_provider_health` table) skips flaky providers for an exponential cooldown when `HttpTileClient` surfaces `ProviderUnavailableError` (exhausted retries / network failures) — state survives restarts. One clean sweep resets the trip counter.
 
 `S3Client` uses `aioboto3` with semaphore-limited concurrency (default 5, `s3_max_concurrent_downloads`). HTTP tile fetches use `HttpTileClient` (`httpx.AsyncClient`) with its own concurrency + retry budget.
 
@@ -107,7 +107,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 - Shared: `sync_mode`, `tile_ttl`, `radar_tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
 - Sync cadence: `sync_interval_seconds`, `radar_sync_interval_seconds`, `ecmwf_sync_interval_seconds`.
 - ECMWF: `ecmwf_tile_ttl`, `ecmwf_forecasts_to_keep`.
-- Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl`, `basemap_scrape_*` (incl. `basemap_scrape_parallelism_mode` — `sequential`/`per_origin`/`full` — and `basemap_scrape_per_host_concurrent`, a per-host request budget stacked under `basemap_scrape_concurrent`), `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days`, `basemap_online_fallback_enabled`, `basemap_provider_presence_ttl`, `basemap_negative_cache_*`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
+- Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl` (30 d default), `basemap_scrape_*` (incl. `basemap_scrape_parallelism_mode` — `sequential`/`per_origin`/`full` — and `basemap_scrape_per_host_concurrent`, a per-host request budget stacked under `basemap_scrape_concurrent`), `basemap_provider_unhealthy_threshold` + `basemap_provider_cooldown_schedule` (circuit breaker — consecutive UNAVAILABLE fetches + exponential backoff, state persisted in SQLite `basemap_provider_health`), `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days` (35 d default — strictly greater than scrape interval), `basemap_online_fallback_enabled`, `basemap_provider_presence_ttl`, `basemap_negative_cache_*`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
 
 ## Engineering Rules
 

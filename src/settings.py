@@ -55,7 +55,10 @@ class Settings:
     ecmwf_forecasts_to_keep: int
     ecmwf_sync_interval_seconds: int
     # Basemap scraper (loaded from settings.json, env overrides)
-    basemap_tile_ttl: int = 604800
+    # Default TTL is 30 days — upstream basemap tiles change at most at the
+    # month scale, so long Redis TTL + matching Cache-Control cuts relay
+    # pressure when providers flap.
+    basemap_tile_ttl: int = 2592000
     basemap_scrape_interval_seconds: int = 604800
     basemap_scrape_concurrent: int = 20
     basemap_scrape_delay_ms: int = 30
@@ -72,10 +75,11 @@ class Settings:
     # Basemap HTTP client tuning
     basemap_http_timeout_seconds: int = 10
     basemap_http_max_retries: int = 3
-    # S3 bucket lifecycle: auto-expire tiles after N days. Scrape cadence (7d by
-    # default) must be strictly less than this TTL so weekly re-uploads refresh
-    # object age before S3 expires them.
-    basemap_s3_object_ttl_days: int = 14
+    # S3 bucket lifecycle: auto-expire tiles after N days. Scrape cadence (7d
+    # by default) must remain strictly less than this TTL so weekly re-uploads
+    # refresh object age before S3 expires them. With a 30-day Redis TTL we
+    # give S3 35 days of runway — one extra scrape cycle of headroom.
+    basemap_s3_object_ttl_days: int = 35
     # When False, disables tier-3 provider proxy — service serves only from
     # Redis/S3 (fully offline reads; scraper still pulls from providers).
     basemap_online_fallback_enabled: bool = True
@@ -106,9 +110,9 @@ class Settings:
     # Cache-Control header returned for successful basemap tile hits. Kept
     # separate from `cache_control_tile` because basemap tiles are static
     # (upstream providers refresh on the order of weeks) while satellite /
-    # radar / ECMWF tiles rotate every few hours. 604800s = 1 week matches
+    # radar / ECMWF tiles rotate every few hours. 2592000s = 30 days matches
     # the Redis TTL (basemap_tile_ttl).
-    basemap_cache_control_tile: str = "public, max-age=604800, immutable"
+    basemap_cache_control_tile: str = "public, max-age=2592000, immutable"
     # Per-domain sync mode for basemap, independent of `sync_mode`. One of
     # "full" (scraper on + Redis cache on), "on_demand" (scraper off, Redis
     # populated lazily on cold reads), "no_cache" (scraper off, reader
@@ -124,6 +128,14 @@ class Settings:
     # the global `basemap_scrape_concurrent` budget so we never hammer one
     # host even in "full" mode when multiple providers share an origin.
     basemap_scrape_per_host_concurrent: int = 8
+    # Provider-health circuit breaker. When a provider returns this many
+    # consecutive UNAVAILABLE fetches inside a sweep, the scraper trips its
+    # circuit, preserves the resume cursor, and skips it for a cooldown
+    # chosen from `basemap_provider_cooldown_schedule` (indexed by the
+    # consecutive-trip count, capped at the last element). One clean sweep
+    # resets the counter and closes the circuit.
+    basemap_provider_unhealthy_threshold: int = 5
+    basemap_provider_cooldown_schedule: List[int] = [300, 900, 3600, 10800, 21600]
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
@@ -196,6 +208,8 @@ class Settings:
             "basemap_sync_mode",
             "basemap_scrape_parallelism_mode",
             "basemap_scrape_per_host_concurrent",
+            "basemap_provider_unhealthy_threshold",
+            "basemap_provider_cooldown_schedule",
         }
 
         for key in json_keys:
@@ -221,6 +235,14 @@ class Settings:
         if not value:
             return default
         return value.strip().lower() in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _env_int_list(key: str, default: List[int]) -> List[int]:
+        """Read an env var as a comma-separated list of ints, falling back to default."""
+        value = os.getenv(key, "")
+        if not value:
+            return list(default)
+        return [int(part.strip()) for part in value.split(",") if part.strip()]
 
     def _load_from_env(self) -> None:
         # pylint: disable=too-many-statements
@@ -386,6 +408,14 @@ class Settings:
             "BASEMAP_SCRAPE_PER_HOST_CONCURRENT",
             self.basemap_scrape_per_host_concurrent,
         )
+        self.basemap_provider_unhealthy_threshold = self._env_int(
+            "BASEMAP_PROVIDER_UNHEALTHY_THRESHOLD",
+            self.basemap_provider_unhealthy_threshold,
+        )
+        self.basemap_provider_cooldown_schedule = self._env_int_list(
+            "BASEMAP_PROVIDER_COOLDOWN_SCHEDULE",
+            self.basemap_provider_cooldown_schedule,
+        )
 
     def _validate(self) -> None:
         """Fail-fast validation for values with a fixed domain."""
@@ -420,6 +450,27 @@ class Settings:
                 f"({self.basemap_scrape_per_host_concurrent}) exceeds global "
                 f"basemap_scrape_concurrent ({self.basemap_scrape_concurrent}); "
                 "per-host limit larger than the global budget has no effect."
+            )
+        if self.basemap_provider_unhealthy_threshold < 1:
+            raise ValueError(
+                "basemap_provider_unhealthy_threshold must be >= 1 "
+                f"(got {self.basemap_provider_unhealthy_threshold})"
+            )
+        schedule = self.basemap_provider_cooldown_schedule
+        if not schedule:
+            raise ValueError(
+                "basemap_provider_cooldown_schedule must be a non-empty list "
+                "of positive seconds (got empty)"
+            )
+        if any(seconds <= 0 for seconds in schedule):
+            raise ValueError(
+                "basemap_provider_cooldown_schedule entries must all be > 0 "
+                f"(got {schedule})"
+            )
+        if any(b < a for a, b in zip(schedule, schedule[1:])):
+            raise ValueError(
+                "basemap_provider_cooldown_schedule must be monotonically "
+                f"non-decreasing (got {schedule})"
             )
 
     def is_s3_configured(self) -> bool:
