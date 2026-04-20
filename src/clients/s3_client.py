@@ -11,7 +11,7 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, List, Optional, cast
 
 import aioboto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
@@ -441,7 +441,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
 
     async def ensure_lifecycle_expiration(
         self, days: int, rule_id: str = "basemap-tile-expiration"
-    ) -> None:
+    ) -> bool:
         """
         Idempotently set a bucket-wide lifecycle rule that expires all objects
         after `days` days from their creation (i.e. last PUT).
@@ -449,6 +449,10 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         Safe to call on every startup — `put_bucket_lifecycle_configuration`
         replaces the named rule. Not all S3-compatible backends support this
         API; failures are logged at WARNING and do not abort startup.
+
+        Returns ``True`` when the policy was applied, ``False`` on a swallowed
+        error. Callers that want "retry until it sticks" semantics (the
+        basemap scraper) poll the return value.
         """
         client = await self._ensure_connected()
         try:
@@ -470,12 +474,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 self._bucket,
                 days,
             )
-        except ClientError as exc:
+            return True
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            # Lifecycle config is best-effort: a missing policy never blocks
+            # tile serving, so an unreachable or non-supporting backend should
+            # degrade to a warning rather than aborting startup.
             logger.warning(
-                "Could not set lifecycle policy on bucket %s (backend may not support it): %s",
+                "Could not set lifecycle policy on bucket %s "
+                "(backend unreachable or unsupported): %s",
                 self._bucket,
                 exc,
             )
+            return False
 
     async def has_any_object(self, prefix: str) -> bool:
         """True if at least one object exists under the given prefix."""

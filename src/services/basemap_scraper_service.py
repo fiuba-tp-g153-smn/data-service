@@ -11,6 +11,7 @@ from typing import List, Set, Tuple
 from urllib.parse import urlparse
 
 import httpx
+from botocore.exceptions import BotoCoreError, ClientError
 
 from clients.basemap_state_store import BasemapStateStore
 from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
@@ -28,14 +29,20 @@ from settings import Settings
 _PROGRESS_PCT_STEP = 10
 _PROGRESS_TIME_INTERVAL_S = 30.0
 _PROGRESS_MIN_INTERVAL_S = 1.0
+# Short floor applied to the next-cycle sleep when any provider hit storage
+# errors this cycle. Keeps the scraper probing ~every minute so a transient
+# S3/Redis outage recovers automatically without waiting a full scrape
+# interval (7 days by default).
+_STORAGE_RETRY_FLOOR_SECONDS = 60.0
 
 
 class _TileOutcome(Enum):
     """Result shape of a single tile fetch from the scraper's perspective."""
 
     OK = "ok"  # downloaded + persisted successfully
-    MISSING = "missing"  # permanent miss (404/403) or non-provider write failure
+    MISSING = "missing"  # permanent miss (404/403) — tile legitimately doesn't exist
     UNAVAILABLE = "unavailable"  # provider appears down (network / exhausted retries)
+    STORAGE_ERROR = "storage"  # provider returned bytes but S3/Redis write failed
 
 
 @dataclass
@@ -47,12 +54,19 @@ class _ProviderSweepState:
     carries the final "tripped" verdict back up to ``_scrape_provider``.
     Scoped to one provider's sweep — concurrent providers (per_origin /
     full parallelism modes) each own their own instance, so no cross-talk.
+
+    ``storage_errors`` counts tiles whose upstream fetch succeeded but whose
+    persistence to S3/Redis failed. Non-zero at end-of-sweep = systemic
+    downstream outage (not a provider health issue), so the scraper skips
+    stamping ``last_completed`` and lets the next cycle retry in ~60s
+    instead of the configured scrape interval.
     """
 
     consecutive_unavailable: int = 0
     tripped: bool = False
     last_reason: str = ""
     failure_samples: List[str] = field(default_factory=list)
+    storage_errors: int = 0
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -101,6 +115,7 @@ class BasemapScraperService(BaseSyncService):
         providers: dict[str, BasemapProvider],
         bbox: BoundingBox,
         tile_ttl: int,
+        s3_object_ttl_days: int,
         redis_writes_enabled: bool = True,
         parallelism_mode: str = "sequential",
     ):
@@ -117,6 +132,7 @@ class BasemapScraperService(BaseSyncService):
         self._providers = providers
         self._bbox = bbox
         self._tile_ttl = tile_ttl
+        self._s3_object_ttl_days = s3_object_ttl_days
         self._redis_writes_enabled = redis_writes_enabled
         self._parallelism_mode = parallelism_mode
         self._cache_max_zoom = settings.basemap_cache_max_zoom
@@ -129,6 +145,15 @@ class BasemapScraperService(BaseSyncService):
         # exponentially.
         self._unhealthy_threshold = settings.basemap_provider_unhealthy_threshold
         self._cooldown_schedule = list(settings.basemap_provider_cooldown_schedule)
+        # Lifecycle policy is applied lazily inside the scrape loop (instead of
+        # once at startup) so a transient S3 outage at boot self-heals on the
+        # next cycle. Once the put_bucket_lifecycle_configuration call succeeds
+        # the flag latches and we stop re-applying.
+        self._lifecycle_applied = False
+        # Set when any provider in the current cycle reports storage errors
+        # so _compute_next_sleep can floor the next sleep to ~60s regardless
+        # of last_completed. Reset at the top of every _run_sync.
+        self._storage_retry_due = False
 
     def _get_lock_path(self) -> str:
         return self._settings.basemap_scrape_lock_path
@@ -187,7 +212,13 @@ class BasemapScraperService(BaseSyncService):
         soonest time we'd consider it ready again is its ``cooldown_until``.
         A cursored provider that's also in cooldown waits for the cooldown;
         a cursored healthy provider is due now.
+
+        When the previous cycle hit storage errors (e.g. S3 down),
+        short-circuit to ``_STORAGE_RETRY_FLOOR_SECONDS`` so we probe for
+        recovery on a per-minute cadence instead of the full scrape interval.
         """
+        if self._storage_retry_due:
+            return _STORAGE_RETRY_FLOOR_SECONDS
         now = int(time.time())
         interval = self._sync_interval
         soonest = default
@@ -220,6 +251,15 @@ class BasemapScraperService(BaseSyncService):
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
         start = time.monotonic()
+        # Reset the transient storage-retry flag. Any provider that hits a
+        # storage error during this cycle will set it back to True and the
+        # next scheduled sleep will be floored to _STORAGE_RETRY_FLOOR_SECONDS.
+        self._storage_retry_due = False
+        # Apply the bucket lifecycle policy if it hasn't succeeded yet. This
+        # recovers from an S3-down startup: the scraper keeps probing until
+        # the policy sticks, then latches and stops retrying.
+        await self._ensure_lifecycle_applied()
+
         groups = self._build_scrape_groups()
         logger.info(
             "Basemap scrape starting: mode=%s, %d group(s): %s",
@@ -239,6 +279,13 @@ class BasemapScraperService(BaseSyncService):
             total_failed,
             elapsed,
         )
+
+    async def _ensure_lifecycle_applied(self) -> None:
+        """Idempotently (re)try the S3 bucket lifecycle rule until it sticks."""
+        if self._lifecycle_applied:
+            return
+        if await self._s3.ensure_lifecycle_expiration(self._s3_object_ttl_days):
+            self._lifecycle_applied = True
 
     def _build_scrape_groups(self) -> List[List[BasemapProvider]]:
         """Bucket enabled providers into parallel groups per the active mode."""
@@ -352,6 +399,27 @@ class BasemapScraperService(BaseSyncService):
                 trips,
                 _fmt_duration(cooldown_seconds),
                 sweep_state.last_reason,
+            )
+            return downloaded, failed
+
+        if sweep_state.storage_errors > 0:
+            # Sweep "completed" but downstream persistence was broken for at
+            # least one tile. Don't stamp last_completed — otherwise we'd
+            # silently push the next real attempt out by a full scrape
+            # interval (7 days by default). Clear the cursor so the next
+            # cycle starts a fresh sweep rather than picking up at
+            # max_zoom+1 (which would be a no-op), but keep the failed
+            # queue as a retry hint. Flag the storage-retry gate so the
+            # scheduler polls on a short cadence until S3/Redis recover.
+            await self._state.clear_cursor(provider.provider_id)
+            self._storage_retry_due = True
+            logger.warning(
+                "Provider %s sweep incomplete: %d storage failures "
+                "(downstream S3/Redis likely unavailable). Skipping "
+                "last_completed stamp; next cycle retries in ~%ds.",
+                provider.provider_id,
+                sweep_state.storage_errors,
+                int(_STORAGE_RETRY_FLOOR_SECONDS),
             )
             return downloaded, failed
 
@@ -487,6 +555,13 @@ class BasemapScraperService(BaseSyncService):
         if outcome is _TileOutcome.MISSING:
             # Legitimately-missing tiles (404/403) don't count as upstream
             # health signals — a sparse bbox would false-positive otherwise.
+            return
+        if outcome is _TileOutcome.STORAGE_ERROR:
+            # Downstream persistence issue (S3/Redis), not provider health.
+            # Track separately so the post-sweep accounting can defer the
+            # last_completed stamp instead of letting a storage outage
+            # silently push the next sweep out by a full interval.
+            sweep_state.storage_errors += 1
             return
         sweep_state.consecutive_unavailable += 1
         sample = f"z={z} x={x} y={y}"
@@ -724,7 +799,17 @@ class BasemapScraperService(BaseSyncService):
                 )
                 await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
             return _TileOutcome.OK
-        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
+        except (
+            ClientError,
+            BotoCoreError,
+            httpx.HTTPError,
+            asyncio.TimeoutError,
+            OSError,
+        ) as exc:
+            # Catch every plausible shape of "downstream write failed".
+            # botocore (ClientError/BotoCoreError, incl. EndpointConnectionError)
+            # covers S3 outages; httpx / OSError / TimeoutError covers Redis
+            # write-through failures.
             logger.warning(
                 "Failed to persist tile %s/%d/%d/%d: %s",
                 provider.provider_id,
@@ -733,4 +818,4 @@ class BasemapScraperService(BaseSyncService):
                 y,
                 exc,
             )
-            return _TileOutcome.MISSING
+            return _TileOutcome.STORAGE_ERROR

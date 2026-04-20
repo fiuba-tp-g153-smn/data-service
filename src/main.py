@@ -199,9 +199,9 @@ async def configure_basemap(
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
         )
         await basemap_s3.connect()
-        await basemap_s3.ensure_lifecycle_expiration(
-            settings.basemap_s3_object_ttl_days
-        )
+        # Lifecycle policy application is delegated to the scraper loop so
+        # a transient S3 outage at boot can self-heal on the next sweep
+        # instead of leaving the bucket with the wrong (or no) rule.
 
     # Separate pool for user-facing reads so tile requests can't queue behind
     # the scraper's retry loop. Tight budget: short timeout, minimal retries.
@@ -263,6 +263,7 @@ async def configure_basemap(
             providers=providers,
             bbox=bbox,
             tile_ttl=settings.basemap_tile_ttl,
+            s3_object_ttl_days=settings.basemap_s3_object_ttl_days,
             redis_writes_enabled=scraper_writes_redis,
             parallelism_mode=settings.basemap_scrape_parallelism_mode,
         )

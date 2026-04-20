@@ -158,6 +158,36 @@ cache tombstone (`basemap_negative_cache_ttl=300`) already bound the
 per-request cost of a dead provider. A `ProviderUnavailableError`
 from the relay is caught and degraded to a normal miss + tombstone.
 
+#### Downstream (S3/Redis) outage recovery
+
+The circuit breaker above is about **upstream** providers going dark.
+The scraper also self-heals when the **downstream** storage layer
+(our own S3 / Redis) is unreachable — e.g. a dev boot without
+SeaweedFS running, or a brief production blip:
+
+- Tile fetches that reach the provider but fail to persist are
+  classified as `STORAGE_ERROR` (distinct from MISSING/UNAVAILABLE).
+  They count as storage incidents, not provider-health incidents, so
+  they don't feed the circuit breaker.
+- A sweep that touches at least one `STORAGE_ERROR` is treated as
+  **incomplete**: `last_completed` is **not stamped**, the cursor is
+  cleared, and the scraper's next sleep is floored to ~60 seconds.
+  This prevents the 7-day scrape interval from silently swallowing a
+  totally-failed sync.
+- Once storage recovers, the first clean sweep stamps
+  `last_completed` as normal and the cadence returns to the
+  configured `basemap_scrape_interval_seconds`.
+- The bucket **lifecycle policy** (S3 object expiry after
+  `basemap_s3_object_ttl_days`) is applied from inside the scrape
+  loop as well. A failed application on cycle N is retried on cycle
+  N+1; a success latches. An S3-down boot no longer blocks startup
+  and no longer leaves the bucket mis-configured forever.
+
+Practical consequence: `docker compose up` with SeaweedFS offline
+boots successfully, the scraper logs storage warnings each minute,
+and the moment SeaweedFS comes up the next sweep persists tiles
+and applies the lifecycle rule — no manual intervention needed.
+
 #### Switching modes at runtime: Redis rehydration caveat
 
 There is **no dedicated service that rehydrates Redis from the S3 cold

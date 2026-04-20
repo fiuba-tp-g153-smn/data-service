@@ -109,6 +109,10 @@ def _make_scraper(
     redis.clear_basemap_tile_miss = AsyncMock()
     if providers is None:
         providers = {provider.provider_id: provider}
+    # Tests default the lifecycle call to pre-applied so they don't have to
+    # mock the S3 API surface unless they're specifically asserting the
+    # retry logic.
+    s3.ensure_lifecycle_expiration = AsyncMock(return_value=True)
     return BasemapScraperService(
         settings=settings,  # type: ignore[arg-type]
         s3_client=s3,
@@ -118,6 +122,7 @@ def _make_scraper(
         providers=providers,
         bbox=bbox,
         tile_ttl=60,
+        s3_object_ttl_days=35,
         redis_writes_enabled=redis_writes_enabled,
         parallelism_mode=parallelism_mode,
     )
@@ -828,3 +833,151 @@ async def test_tripped_provider_does_not_block_healthy_peers(store):
     assert await store.get_health("good") is None
     assert await store.get_last_completed("good") is not None
     assert await store.get_last_completed("bad") is None
+
+
+# --------------------------------------------------------------------------- #
+# Downstream (S3/Redis) storage recovery
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_storage_failures_skip_last_completed_stamp(store):
+    """An entirely-failed S3 upload pass must not stamp last_completed."""
+    from botocore.exceptions import EndpointConnectionError
+
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()  # HTTP fetches succeed; the scraper gets bytes for every tile.
+    scraper = _make_scraper(store, http, provider, bbox)
+    # Simulate S3 unreachable at upload time.
+    scraper._s3.upload_tile = AsyncMock(  # pylint: disable=protected-access
+        side_effect=EndpointConnectionError(endpoint_url="http://unreachable:9000")
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # last_completed NOT stamped — sweep wasn't really successful.
+    assert await store.get_last_completed(provider.provider_id) is None
+    # Cursor cleared so the next cycle re-sweeps from scratch.
+    assert await store.get_cursor(provider.provider_id) is None
+    # Storage-retry flag raised so _compute_next_sleep returns ~60s.
+    # pylint: disable=protected-access
+    assert scraper._storage_retry_due is True
+
+
+@pytest.mark.asyncio
+async def test_compute_next_sleep_floors_to_60s_on_storage_retry(store):
+    """With _storage_retry_due set, next sleep is the short-floor regardless of last_completed."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    # Pretend a previous cycle just hit storage errors.
+    scraper._storage_retry_due = True  # pylint: disable=protected-access
+
+    # Also seed last_completed in the recent past so the non-storage path
+    # would otherwise return a large number — proving the floor wins.
+    await store.set_last_completed(provider.provider_id, int(time.time()))
+
+    got = await scraper._compute_next_sleep(  # pylint: disable=protected-access
+        default=604800.0
+    )
+    assert got == 60.0
+
+
+@pytest.mark.asyncio
+async def test_storage_recovery_resumes_normal_cadence(store):
+    """Once storage comes back, a clean sweep stamps completion and floors go away."""
+    from botocore.exceptions import EndpointConnectionError
+
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    # Cycle 1: storage down.
+    scraper._s3.upload_tile = AsyncMock(  # pylint: disable=protected-access
+        side_effect=EndpointConnectionError(endpoint_url="http://down:9000")
+    )
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert await store.get_last_completed(provider.provider_id) is None
+    assert scraper._storage_retry_due is True  # pylint: disable=protected-access
+
+    # Cycle 2: storage back up.
+    scraper._s3.upload_tile = AsyncMock(
+        return_value=None
+    )  # pylint: disable=protected-access
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert await store.get_last_completed(provider.provider_id) is not None
+    # Flag reset at top of _run_sync and never re-raised because no errors.
+    assert scraper._storage_retry_due is False  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_storage_error_preserves_failed_queue(store):
+    """Failed tiles stay in the retry queue across a storage-error sweep."""
+    from botocore.exceptions import EndpointConnectionError
+
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+    scraper._s3.upload_tile = AsyncMock(  # pylint: disable=protected-access
+        side_effect=EndpointConnectionError(endpoint_url="http://down:9000")
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # Every tile should be in the failed queue (added during the sweep) —
+    # we did NOT wipe it with clear_failed_for_provider.
+    from services.basemap_config import iter_tiles
+
+    expected = len(list(iter_tiles(5, bbox)))
+    assert len(await store.list_failed(provider.provider_id, 5)) == expected
+
+
+# --------------------------------------------------------------------------- #
+# Bucket lifecycle self-healing
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_applied_once_on_success(store):
+    """ensure_lifecycle_expiration is called on the first sweep and latches afterwards."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+    mock = AsyncMock(return_value=True)
+    scraper._s3.ensure_lifecycle_expiration = mock  # pylint: disable=protected-access
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+    await scraper._run_sync()  # pylint: disable=protected-access
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # First success latches; no subsequent retries.
+    assert mock.await_count == 1
+    assert scraper._lifecycle_applied is True  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_retries_until_it_sticks(store):
+    """A False return keeps the flag False; next cycle retries."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox)
+    # Fail twice, then succeed on the third try.
+    mock = AsyncMock(side_effect=[False, False, True, True])
+    scraper._s3.ensure_lifecycle_expiration = mock  # pylint: disable=protected-access
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert scraper._lifecycle_applied is False  # pylint: disable=protected-access
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert scraper._lifecycle_applied is False  # pylint: disable=protected-access
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert scraper._lifecycle_applied is True  # pylint: disable=protected-access
+    # After latching, no further retries even if we trigger more cycles.
+    await scraper._run_sync()  # pylint: disable=protected-access
+    assert mock.await_count == 3
