@@ -114,8 +114,19 @@ class Settings:
     # populated lazily on cold reads), "no_cache" (scraper off, reader
     # streams straight from S3/relay — nothing lands in Redis).
     basemap_sync_mode: str = "full"
+    # Scrape parallelism mode controls how providers are dispatched within one
+    # scrape cycle. "sequential" runs providers one at a time (default, matches
+    # pre-parallelism behavior). "per_origin" groups providers by URL host and
+    # runs groups in parallel while keeping providers within a group serial.
+    # "full" fans out all providers concurrently, regardless of host.
+    basemap_scrape_parallelism_mode: str = "sequential"
+    # Max concurrent in-flight requests to a single upstream host. Stacks under
+    # the global `basemap_scrape_concurrent` budget so we never hammer one
+    # host even in "full" mode when multiple providers share an origin.
+    basemap_scrape_per_host_concurrent: int = 8
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
+    _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _JSON_NAMESPACES = ("basemap", "ecmwf", "radar")
 
     def __init__(self):
@@ -183,6 +194,8 @@ class Settings:
             "basemap_cache_control_tile_miss",
             "basemap_cache_control_tile",
             "basemap_sync_mode",
+            "basemap_scrape_parallelism_mode",
+            "basemap_scrape_per_host_concurrent",
         }
 
         for key in json_keys:
@@ -363,6 +376,16 @@ class Settings:
             os.getenv("BASEMAP_SYNC_MODE", self.basemap_sync_mode)
             or self.basemap_sync_mode
         )
+        self.basemap_scrape_parallelism_mode = (
+            os.getenv(
+                "BASEMAP_SCRAPE_PARALLELISM_MODE", self.basemap_scrape_parallelism_mode
+            )
+            or self.basemap_scrape_parallelism_mode
+        )
+        self.basemap_scrape_per_host_concurrent = self._env_int(
+            "BASEMAP_SCRAPE_PER_HOST_CONCURRENT",
+            self.basemap_scrape_per_host_concurrent,
+        )
 
     def _validate(self) -> None:
         """Fail-fast validation for values with a fixed domain."""
@@ -379,6 +402,24 @@ class Settings:
                 "Invalid combination: basemap_sync_mode='relay_only' requires "
                 "basemap_online_fallback_enabled=true; otherwise the service "
                 "has no source of tile data."
+            )
+        if self.basemap_scrape_parallelism_mode not in self._BASEMAP_PARALLELISM_MODES:
+            raise ValueError(
+                f"Invalid basemap_scrape_parallelism_mode="
+                f"{self.basemap_scrape_parallelism_mode!r}; "
+                f"expected one of {self._BASEMAP_PARALLELISM_MODES}"
+            )
+        if self.basemap_scrape_per_host_concurrent < 1:
+            raise ValueError(
+                "basemap_scrape_per_host_concurrent must be >= 1 "
+                f"(got {self.basemap_scrape_per_host_concurrent})"
+            )
+        if self.basemap_scrape_per_host_concurrent > self.basemap_scrape_concurrent:
+            raise ValueError(
+                "basemap_scrape_per_host_concurrent "
+                f"({self.basemap_scrape_per_host_concurrent}) exceeds global "
+                f"basemap_scrape_concurrent ({self.basemap_scrape_concurrent}); "
+                "per-host limit larger than the global budget has no effect."
             )
 
     def is_s3_configured(self) -> bool:

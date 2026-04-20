@@ -107,7 +107,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 - Shared: `sync_mode`, `tile_ttl`, `radar_tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
 - Sync cadence: `sync_interval_seconds`, `radar_sync_interval_seconds`, `ecmwf_sync_interval_seconds`.
 - ECMWF: `ecmwf_tile_ttl`, `ecmwf_forecasts_to_keep`.
-- Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl`, `basemap_scrape_*`, `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days`, `basemap_online_fallback_enabled`, `basemap_provider_presence_ttl`, `basemap_negative_cache_*`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
+- Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl`, `basemap_scrape_*` (incl. `basemap_scrape_parallelism_mode` — `sequential`/`per_origin`/`full` — and `basemap_scrape_per_host_concurrent`, a per-host request budget stacked under `basemap_scrape_concurrent`), `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days`, `basemap_online_fallback_enabled`, `basemap_provider_presence_ttl`, `basemap_negative_cache_*`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
 
 ## Engineering Rules
 

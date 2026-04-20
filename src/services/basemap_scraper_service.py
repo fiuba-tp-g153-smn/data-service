@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from logging import Logger
 from typing import List, Set, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -73,6 +75,7 @@ class BasemapScraperService(BaseSyncService):
         bbox: BoundingBox,
         tile_ttl: int,
         redis_writes_enabled: bool = True,
+        parallelism_mode: str = "sequential",
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         super().__init__(
@@ -88,6 +91,7 @@ class BasemapScraperService(BaseSyncService):
         self._bbox = bbox
         self._tile_ttl = tile_ttl
         self._redis_writes_enabled = redis_writes_enabled
+        self._parallelism_mode = parallelism_mode
         self._cache_max_zoom = settings.basemap_cache_max_zoom
         self._checkpoint_every = settings.basemap_scrape_checkpoint_every
         self._checkpoint_seconds = settings.basemap_scrape_checkpoint_seconds
@@ -160,13 +164,17 @@ class BasemapScraperService(BaseSyncService):
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
         start = time.monotonic()
-        total_downloaded = 0
-        total_failed = 0
+        groups = self._build_scrape_groups()
+        logger.info(
+            "Basemap scrape starting: mode=%s, %d group(s): %s",
+            self._parallelism_mode,
+            len(groups),
+            [[p.provider_id for p in g] for g in groups],
+        )
 
-        for provider in self._providers.values():
-            downloaded, failed = await self._scrape_provider(provider)
-            total_downloaded += downloaded
-            total_failed += failed
+        results = await asyncio.gather(*(self._scrape_group(g) for g in groups))
+        total_downloaded = sum(ok for ok, _ in results)
+        total_failed = sum(f for _, f in results)
 
         elapsed = time.monotonic() - start
         logger.info(
@@ -175,6 +183,32 @@ class BasemapScraperService(BaseSyncService):
             total_failed,
             elapsed,
         )
+
+    def _build_scrape_groups(self) -> List[List[BasemapProvider]]:
+        """Bucket enabled providers into parallel groups per the active mode."""
+        providers = list(self._providers.values())
+        if not providers:
+            return []
+        if self._parallelism_mode == "full":
+            return [[p] for p in providers]
+        if self._parallelism_mode == "per_origin":
+            by_host: dict[str, list[BasemapProvider]] = defaultdict(list)
+            for provider in providers:
+                host = urlparse(provider.source_url_template).netloc
+                by_host[host].append(provider)
+            return list(by_host.values())
+        # "sequential" (default): one group, all providers serial within it.
+        return [providers]
+
+    async def _scrape_group(self, group: List[BasemapProvider]) -> Tuple[int, int]:
+        """Run a group of providers serially and aggregate their counts."""
+        ok = 0
+        failed = 0
+        for provider in group:
+            downloaded, group_failed = await self._scrape_provider(provider)
+            ok += downloaded
+            failed += group_failed
+        return ok, failed
 
     async def _scrape_provider(self, provider: BasemapProvider) -> tuple[int, int]:
         """Scrape all tiles for a single provider within the bounding box."""

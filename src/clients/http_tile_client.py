@@ -1,8 +1,10 @@
 """HTTP client for downloading tiles from external map providers."""
 
 import asyncio
+import contextlib
 import logging
-from typing import Optional
+from typing import Dict, Optional
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import (
@@ -38,12 +40,16 @@ class HttpTileClient:
         delay_ms: int,
         timeout_seconds: int,
         max_retries: int,
+        per_host_concurrent: Optional[int] = None,
     ):
+        # pylint: disable=too-many-arguments
         self._max_concurrent = max_concurrent
         self._delay_ms = delay_ms
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._per_host_limit = per_host_concurrent
+        self._host_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._client: Optional[httpx.AsyncClient] = None
 
     async def connect(self) -> None:
@@ -55,8 +61,10 @@ class HttpTileClient:
             follow_redirects=True,
         )
         logger.info(
-            "HTTP tile client connected (concurrency=%d, retries=%d, timeout=%ds)",
+            "HTTP tile client connected (concurrency=%d, per_host=%s, "
+            "retries=%d, timeout=%ds)",
             self._max_concurrent,
+            self._per_host_limit if self._per_host_limit else "off",
             self._max_retries,
             self._timeout,
         )
@@ -67,6 +75,17 @@ class HttpTileClient:
             await self._client.aclose()
             self._client = None
             logger.info("HTTP tile client closed")
+
+    def _host_semaphore(self, url: str) -> Optional[asyncio.Semaphore]:
+        """Return a per-host semaphore for the URL, lazily allocated."""
+        if not self._per_host_limit:
+            return None
+        host = urlparse(url).netloc
+        sem = self._host_semaphores.get(host)
+        if sem is None:
+            sem = asyncio.Semaphore(self._per_host_limit)
+            self._host_semaphores[host] = sem
+        return sem
 
     def _overall_budget_seconds(self) -> float:
         """Cap on total time a single download_tile call may hold the semaphore."""
@@ -83,7 +102,11 @@ class HttpTileClient:
         if not self._client:
             raise RuntimeError("HTTP tile client not connected")
 
-        async with self._semaphore:
+        host_sem = self._host_semaphore(url)
+        # Acquire host budget before the global backstop. Consistent order
+        # across callers — no deadlock risk (only two sems, one always wider).
+        host_guard = host_sem if host_sem is not None else contextlib.nullcontext()
+        async with host_guard, self._semaphore:
             try:
                 async for attempt in AsyncRetrying(
                     stop=(

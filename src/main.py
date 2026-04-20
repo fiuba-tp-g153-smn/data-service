@@ -237,6 +237,7 @@ async def configure_basemap(
             delay_ms=settings.basemap_scrape_delay_ms,
             timeout_seconds=settings.basemap_http_timeout_seconds,
             max_retries=settings.basemap_http_max_retries,
+            per_host_concurrent=settings.basemap_scrape_per_host_concurrent,
         )
         await scraper_http_client.connect()
 
@@ -263,6 +264,7 @@ async def configure_basemap(
             bbox=bbox,
             tile_ttl=settings.basemap_tile_ttl,
             redis_writes_enabled=scraper_writes_redis,
+            parallelism_mode=settings.basemap_scrape_parallelism_mode,
         )
         await scraper.start(logger)
 

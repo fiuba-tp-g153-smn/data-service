@@ -21,6 +21,8 @@
     "scrape_interval_seconds": 604800,
     "scrape_concurrent": 20,
     "scrape_delay_ms": 30,
+    "scrape_parallelism_mode": "per_origin",
+    "scrape_per_host_concurrent": 20,
     "scrape_state_db_path": "data/basemap_scraper_state.sqlite",
     "scrape_checkpoint_every": 200,
     "scrape_checkpoint_seconds": 5.0,
@@ -44,13 +46,13 @@
     "cache_control_tile_miss": "public, max-age=300, immutable",
     "providers": [
       { "id": "argenmap", "enabled": true },
-      { "id": "argenmapGris", "enabled": false },
-      { "id": "argenmapOscuro", "enabled": false },
-      { "id": "argenmapTopografico", "enabled": false },
-      { "id": "satellite", "enabled": false },
-      { "id": "topographic", "enabled": false },
-      { "id": "googleSatellite", "enabled": false },
-      { "id": "oceanBase", "enabled": false }
+      { "id": "argenmapGris", "enabled": true },
+      { "id": "argenmapOscuro", "enabled": true },
+      { "id": "argenmapTopografico", "enabled": true },
+      { "id": "satellite", "enabled": true },
+      { "id": "topographic", "enabled": true },
+      { "id": "googleSatellite", "enabled": true },
+      { "id": "oceanBase", "enabled": true }
     ]
   }
 }

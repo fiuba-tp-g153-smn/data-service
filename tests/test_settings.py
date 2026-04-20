@@ -115,3 +115,59 @@ def test_real_settings_json_round_trip():
     assert s.radar_tile_ttl == 2592000
     assert s.sync_mode == "full"
     assert isinstance(s.basemap_providers, list) and s.basemap_providers
+
+
+def _built_settings(tmp_path: Path, data: dict) -> Settings:
+    """Build a full Settings, bypassing env reads and triggering _validate."""
+    s = Settings.__new__(Settings)
+    s._load_from_json(_write_json(tmp_path, data))  # pylint: disable=protected-access
+    s._validate()  # pylint: disable=protected-access
+    return s
+
+
+def test_scrape_parallelism_mode_round_trips(tmp_path):
+    s = _built_settings(
+        tmp_path,
+        {
+            "basemap": {
+                "sync_mode": "full",
+                "scrape_parallelism_mode": "per_origin",
+                "scrape_per_host_concurrent": 4,
+                "scrape_concurrent": 20,
+            }
+        },
+    )
+    assert s.basemap_scrape_parallelism_mode == "per_origin"
+    assert s.basemap_scrape_per_host_concurrent == 4
+
+
+def test_invalid_scrape_parallelism_mode_rejected(tmp_path):
+    import pytest  # local import; this file uses plain asserts elsewhere
+
+    with pytest.raises(ValueError, match="basemap_scrape_parallelism_mode"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "scrape_parallelism_mode": "bogus",
+                }
+            },
+        )
+
+
+def test_per_host_concurrent_exceeding_global_rejected(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="exceeds global"):
+        _built_settings(
+            tmp_path,
+            {
+                "basemap": {
+                    "sync_mode": "full",
+                    "scrape_parallelism_mode": "sequential",
+                    "scrape_concurrent": 4,
+                    "scrape_per_host_concurrent": 8,
+                }
+            },
+        )

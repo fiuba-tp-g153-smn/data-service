@@ -77,6 +77,8 @@ def _make_scraper(
     bbox: BoundingBox,
     *,
     redis_writes_enabled: bool = True,
+    parallelism_mode: str = "sequential",
+    providers: Dict[str, BasemapProvider] | None = None,
     **settings_overrides,
 ) -> BasemapScraperService:
     settings = _make_settings(**settings_overrides)
@@ -85,16 +87,19 @@ def _make_scraper(
     redis = MagicMock()
     redis.store_basemap_tile = AsyncMock()
     redis.clear_basemap_tile_miss = AsyncMock()
+    if providers is None:
+        providers = {provider.provider_id: provider}
     return BasemapScraperService(
         settings=settings,  # type: ignore[arg-type]
         s3_client=s3,
         redis_client=redis,
         http_client=http,  # type: ignore[arg-type]
         state_store=store_,
-        providers={provider.provider_id: provider},
+        providers=providers,
         bbox=bbox,
         tile_ttl=60,
         redis_writes_enabled=redis_writes_enabled,
+        parallelism_mode=parallelism_mode,
     )
 
 
@@ -461,3 +466,125 @@ async def test_failed_tile_recorded_in_store(store):
 
     # The failed tile was recorded (before end-of-provider cleanup wipes it).
     assert (provider.provider_id, bad[0], bad[1], bad[2]) in seen
+
+
+# --------------------------------------------------------------------------- #
+# Parallelism mode dispatcher
+# --------------------------------------------------------------------------- #
+
+
+def _provider_with_url(provider_id: str, url: str) -> BasemapProvider:
+    return BasemapProvider(
+        provider_id=provider_id,
+        name=provider_id,
+        source_url_template=url,
+        is_tms=False,
+        min_zoom=5,
+        max_zoom=5,
+        cache_max_zoom=5,
+        attribution="",
+    )
+
+
+def test_build_scrape_groups_sequential(store):
+    """sequential → one group containing every provider in order."""
+    providers = {
+        "a": _provider_with_url("a", "https://host-a.test/{z}/{x}/{y}.png"),
+        "b": _provider_with_url("b", "https://host-b.test/{z}/{x}/{y}.png"),
+    }
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        providers["a"],
+        _make_bbox(),
+        parallelism_mode="sequential",
+        providers=providers,
+    )
+    groups = scraper._build_scrape_groups()  # pylint: disable=protected-access
+    assert [[p.provider_id for p in g] for g in groups] == [["a", "b"]]
+
+
+def test_build_scrape_groups_full(store):
+    """full → each provider becomes its own singleton group."""
+    providers = {
+        "a": _provider_with_url("a", "https://host-a.test/{z}/{x}/{y}.png"),
+        "b": _provider_with_url("b", "https://host-b.test/{z}/{x}/{y}.png"),
+        "c": _provider_with_url("c", "https://host-a.test/{z}/{x}/{y}.png"),
+    }
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        providers["a"],
+        _make_bbox(),
+        parallelism_mode="full",
+        providers=providers,
+    )
+    groups = scraper._build_scrape_groups()  # pylint: disable=protected-access
+    assert sorted([p.provider_id for g in groups for p in g]) == ["a", "b", "c"]
+    assert all(len(g) == 1 for g in groups)
+
+
+def test_build_scrape_groups_per_origin(store):
+    """per_origin → providers sharing a host collapse into one group."""
+    providers = {
+        "argenmap": _provider_with_url(
+            "argenmap", "https://wms.ign.gob.ar/geoserver/{z}/{x}/{y}.png"
+        ),
+        "argenmapGris": _provider_with_url(
+            "argenmapGris", "https://wms.ign.gob.ar/gris/{z}/{x}/{y}.png"
+        ),
+        "satellite": _provider_with_url(
+            "satellite", "https://server.arcgisonline.com/sat/{z}/{x}/{y}.png"
+        ),
+        "google": _provider_with_url(
+            "google", "https://mt1.google.com/vt/{z}/{x}/{y}.png"
+        ),
+    }
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        providers["argenmap"],
+        _make_bbox(),
+        parallelism_mode="per_origin",
+        providers=providers,
+    )
+    groups = scraper._build_scrape_groups()  # pylint: disable=protected-access
+    membership = sorted(sorted(p.provider_id for p in g) for g in groups)
+    assert membership == [
+        ["argenmap", "argenmapGris"],
+        ["google"],
+        ["satellite"],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sequential", "per_origin", "full"])
+async def test_run_sync_end_to_end_across_modes(store, mode):
+    """Every tile is fetched once regardless of parallelism mode."""
+    providers = {
+        "argenmap": _provider_with_url(
+            "argenmap", "https://wms.ign.gob.ar/{z}/{x}/{y}.png"
+        ),
+        "satellite": _provider_with_url(
+            "satellite", "https://server.arcgisonline.com/{z}/{x}/{y}.png"
+        ),
+    }
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(
+        store,
+        http,
+        providers["argenmap"],
+        bbox,
+        parallelism_mode=mode,
+        providers=providers,
+    )
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    expected_per_provider = count_tiles(5, bbox)
+    assert len(http.calls) == expected_per_provider * len(providers)
+    for pid in providers:
+        assert await store.get_cursor(pid) is None
+        assert await store.list_failed(pid, 5) == []
+        assert await store.get_last_completed(pid) is not None
