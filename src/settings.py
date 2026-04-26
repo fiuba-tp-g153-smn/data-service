@@ -41,7 +41,6 @@ class Settings:
     radar_tile_ttl: int
     tileset_listing_ttl: int
     sync_interval_seconds: int
-    radar_sync_interval_seconds: int
     cache_control_config: str
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
@@ -169,7 +168,6 @@ class Settings:
             "radar_tile_ttl",
             "tileset_listing_ttl",
             "sync_interval_seconds",
-            "radar_sync_interval_seconds",
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
@@ -283,9 +281,6 @@ class Settings:
         # Operational (env overrides JSON)
         self.sync_interval_seconds = self._env_int(
             "SYNC_INTERVAL_SECONDS", self.sync_interval_seconds
-        )
-        self.radar_sync_interval_seconds = self._env_int(
-            "RADAR_SYNC_INTERVAL_SECONDS", self.radar_sync_interval_seconds
         )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
