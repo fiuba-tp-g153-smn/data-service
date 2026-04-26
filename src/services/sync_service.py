@@ -102,7 +102,6 @@ class SyncService(BaseSyncService):
         self._consecutive_failures += 1
 
     async def _run_sync(self) -> None:
-        # pylint: disable=too-many-locals
         """Execute a single sync cycle for all prefixes."""
         if not self._settings.is_s3_configured():
             logger.warning(
@@ -126,72 +125,13 @@ class SyncService(BaseSyncService):
         )
 
         logger.info("Sync cycle #%d starting", self._total_cycles + 1)
-        sat_downloaded = 0
-        errors = 0
 
-        for prefix in self._sync_prefixes:
-            channel_dir = self.PREFIX_TO_CHANNEL.get(
-                prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
-            )
-            try:
-                # 1. List S3 tileset prefixes
-                tileset_prefixes = await self._client.get_subdirectories(prefix)
-                tileset_prefixes.sort()
-
-                # 2. Get tilesets already in Redis
-                existing_tilesets = set(
-                    await self._redis_client.get_satellite_tilesets(channel_dir)
-                )
-
-                # 3. Download only new tilesets (with TTL for automatic eviction)
-                prefix_downloaded = 0
-                new_tilesets = 0
-                for s3_tileset_prefix in tileset_prefixes:
-                    # Extract tileset_id from prefix: "tiles/band_13/20260521320209/"
-                    tileset_id = s3_tileset_prefix.rstrip("/").split("/")[-1]
-
-                    if tileset_id in existing_tilesets:
-                        continue
-
-                    new_tilesets += 1
-
-                    # Download and store in Redis with TTL
-                    downloaded = await self._client.sync_prefix_to_redis(
-                        self._redis_client,
-                        s3_tileset_prefix,
-                        channel_dir,
-                        tileset_id,
-                        tile_ttl=self._settings.tile_ttl,
-                    )
-                    sat_downloaded += downloaded
-                    prefix_downloaded += downloaded
-
-                    # Add to tileset index with timestamp score and TTL
-                    score = self._extract_timestamp_score(tileset_id)
-                    await self._redis_client.add_satellite_tileset(
-                        channel_dir,
-                        tileset_id,
-                        score,
-                        ttl=self._settings.tile_ttl,
-                    )
-
-                logger.info(
-                    "[%s] %d in S3 | %d cached | %d new tilesets | %d tiles downloaded",
-                    channel_dir,
-                    len(tileset_prefixes),
-                    len(existing_tilesets),
-                    new_tilesets,
-                    prefix_downloaded,
-                )
-
-            except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Failed to sync prefix '%s': %s", prefix, e)
-                errors += 1
-
-        # ── Radar sync ──
+        sat_downloaded, sat_errors = await self._sync_satellite_prefixes()
         radar_downloaded, radar_errors = await self._sync_radar()
-        total_downloaded = sat_downloaded + radar_downloaded
-        errors += radar_errors
+        ecmwf_downloaded, ecmwf_errors = await self._sync_ecmwf()
+
+        errors = sat_errors + radar_errors + ecmwf_errors
+        total_downloaded = sat_downloaded + radar_downloaded + ecmwf_downloaded
 
         self._total_cycles += 1
         if errors == 0:
@@ -230,19 +170,85 @@ class SyncService(BaseSyncService):
 
         logger.info(
             "Sync cycle #%d done in %dms | sat: %d new tiles / %d tilesets"
-            " | radar: %d new tiles / %d tilesets | errors: %d",
+            " | radar: %d new tiles / %d tilesets"
+            " | ecmwf: %d new tiles | errors: %d",
             self._total_cycles,
             duration_ms,
             sat_downloaded,
             sat_count,
             radar_downloaded,
             radar_count,
+            ecmwf_downloaded,
             errors,
         )
         if self._consecutive_failures > 0:
             logger.warning(
                 "Sync has %d consecutive failure(s)", self._consecutive_failures
             )
+
+    async def _sync_satellite_prefixes(self) -> tuple:
+        # pylint: disable=too-many-locals
+        """Sync all satellite prefixes from S3 to Redis. Returns (downloaded, errors)."""
+        if self._client is None or self._redis_client is None:
+            raise RuntimeError("S3 or Redis client is not initialized")
+
+        sat_downloaded = 0
+        errors = 0
+
+        for prefix in self._sync_prefixes:
+            channel_dir = self.PREFIX_TO_CHANNEL.get(
+                prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
+            )
+            try:
+                tileset_prefixes = await self._client.get_subdirectories(prefix)
+                tileset_prefixes.sort()
+
+                existing_tilesets = set(
+                    await self._redis_client.get_satellite_tilesets(channel_dir)
+                )
+
+                prefix_downloaded = 0
+                new_tilesets = 0
+                for s3_tileset_prefix in tileset_prefixes:
+                    tileset_id = s3_tileset_prefix.rstrip("/").split("/")[-1]
+
+                    if tileset_id in existing_tilesets:
+                        continue
+
+                    new_tilesets += 1
+
+                    downloaded = await self._client.sync_prefix_to_redis(
+                        self._redis_client,
+                        s3_tileset_prefix,
+                        channel_dir,
+                        tileset_id,
+                        tile_ttl=self._settings.tile_ttl,
+                    )
+                    sat_downloaded += downloaded
+                    prefix_downloaded += downloaded
+
+                    score = self._extract_timestamp_score(tileset_id)
+                    await self._redis_client.add_satellite_tileset(
+                        channel_dir,
+                        tileset_id,
+                        score,
+                        ttl=self._settings.tile_ttl,
+                    )
+
+                logger.info(
+                    "[%s] %d in S3 | %d cached | %d new tilesets | %d tiles downloaded",
+                    channel_dir,
+                    len(tileset_prefixes),
+                    len(existing_tilesets),
+                    new_tilesets,
+                    prefix_downloaded,
+                )
+
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to sync prefix '%s': %s", prefix, e)
+                errors += 1
+
+        return sat_downloaded, errors
 
     async def _sync_radar(self) -> tuple:
         """Sync radar tilesets from S3 to Redis. Returns (downloaded, errors)."""
@@ -378,6 +384,71 @@ class SyncService(BaseSyncService):
                     )
                     count += len(tilesets)
         return count
+
+    async def _sync_ecmwf(self) -> tuple:
+        """Sync ECMWF forecasts/periods from S3 to Redis. Returns (downloaded, errors)."""
+        if self._client is None or self._redis_client is None:
+            raise RuntimeError("S3 or Redis client is not initialized")
+
+        total_downloaded = 0
+        errors = 0
+
+        try:
+            subdirs = await self._client.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
+            all_forecasts = sorted(
+                (
+                    s.rstrip("/").split("/")[-1]
+                    for s in subdirs
+                    if s.rstrip("/").split("/")[-1]
+                ),
+                reverse=True,
+            )
+            active_forecasts = all_forecasts[: self._settings.ecmwf_forecasts_to_keep]
+
+            if not active_forecasts:
+                logger.debug("ECMWF sync: no forecasts found in S3")
+                return 0, 0
+
+            for forecast_ts in active_forecasts:
+                period_subdirs = await self._client.get_subdirectories(
+                    f"{S3Client.ECMWF_TILES_PREFIX}/{forecast_ts}"
+                )
+                periods = sorted(
+                    s.rstrip("/").split("/")[-1]
+                    for s in period_subdirs
+                    if s.rstrip("/").split("/")[-1]
+                )
+
+                known_periods = await self._redis_client.get_ecmwf_periods(forecast_ts)
+                new_periods = [p for p in periods if p not in known_periods]
+
+                for period_ts in new_periods:
+                    stored = await self._client.sync_ecmwf_period_to_redis(
+                        self._redis_client,
+                        forecast_ts,
+                        period_ts,
+                        self._settings.ecmwf_tile_ttl,
+                    )
+                    total_downloaded += stored
+                    logger.info(
+                        "ECMWF synced %d tiles for %s/%s",
+                        stored,
+                        forecast_ts,
+                        period_ts,
+                    )
+
+                await self._redis_client.store_ecmwf_index(
+                    forecast_ts, periods, self._settings.ecmwf_tile_ttl
+                )
+
+            logger.debug(
+                "ECMWF sync complete: %d forecasts active", len(active_forecasts)
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("ECMWF sync error: %s", e)
+            errors += 1
+
+        return total_downloaded, errors
 
     @staticmethod
     def _extract_timestamp_score(tileset_id: str) -> float:

@@ -48,12 +48,10 @@ class Settings:
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
     radar_lock_path: str = "/tmp/radar_sync.lock"
-    ecmwf_lock_path: str = "/tmp/ecmwf_sync.lock"
     s3_max_concurrent_downloads: int = 5
     # ECMWF precipitation (loaded from settings.json, env overrides)
     ecmwf_tile_ttl: int
     ecmwf_forecasts_to_keep: int
-    ecmwf_sync_interval_seconds: int
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -177,7 +175,6 @@ class Settings:
             "s3_max_concurrent_downloads",
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
-            "ecmwf_sync_interval_seconds",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -308,9 +305,6 @@ class Settings:
         self.ecmwf_tile_ttl = self._env_int("ECMWF_TILE_TTL", self.ecmwf_tile_ttl)
         self.ecmwf_forecasts_to_keep = self._env_int(
             "ECMWF_FORECASTS_TO_KEEP", self.ecmwf_forecasts_to_keep
-        )
-        self.ecmwf_sync_interval_seconds = self._env_int(
-            "ECMWF_SYNC_INTERVAL_SECONDS", self.ecmwf_sync_interval_seconds
         )
 
         # Basemap

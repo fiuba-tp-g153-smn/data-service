@@ -162,19 +162,3 @@ async def test_get_tile_data_no_strategy_returns_none():
     result = await service.get_tile_data(FORECAST_TS, PERIOD_TS, 5, 0, 0)
 
     assert result is None
-
-
-# ── background sync lifecycle ──────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_start_and_stop_sync_task():
-    service = EcmwfService()
-    mock_logger = MagicMock()
-
-    with patch.object(service, "_sync_loop", new_callable=AsyncMock):
-        await service.start_sync(mock_logger)
-        assert service._sync_task is not None
-
-        await service.stop_sync(mock_logger)
-        assert service._sync_task.cancelled() or service._sync_task.done()

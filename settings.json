@@ -12,8 +12,7 @@
   },
   "ecmwf": {
     "tile_ttl": 86400,
-    "forecasts_to_keep": 2,
-    "sync_interval_seconds": 120
+    "forecasts_to_keep": 2
   },
   "basemap": {
     "sync_mode": "no_cache",

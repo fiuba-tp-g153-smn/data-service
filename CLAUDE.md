@@ -56,11 +56,9 @@ Channel mapping: `ch-2` → `band_2`, `ch-9` → `band_9`, `ch-13` → `band_13`
 
 ### Background sync / scrape
 
-Four independent services, all started in the FastAPI `lifespan` and gated by file locks (`fcntl`) so only one Uvicorn worker runs each:
+Two independent services, both started in the FastAPI `lifespan` and gated by file locks (`fcntl`) so only one Uvicorn worker runs each:
 
-- **`SyncService`** (`services/sync_service.py`) — satellite tile sync from SeaweedFS. Runs in `sync_mode=full`. Strategies: `SatelliteFullSyncStrategy` / `SatelliteOnDemandStrategy`.
-- **`RadarService` sync** — same pattern. Strategies: `RadarFullSyncStrategy` / `RadarOnDemandStrategy`.
-- **`EcmwfService.start_sync`** — ECMWF precipitation forecast tiles. Strategies: `EcmwfFullSyncStrategy` / `EcmwfOnDemandStrategy`. Retention controlled by `ecmwf_forecasts_to_keep`.
+- **`SyncService`** (`services/sync_service.py`) — single sync loop covering **satellite + radar + ECMWF** from S3/SeaweedFS. Runs in `sync_mode=full`. Each cycle iterates: satellite prefixes (`band_*`, `glm_*`), radar (`tiles/radar/{radar}/{var}/elev*`), and ECMWF (`tiles/models/ecmwf/total_precipitation/{forecast}/{period}`) sequentially. Strategies per domain: `SatelliteFullSyncStrategy` / `SatelliteOnDemandStrategy`, `RadarFullSyncStrategy` / `RadarOnDemandStrategy`, `EcmwfFullSyncStrategy` / `EcmwfOnDemandStrategy`. ECMWF retention controlled by `ecmwf_forecasts_to_keep`.
 - **`BasemapScraperService`** — periodic full-sweep scrape of external providers (IGN, ArcGIS, Google) writing to the `basemap-tiles` bucket + Redis. Resumable via SQLite cursor (`basemap_scrape_state_db_path`). Runs in `basemap_sync_mode ∈ {full, on_demand, no_cache}`; only `full` also writes Redis. Per-provider **circuit breaker** (`basemap_provider_health` table) skips flaky providers for an exponential cooldown when `HttpTileClient` surfaces `ProviderUnavailableError` (exhausted retries / network failures) — state survives restarts. One clean sweep resets the trip counter. A **downstream (S3/Redis) outage** is caught as `_TileOutcome.STORAGE_ERROR`: the scraper skips stamping `last_completed` and floors the next sleep to ~60s so storage recovers automatically instead of waiting a full interval. The bucket **lifecycle policy** is also applied lazily from inside the loop so an S3-down startup self-heals on the next sweep (no hard startup dependency).
 
 `S3Client` uses `aioboto3` with semaphore-limited concurrency (default 5, `s3_max_concurrent_downloads`). HTTP tile fetches use `HttpTileClient` (`httpx.AsyncClient`) with its own concurrency + retry budget.
@@ -105,7 +103,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 **Runtime tuning** — `settings.json` is merged with env vars (env wins). `src/settings.py` is the source of truth for defaults. Every key has a matching `UPPERCASE` env override. Per-domain JSON keys are grouped under a namespace object (`basemap`, `ecmwf`, `radar`); the loader flattens one level back to `<namespace>_<key>` so Python attrs and env vars stay flat (`basemap.tile_ttl` → `settings.basemap_tile_ttl` / `BASEMAP_TILE_TTL`). Groups:
 
 - Shared: `sync_mode`, `tile_ttl`, `radar_tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
-- Sync cadence: `sync_interval_seconds`, `radar_sync_interval_seconds`, `ecmwf_sync_interval_seconds`.
+- Sync cadence: `sync_interval_seconds`, `radar_sync_interval_seconds` (one shared loop drives satellite + radar + ECMWF).
 - ECMWF: `ecmwf_tile_ttl`, `ecmwf_forecasts_to_keep`.
 - Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl` (30 d default), `basemap_scrape_*` (incl. `basemap_scrape_parallelism_mode` — `sequential`/`per_origin`/`full` — and `basemap_scrape_per_host_concurrent`, a per-host request budget stacked under `basemap_scrape_concurrent`), `basemap_provider_unhealthy_threshold` + `basemap_provider_cooldown_schedule` (circuit breaker — consecutive UNAVAILABLE fetches + exponential backoff, state persisted in SQLite `basemap_provider_health`), `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days` (35 d default — strictly greater than scrape interval), `basemap_online_fallback_enabled`, `basemap_provider_presence_ttl`, `basemap_negative_cache_*`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
 
