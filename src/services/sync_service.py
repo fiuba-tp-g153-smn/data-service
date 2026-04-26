@@ -14,6 +14,7 @@ from typing import List, Optional
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
+from services.ecmwf_sync_strategy import is_centered_period_format
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -417,6 +418,7 @@ class SyncService(BaseSyncService):
                     s.rstrip("/").split("/")[-1]
                     for s in period_subdirs
                     if s.rstrip("/").split("/")[-1]
+                    and is_centered_period_format(s.rstrip("/").split("/")[-1])
                 )
 
                 known_periods = await self._redis_client.get_ecmwf_periods(forecast_ts)

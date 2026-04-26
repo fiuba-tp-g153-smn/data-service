@@ -64,7 +64,7 @@ async def list_periods(
         ..., description="Forecast run timestamp (e.g. 20260328T1200Z)"
     ),
 ):
-    """List all 3-hour periods available for a given ECMWF forecast run."""
+    """List all centered 6h precipitation accumulation windows available for a given ECMWF forecast run."""
     data = await ecmwf_service.list_periods(forecast_ts)
     if data is None:
         raise HTTPException(
@@ -96,7 +96,8 @@ async def get_tile(
     request: Request,
     forecast_ts: str = PathParam(..., description="Forecast run timestamp"),
     period_ts: str = PathParam(
-        ..., description="Period timestamp (e.g. 20260329T0300Z-20260329T0600Z)"
+        ...,
+        description="Centered timestamp of a 6h accumulation window (e.g. 20260329T1500Z)",
     ),
     z: int = PathParam(..., description="Zoom level"),
     x: int = PathParam(..., description="Tile X coordinate"),

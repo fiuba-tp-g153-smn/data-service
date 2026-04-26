@@ -6,10 +6,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from clients.s3_client import S3Client
-from services.ecmwf_sync_strategy import EcmwfFullSyncStrategy, EcmwfOnDemandStrategy
+from services.ecmwf_sync_strategy import (
+    EcmwfFullSyncStrategy,
+    EcmwfOnDemandStrategy,
+    is_centered_period_format,
+)
 
 FORECAST_TS = "20260330T1200Z"
-PERIOD_TS = "20260330T1500Z-20260330T1800Z"
+PERIOD_TS = "20260330T1500Z"
 TILE_DATA = b"webp-bytes"
 
 
@@ -200,3 +204,41 @@ async def test_on_demand_list_periods_no_s3_returns_empty(mock_redis_client):
     result = await strategy.list_periods(FORECAST_TS)
 
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_on_demand_list_periods_filters_old_format(mock_redis_client):
+    """On-demand listing drops legacy {start}-{end} period IDs from S3."""
+    mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
+
+    mock_s3 = MagicMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=[
+            f"{S3Client.ECMWF_TILES_PREFIX}/{FORECAST_TS}/20260330T1500Z/",
+            f"{S3Client.ECMWF_TILES_PREFIX}/{FORECAST_TS}/20260330T1200Z-20260330T1500Z/",
+            f"{S3Client.ECMWF_TILES_PREFIX}/{FORECAST_TS}/20260330T1800Z/",
+        ]
+    )
+
+    strategy = EcmwfOnDemandStrategy(mock_redis_client, mock_s3, 3600, 30)
+
+    result = await strategy.list_periods(FORECAST_TS)
+
+    assert result == ["20260330T1500Z", "20260330T1800Z"]
+
+
+# ── is_centered_period_format ─────────────────────────────────────────────────
+
+
+def test_is_centered_period_format_accepts_new_format():
+    assert is_centered_period_format("20260330T1500Z") is True
+    assert is_centered_period_format("20260101T0000Z") is True
+
+
+def test_is_centered_period_format_rejects_legacy_and_garbage():
+    assert is_centered_period_format("20260330T1500Z-20260330T1800Z") is False
+    assert is_centered_period_format("") is False
+    assert is_centered_period_format("garbage") is False
+    assert is_centered_period_format("20260330") is False
+    assert is_centered_period_format("20260330T1500") is False
+    assert is_centered_period_format("2026033T1500Z") is False  # short date

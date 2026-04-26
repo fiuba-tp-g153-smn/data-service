@@ -7,7 +7,7 @@ import pytest
 from services.ecmwf_service import EcmwfService
 
 FORECAST_TS = "20260330T1200Z"
-PERIOD_TS = "20260330T1500Z-20260330T1800Z"
+PERIOD_TS = "20260330T1500Z"
 ALL_FORECASTS = [FORECAST_TS, "20260330T0000Z", "20260329T1200Z"]
 
 
@@ -34,7 +34,7 @@ async def test_list_forecasts_no_strategy_returns_empty():
 @pytest.mark.asyncio
 async def test_list_forecasts_limited_to_forecasts_to_keep():
     service = EcmwfService()
-    periods = [f"p{i}" for i in range(48)]
+    periods = [f"p{i}" for i in range(47)]
     strategy = _make_strategy(forecasts=ALL_FORECASTS, periods=periods)
     service.set_strategy(strategy)
 

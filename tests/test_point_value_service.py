@@ -71,7 +71,7 @@ async def test_sample_ecmwf_point_returns_mm_unit():
     service.set_strategy(strategy)
 
     sample = await service.sample_ecmwf_point(
-        "20260330T1200Z", "20260330T1500Z-20260330T1800Z", -34.0, -58.0
+        "20260330T1200Z", "20260330T1500Z", -34.0, -58.0
     )
 
     assert sample.value == 5.2
@@ -86,12 +86,12 @@ async def test_sample_ecmwf_point_builds_correct_cog_key():
     service.set_strategy(strategy)
 
     await service.sample_ecmwf_point(
-        "20260330T1200Z", "20260330T1500Z-20260330T1800Z", -34.0, -58.0
+        "20260330T1200Z", "20260330T1500Z", -34.0, -58.0
     )
 
     expected_key = (
         "cog/models/ecmwf/total_precipitation"
-        "/20260330T1200Z/20260330T1500Z-20260330T1800Z.tif"
+        "/20260330T1200Z/20260330T1500Z.tif"
     )
     strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)
 
