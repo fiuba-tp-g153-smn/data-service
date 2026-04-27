@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from main import app
-from models.ecmwf import (
+from models.ecmwf_tp import (
     ForecastListResponse,
     ForecastRunInfo,
     PeriodInfo,
     PeriodListResponse,
 )
-from services.ecmwf_service import EcmwfService
+from services.ecmwf_tp_service import EcmwfTotalPrecipitationService
 from services.point_value_service import (
     CogNotFoundError,
     NoDataOrOutsideError,
@@ -35,9 +35,9 @@ def _period_list():
     return PeriodListResponse(
         forecast_ts=FORECAST_TS,
         periods=[PeriodInfo(period_ts=PERIOD_TS)],
-        tile_url_pattern=EcmwfService.TILE_URL_PATTERN,
-        zoom_levels=EcmwfService.ZOOM_LEVELS,
-        bounding_box=EcmwfService.BOUNDING_BOX,
+        tile_url_pattern=EcmwfTotalPrecipitationService.TILE_URL_PATTERN,
+        zoom_levels=EcmwfTotalPrecipitationService.ZOOM_LEVELS,
+        bounding_box=EcmwfTotalPrecipitationService.BOUNDING_BOX,
     )
 
 
@@ -45,7 +45,7 @@ def _period_list():
 
 
 def test_list_forecasts_returns_200():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_forecasts = AsyncMock(return_value=_forecast_list())
 
         response = client.get(BASE)
@@ -58,7 +58,7 @@ def test_list_forecasts_returns_200():
 
 
 def test_list_forecasts_has_cache_headers():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_forecasts = AsyncMock(return_value=_forecast_list())
 
         response = client.get(BASE)
@@ -68,7 +68,7 @@ def test_list_forecasts_has_cache_headers():
 
 
 def test_list_forecasts_304_on_etag_match():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_forecasts = AsyncMock(return_value=_forecast_list())
 
         first = client.get(BASE)
@@ -80,7 +80,7 @@ def test_list_forecasts_304_on_etag_match():
 
 
 def test_list_forecasts_200_on_etag_mismatch():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_forecasts = AsyncMock(return_value=_forecast_list())
 
         response = client.get(BASE, headers={"If-None-Match": '"stale-etag"'})
@@ -92,7 +92,7 @@ def test_list_forecasts_200_on_etag_mismatch():
 
 
 def test_list_periods_returns_200():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_periods = AsyncMock(return_value=_period_list())
 
         response = client.get(f"{BASE}/{FORECAST_TS}")
@@ -105,7 +105,7 @@ def test_list_periods_returns_200():
 
 
 def test_list_periods_returns_404_for_unknown_forecast():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_periods = AsyncMock(return_value=None)
 
         response = client.get(f"{BASE}/99991231T0000Z")
@@ -114,7 +114,7 @@ def test_list_periods_returns_404_for_unknown_forecast():
 
 
 def test_list_periods_304_on_etag_match():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.list_periods = AsyncMock(return_value=_period_list())
 
         first = client.get(f"{BASE}/{FORECAST_TS}")
@@ -129,7 +129,7 @@ def test_list_periods_304_on_etag_match():
 
 
 def test_get_tile_returns_200_webp():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.get_tile_data = AsyncMock(return_value=b"\x52\x49\x46\x46")
 
         response = client.get(f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/5/10/15.webp")
@@ -139,7 +139,7 @@ def test_get_tile_returns_200_webp():
 
 
 def test_get_tile_has_immutable_cache_header():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.get_tile_data = AsyncMock(return_value=b"\x00")
 
         response = client.get(f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/5/0/0.webp")
@@ -148,7 +148,7 @@ def test_get_tile_has_immutable_cache_header():
 
 
 def test_get_tile_returns_404_when_not_found():
-    with patch("routes.ecmwf.ecmwf_service") as mock_svc:
+    with patch("routes.ecmwf_tp.ecmwf_tp_service") as mock_svc:
         mock_svc.get_tile_data = AsyncMock(return_value=None)
 
         response = client.get(f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/5/0/0.webp")
@@ -183,8 +183,8 @@ def test_get_tile_returns_304_on_etag_match():
 
 
 def test_get_point_value_returns_200():
-    with patch("routes.ecmwf.point_value_service") as mock_pv:
-        mock_pv.sample_ecmwf_point = AsyncMock(
+    with patch("routes.ecmwf_tp.point_value_service") as mock_pv:
+        mock_pv.sample_ecmwf_tp_point = AsyncMock(
             return_value=PointSample(value=12.5, unit="mm")
         )
 
@@ -203,8 +203,8 @@ def test_get_point_value_returns_200():
 
 
 def test_get_point_value_returns_404_cog_not_found():
-    with patch("routes.ecmwf.point_value_service") as mock_pv:
-        mock_pv.sample_ecmwf_point = AsyncMock(side_effect=CogNotFoundError())
+    with patch("routes.ecmwf_tp.point_value_service") as mock_pv:
+        mock_pv.sample_ecmwf_tp_point = AsyncMock(side_effect=CogNotFoundError())
 
         response = client.get(
             f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-34.6&lon=-58.4"
@@ -215,8 +215,8 @@ def test_get_point_value_returns_404_cog_not_found():
 
 
 def test_get_point_value_returns_404_nodata_or_outside():
-    with patch("routes.ecmwf.point_value_service") as mock_pv:
-        mock_pv.sample_ecmwf_point = AsyncMock(side_effect=NoDataOrOutsideError())
+    with patch("routes.ecmwf_tp.point_value_service") as mock_pv:
+        mock_pv.sample_ecmwf_tp_point = AsyncMock(side_effect=NoDataOrOutsideError())
 
         response = client.get(
             f"{BASE}/{FORECAST_TS}/{PERIOD_TS}/point?lat=-34.6&lon=-58.4"

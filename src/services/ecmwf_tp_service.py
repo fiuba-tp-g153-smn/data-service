@@ -4,17 +4,17 @@ from typing import List, Optional
 
 from dependencies import settings
 from models.base import BoundingBox, ZoomLevels
-from models.ecmwf import (
+from models.ecmwf_tp import (
     ForecastListResponse,
     ForecastRunInfo,
     PeriodInfo,
     PeriodListResponse,
 )
 from services.base_service import BaseProductService
-from services.ecmwf_sync_strategy import EcmwfSyncStrategy
+from services.ecmwf_tp_sync_strategy import EcmwfTpSyncStrategy
 
 
-class EcmwfService(BaseProductService):
+class EcmwfTotalPrecipitationService(BaseProductService):
     """Service managing ECMWF precipitation forecast tiles and COGs."""
 
     ZOOM_LEVELS = ZoomLevels(min=3, max=7)
@@ -24,9 +24,9 @@ class EcmwfService(BaseProductService):
     )
 
     def __init__(self) -> None:
-        self._strategy: Optional[EcmwfSyncStrategy] = None
+        self._strategy: Optional[EcmwfTpSyncStrategy] = None
 
-    def set_strategy(self, strategy: EcmwfSyncStrategy) -> None:
+    def set_strategy(self, strategy: EcmwfTpSyncStrategy) -> None:
         """Set the sync strategy (called during app startup)."""
         self._strategy = strategy
 
@@ -74,4 +74,4 @@ class EcmwfService(BaseProductService):
         return await self._strategy.get_tile(forecast_ts, period_ts, z, x, y)
 
 
-ecmwf_service = EcmwfService()
+ecmwf_tp_service = EcmwfTotalPrecipitationService()

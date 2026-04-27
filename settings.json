@@ -13,6 +13,9 @@
     "tile_ttl": 86400,
     "forecasts_to_keep": 2
   },
+  "ecmwf_mslp": {
+    "geojson_ttl": 86400
+  },
   "basemap": {
     "sync_mode": "no_cache",
     "tile_ttl": 2592000,

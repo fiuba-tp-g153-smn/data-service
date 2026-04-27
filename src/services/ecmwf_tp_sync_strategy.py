@@ -1,4 +1,4 @@
-"""Sync strategies for ECMWF precipitation tile retrieval."""
+"""Sync strategies for ECMWF total precipitation tile retrieval."""
 
 import asyncio
 import json
@@ -16,8 +16,8 @@ def is_centered_period_format(period_ts: str) -> bool:
     return bool(_CENTERED_PERIOD_PATTERN.fullmatch(period_ts))
 
 
-class EcmwfSyncStrategy(Protocol):
-    """Protocol for ECMWF sync strategies."""
+class EcmwfTpSyncStrategy(Protocol):
+    """Protocol for ECMWF total precipitation sync strategies."""
 
     async def get_tile(
         self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
@@ -31,7 +31,7 @@ class EcmwfSyncStrategy(Protocol):
         """List period timestamps for a forecast, sorted ascending."""
 
 
-class EcmwfFullSyncStrategy:
+class EcmwfTpFullSyncStrategy:
     """Reads from pre-populated Redis (background sync fills it)."""
 
     def __init__(self, redis_client: RedisClient):
@@ -41,18 +41,18 @@ class EcmwfFullSyncStrategy:
         self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
         """Get tile data from Redis (pre-populated by background sync)."""
-        return await self._redis.get_ecmwf_tile(forecast_ts, period_ts, z, x, y)
+        return await self._redis.get_ecmwf_tp_tile(forecast_ts, period_ts, z, x, y)
 
     async def list_forecasts(self) -> List[str]:
         """List forecast timestamps from the Redis index, sorted descending."""
-        return await self._redis.get_ecmwf_forecasts()
+        return await self._redis.get_ecmwf_tp_forecasts()
 
     async def list_periods(self, forecast_ts: str) -> List[str]:
         """List period timestamps for a forecast from Redis, sorted ascending."""
-        return await self._redis.get_ecmwf_periods(forecast_ts)
+        return await self._redis.get_ecmwf_tp_periods(forecast_ts)
 
 
-class EcmwfOnDemandStrategy:
+class EcmwfTpOnDemandStrategy:
     """Tries Redis first, falls back to S3, caches with TTL."""
 
     def __init__(
@@ -71,18 +71,18 @@ class EcmwfOnDemandStrategy:
         self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
         """Get tile data: Redis first, fall back to S3 and cache the result."""
-        data = await self._redis.get_ecmwf_tile(forecast_ts, period_ts, z, x, y)
+        data = await self._redis.get_ecmwf_tp_tile(forecast_ts, period_ts, z, x, y)
         if data:
             return data
 
         if not self._s3:
             return None
 
-        s3_key = S3Client.build_ecmwf_tile_key(forecast_ts, period_ts, z, x, y)
+        s3_key = S3Client.build_ecmwf_tp_tile_key(forecast_ts, period_ts, z, x, y)
         data = await self._s3.download_tile(s3_key)
         if data:
             asyncio.create_task(
-                self._redis.store_ecmwf_tile(
+                self._redis.store_ecmwf_tp_tile(
                     forecast_ts, period_ts, z, x, y, data, ttl=self._tile_ttl
                 )
             )
@@ -90,7 +90,7 @@ class EcmwfOnDemandStrategy:
 
     async def list_forecasts(self) -> List[str]:
         """List forecast timestamps: cached listing first, fall back to S3."""
-        cache_key = "cache:listing:ecmwf:forecasts"
+        cache_key = "cache:listing:ecmwf_tp:forecasts"
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
             return json.loads(cached)
@@ -98,7 +98,7 @@ class EcmwfOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
+        subdirs = await self._s3.get_subdirectories(S3Client.ECMWF_TP_TILES_PREFIX)
         forecasts = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -115,7 +115,7 @@ class EcmwfOnDemandStrategy:
 
     async def list_periods(self, forecast_ts: str) -> List[str]:
         """List period timestamps for a forecast: cached listing first, fall back to S3."""
-        cache_key = f"cache:listing:ecmwf:{forecast_ts}:periods"
+        cache_key = f"cache:listing:ecmwf_tp:{forecast_ts}:periods"
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
             return json.loads(cached)
@@ -123,7 +123,7 @@ class EcmwfOnDemandStrategy:
         if not self._s3:
             return []
 
-        prefix = f"{S3Client.ECMWF_TILES_PREFIX}/{forecast_ts}"
+        prefix = f"{S3Client.ECMWF_TP_TILES_PREFIX}/{forecast_ts}"
         subdirs = await self._s3.get_subdirectories(prefix)
         periods = sorted(
             s.rstrip("/").split("/")[-1]

@@ -36,8 +36,8 @@ class PeriodListResponse(BaseModel):
     bounding_box: BoundingBox
 
 
-class EcmwfPointValueResponse(BaseModel):
-    """Response for a point-value query on an ECMWF COG."""
+class EcmwfTpPointValueResponse(BaseModel):
+    """Response for a point-value query on an ECMWF total precipitation COG."""
 
     forecast_ts: str
     period_ts: str

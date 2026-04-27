@@ -38,14 +38,23 @@ def mock_redis_client():
     client.update_sync_status = AsyncMock()
     client.get_sync_status = AsyncMock(return_value={})
 
-    # ECMWF tile operations
-    client.store_ecmwf_tile = AsyncMock()
-    client.get_ecmwf_tile = AsyncMock(return_value=None)
+    # ECMWF total precipitation tile operations
+    client.store_ecmwf_tp_tile = AsyncMock()
+    client.get_ecmwf_tp_tile = AsyncMock(return_value=None)
 
-    # ECMWF index operations
-    client.store_ecmwf_index = AsyncMock()
-    client.get_ecmwf_forecasts = AsyncMock(return_value=[])
-    client.get_ecmwf_periods = AsyncMock(return_value=[])
+    # ECMWF total precipitation index operations
+    client.store_ecmwf_tp_index = AsyncMock()
+    client.get_ecmwf_tp_forecasts = AsyncMock(return_value=[])
+    client.get_ecmwf_tp_periods = AsyncMock(return_value=[])
+
+    # ECMWF MSLP GeoJSON operations
+    client.store_ecmwf_mslp_geojson = AsyncMock()
+    client.get_ecmwf_mslp_geojson = AsyncMock(return_value=None)
+
+    # ECMWF MSLP index operations
+    client.store_ecmwf_mslp_index = AsyncMock()
+    client.get_ecmwf_mslp_forecasts = AsyncMock(return_value=[])
+    client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
 
     # Listing cache (shared across sources)
     client.get_cached_listing = AsyncMock(return_value=None)
