@@ -217,9 +217,9 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         )
         return sorted((m.decode() for m in members), reverse=True)
 
-    # ============== ECMWF Tile Operations ==============
+    # ============== ECMWF Total Precipitation Tile Operations ==============
 
-    async def store_ecmwf_tile(
+    async def store_ecmwf_tp_tile(
         self,
         forecast_ts: str,
         period_ts: str,
@@ -230,33 +230,33 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         ttl: Optional[int] = None,
     ) -> None:
         # pylint: disable=too-many-arguments
-        """Store an ECMWF precipitation tile in Redis, optionally with TTL."""
-        key = f"tile:ecmwf:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
+        """Store an ECMWF total precipitation tile in Redis, optionally with TTL."""
+        key = f"tile:ecmwf_tp:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
         if ttl:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
 
-    async def get_ecmwf_tile(
+    async def get_ecmwf_tp_tile(
         self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Get an ECMWF precipitation tile from Redis."""
-        key = f"tile:ecmwf:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
+        """Get an ECMWF total precipitation tile from Redis."""
+        key = f"tile:ecmwf_tp:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
         return await self._conn.get(key)
 
-    # ============== ECMWF Index Operations ==============
+    # ============== ECMWF Total Precipitation Index Operations ==============
 
-    async def store_ecmwf_index(
+    async def store_ecmwf_tp_index(
         self, forecast_ts: str, periods: List[str], ttl: int
     ) -> None:
-        """Add forecast and its periods to the ECMWF Redis index."""
+        """Add forecast and its periods to the ECMWF total precipitation Redis index."""
         pipe = await self._conn.pipeline()
 
-        forecasts_key = "idx:ecmwf:forecasts"
+        forecasts_key = "idx:ecmwf_tp:forecasts"
         pipe.sadd(forecasts_key, forecast_ts.encode())
         pipe.expire(forecasts_key, ttl)
 
-        periods_key = f"idx:ecmwf:{forecast_ts}:periods"
+        periods_key = f"idx:ecmwf_tp:{forecast_ts}:periods"
         for period in periods:
             pipe.sadd(periods_key, period.encode())
         if periods:
@@ -264,15 +264,70 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
 
         await pipe.execute()
 
-    async def get_ecmwf_forecasts(self) -> List[str]:
+    async def get_ecmwf_tp_forecasts(self) -> List[str]:
         """Get all available forecast timestamps, sorted descending."""
-        members = await self._conn.smembers("idx:ecmwf:forecasts")  # type: ignore[misc]
+        members = await self._conn.smembers("idx:ecmwf_tp:forecasts")  # type: ignore[misc]
         return sorted((m.decode() for m in members), reverse=True)
 
-    async def get_ecmwf_periods(self, forecast_ts: str) -> List[str]:
+    async def get_ecmwf_tp_periods(self, forecast_ts: str) -> List[str]:
         """Get all period timestamps for a forecast, sorted ascending."""
         members = await self._conn.smembers(  # type: ignore[misc]
-            f"idx:ecmwf:{forecast_ts}:periods"
+            f"idx:ecmwf_tp:{forecast_ts}:periods"
+        )
+        return sorted(m.decode() for m in members)
+
+    # ============== ECMWF Mean Sea Level Pressure GeoJSON Operations ==============
+
+    async def store_ecmwf_mslp_geojson(
+        self,
+        forecast_ts: str,
+        timestamp_ts: str,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        """Store an ECMWF MSLP isobars GeoJSON in Redis, optionally with TTL."""
+        key = f"geojson:ecmwf_mslp:{forecast_ts}/{timestamp_ts}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_ecmwf_mslp_geojson(
+        self, forecast_ts: str, timestamp_ts: str
+    ) -> Optional[bytes]:
+        """Get an ECMWF MSLP isobars GeoJSON from Redis."""
+        key = f"geojson:ecmwf_mslp:{forecast_ts}/{timestamp_ts}"
+        return await self._conn.get(key)
+
+    # ============== ECMWF Mean Sea Level Pressure Index Operations ==============
+
+    async def store_ecmwf_mslp_index(
+        self, forecast_ts: str, timestamps: List[str], ttl: int
+    ) -> None:
+        """Add forecast and its timestamps to the ECMWF MSLP Redis index."""
+        pipe = await self._conn.pipeline()
+
+        forecasts_key = "idx:ecmwf_mslp:forecasts"
+        pipe.sadd(forecasts_key, forecast_ts.encode())
+        pipe.expire(forecasts_key, ttl)
+
+        timestamps_key = f"idx:ecmwf_mslp:{forecast_ts}:timestamps"
+        for timestamp_ts in timestamps:
+            pipe.sadd(timestamps_key, timestamp_ts.encode())
+        if timestamps:
+            pipe.expire(timestamps_key, ttl)
+
+        await pipe.execute()
+
+    async def get_ecmwf_mslp_forecasts(self) -> List[str]:
+        """Get all available MSLP forecast timestamps, sorted descending."""
+        members = await self._conn.smembers("idx:ecmwf_mslp:forecasts")  # type: ignore[misc]
+        return sorted((m.decode() for m in members), reverse=True)
+
+    async def get_ecmwf_mslp_timestamps(self, forecast_ts: str) -> List[str]:
+        """Get all MSLP timestamps for a forecast, sorted ascending."""
+        members = await self._conn.smembers(  # type: ignore[misc]
+            f"idx:ecmwf_mslp:{forecast_ts}:timestamps"
         )
         return sorted(m.decode() for m in members)
 

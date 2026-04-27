@@ -203,30 +203,32 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Error listing objects: %s", e)
         return objects
 
-    ECMWF_TILES_PREFIX = "tiles/models/ecmwf/total_precipitation"
-    ECMWF_COG_PREFIX = "cog/models/ecmwf/total_precipitation"
+    ECMWF_TP_TILES_PREFIX = "tiles/models/ecmwf/total_precipitation"
+    ECMWF_TP_COG_PREFIX = "cog/models/ecmwf/total_precipitation"
+    ECMWF_MSLP_COG_PREFIX = "cog/models/ecmwf/mean_sea_level_pressure"
+    ECMWF_MSLP_GEOJSON_PREFIX = "geojson/models/ecmwf/mean_sea_level_pressure"
 
     @staticmethod
-    def build_ecmwf_tile_key(
+    def build_ecmwf_tp_tile_key(
         forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> str:
-        """Build S3 key for an ECMWF precipitation tile."""
+        """Build S3 key for an ECMWF total precipitation tile."""
         return f"tiles/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
 
     @staticmethod
-    def build_ecmwf_cog_key(forecast_ts: str, period_ts: str) -> str:
-        """Build S3 key for an ECMWF precipitation COG."""
+    def build_ecmwf_tp_cog_key(forecast_ts: str, period_ts: str) -> str:
+        """Build S3 key for an ECMWF total precipitation COG."""
         return f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
 
-    async def sync_ecmwf_period_to_redis(
+    async def sync_ecmwf_tp_period_to_redis(
         self,
         redis_client: RedisClient,
         forecast_ts: str,
         period_ts: str,
         tile_ttl: int,
     ) -> int:
-        """Download all tiles for an ECMWF period from S3 and store in Redis."""
-        s3_prefix = f"{self.ECMWF_TILES_PREFIX}/{forecast_ts}/{period_ts}/"
+        """Download all tiles for an ECMWF total precipitation period from S3 and store in Redis."""
+        s3_prefix = f"{self.ECMWF_TP_TILES_PREFIX}/{forecast_ts}/{period_ts}/"
         await self._ensure_connected()
         s3_objects = await self._list_objects(s3_prefix)
 
@@ -235,14 +237,14 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             return 0
 
         logger.info(
-            "Downloading %d ECMWF tiles for %s/%s",
+            "Downloading %d ECMWF-TP tiles for %s/%s",
             len(tile_objects),
             forecast_ts,
             period_ts,
         )
 
         tasks = [
-            self._download_ecmwf_tile_to_redis(
+            self._download_ecmwf_tp_tile_to_redis(
                 redis_client, obj["Key"], forecast_ts, period_ts, tile_ttl
             )
             for obj in tile_objects
@@ -250,7 +252,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         results = await asyncio.gather(*tasks, return_exceptions=True)
         return sum(1 for r in results if r is True)
 
-    async def _download_ecmwf_tile_to_redis(
+    async def _download_ecmwf_tp_tile_to_redis(
         self,
         redis_client: RedisClient,
         s3_key: str,
@@ -259,7 +261,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         tile_ttl: int,
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
-        """Download a single ECMWF tile from S3 and store in Redis."""
+        """Download a single ECMWF total precipitation tile from S3 and store in Redis."""
         if self._client is None:
             raise RuntimeError("S3 client is not connected")
 
@@ -276,7 +278,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 async with response["Body"] as stream:
                     content = await stream.read()
 
-                await redis_client.store_ecmwf_tile(
+                await redis_client.store_ecmwf_tp_tile(
                     forecast_ts,
                     period_ts,
                     int(z),
@@ -287,7 +289,96 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
-                logger.error("Failed to download ECMWF tile %s: %s", s3_key, e)
+                logger.error("Failed to download ECMWF-TP tile %s: %s", s3_key, e)
+                return False
+
+    @staticmethod
+    def build_ecmwf_mslp_cog_key(forecast_ts: str, timestamp_ts: str) -> str:
+        """Build S3 key for an ECMWF mean sea level pressure COG."""
+        return (
+            f"cog/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.tif"
+        )
+
+    @staticmethod
+    def build_ecmwf_mslp_geojson_key(forecast_ts: str, timestamp_ts: str) -> str:
+        """Build S3 key for an ECMWF mean sea level pressure isobars GeoJSON."""
+        return f"geojson/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json"
+
+    async def list_object_basenames(self, prefix: str, suffix: str) -> List[str]:
+        """List basenames (without `suffix`) of objects directly under `prefix` ending in `suffix`.
+
+        Example: list_object_basenames("cog/.../{forecast_ts}/", ".tif") yields
+        ["20260413T1500Z", "20260413T1800Z", ...].
+        """
+        await self._ensure_connected()
+        objects = await self._list_objects(prefix)
+        names: List[str] = []
+        for obj in objects:
+            key = obj["Key"]
+            if not key.endswith(suffix):
+                continue
+            tail = key[len(prefix) :].lstrip("/")
+            # Skip objects that live in deeper sub-prefixes.
+            if "/" in tail:
+                continue
+            names.append(tail[: -len(suffix)])
+        return names
+
+    async def sync_ecmwf_mslp_forecast_to_redis(
+        self,
+        redis_client: RedisClient,
+        forecast_ts: str,
+        timestamps: List[str],
+        geojson_ttl: int,
+    ) -> int:
+        """Download all GeoJSON files for a forecast from S3 and store in Redis.
+
+        Returns the count of GeoJSONs successfully stored.
+        """
+        if not timestamps:
+            return 0
+
+        await self._ensure_connected()
+        logger.info(
+            "Downloading %d ECMWF-MSLP GeoJSONs for %s",
+            len(timestamps),
+            forecast_ts,
+        )
+
+        tasks = [
+            self._download_ecmwf_mslp_geojson_to_redis(
+                redis_client, forecast_ts, timestamp_ts, geojson_ttl
+            )
+            for timestamp_ts in timestamps
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return sum(1 for r in results if r is True)
+
+    async def _download_ecmwf_mslp_geojson_to_redis(
+        self,
+        redis_client: RedisClient,
+        forecast_ts: str,
+        timestamp_ts: str,
+        geojson_ttl: int,
+    ) -> bool:
+        """Download a single MSLP GeoJSON from S3 and store in Redis."""
+        if self._client is None:
+            raise RuntimeError("S3 client is not connected")
+
+        client = self._client
+        s3_key = self.build_ecmwf_mslp_geojson_key(forecast_ts, timestamp_ts)
+        async with self._semaphore:
+            try:
+                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+                async with response["Body"] as stream:
+                    content = await stream.read()
+
+                await redis_client.store_ecmwf_mslp_geojson(
+                    forecast_ts, timestamp_ts, content, ttl=geojson_ttl
+                )
+                return True
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to download ECMWF-MSLP GeoJSON %s: %s", s3_key, e)
                 return False
 
     @staticmethod

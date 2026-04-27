@@ -53,6 +53,7 @@ class PointValueService(BaseProductService):
 
     MODEL_UNITS = {
         "ecmwf_total_precipitation": "mm",
+        "ecmwf_mean_sea_level_pressure": "hPa",
     }
 
     def set_strategy(self, strategy: PointValueStrategy) -> None:
@@ -87,16 +88,32 @@ class PointValueService(BaseProductService):
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
 
-    async def sample_ecmwf_point(
+    async def sample_ecmwf_tp_point(
         self,
         forecast_ts: str,
         period_ts: str,
         lat: float,
         lon: float,
     ) -> PointSample:
-        """Sample an ECMWF precipitation COG at a specific coordinate."""
+        """Sample an ECMWF total precipitation COG at a specific coordinate."""
         cog_key = f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
         unit = self.MODEL_UNITS.get("ecmwf_total_precipitation", "1")
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit=unit)
+
+    async def sample_ecmwf_mslp_point(
+        self,
+        forecast_ts: str,
+        timestamp_ts: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        """Sample an ECMWF mean sea level pressure COG at a specific coordinate."""
+        cog_key = (
+            f"cog/models/ecmwf/mean_sea_level_pressure/"
+            f"{forecast_ts}/{timestamp_ts}.tif"
+        )
+        unit = self.MODEL_UNITS.get("ecmwf_mean_sea_level_pressure", "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
 

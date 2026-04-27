@@ -9,20 +9,20 @@ from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
-from models.ecmwf import (
-    EcmwfPointValueResponse,
+from models.ecmwf_tp import (
+    EcmwfTpPointValueResponse,
     ForecastListResponse,
     PeriodListResponse,
 )
 from routes.utils import create_tile_response
-from services.ecmwf_service import ecmwf_service
+from services.ecmwf_tp_service import ecmwf_tp_service
 from services.point_value_service import (
     CogNotFoundError,
     NoDataOrOutsideError,
     point_value_service,
 )
 
-router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF"])
+router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF Total Precipitation"])
 
 _ZOOM_MIN = 3
 _ZOOM_MAX = 7
@@ -36,7 +36,7 @@ _ZOOM_MAX = 7
 )
 async def list_forecasts(request: Request):
     """List available ECMWF total precipitation forecast runs."""
-    data = await ecmwf_service.list_forecasts()
+    data = await ecmwf_tp_service.list_forecasts()
     payload = data.model_dump()
     etag = (
         f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
@@ -65,7 +65,7 @@ async def list_periods(
     ),
 ):
     """List all centered 6h precipitation accumulation windows available for a given ECMWF forecast run."""
-    data = await ecmwf_service.list_periods(forecast_ts)
+    data = await ecmwf_tp_service.list_periods(forecast_ts)
     if data is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -116,7 +116,7 @@ async def get_tile(
     if if_none_match and if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
-    tile_data = await ecmwf_service.get_tile_data(forecast_ts, period_ts, z, x, y)
+    tile_data = await ecmwf_tp_service.get_tile_data(forecast_ts, period_ts, z, x, y)
     if not tile_data:
         logger.warning(
             "ECMWF tile not found: %s/%s/%s/%s/%s", forecast_ts, period_ts, z, x, y
@@ -132,7 +132,7 @@ async def get_tile(
     "/total-precipitation/{forecast_ts}/{period_ts}/point",
     status_code=status.HTTP_200_OK,
     summary="Get ECMWF Point Value",
-    response_model=EcmwfPointValueResponse,
+    response_model=EcmwfTpPointValueResponse,
 )
 async def get_point_value(
     forecast_ts: str = PathParam(..., description="Forecast run timestamp"),
@@ -142,7 +142,7 @@ async def get_point_value(
 ):
     """Sample nearest precipitation value (mm) from the ECMWF COG at a lat/lon point."""
     try:
-        sample = await point_value_service.sample_ecmwf_point(
+        sample = await point_value_service.sample_ecmwf_tp_point(
             forecast_ts, period_ts, lat, lon
         )
     except CogNotFoundError as exc:
@@ -154,7 +154,7 @@ async def get_point_value(
             status_code=status.HTTP_404_NOT_FOUND, detail="nodata_or_outside"
         ) from exc
 
-    return EcmwfPointValueResponse(
+    return EcmwfTpPointValueResponse(
         forecast_ts=forecast_ts,
         period_ts=period_ts,
         lat=lat,

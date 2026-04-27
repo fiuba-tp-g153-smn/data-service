@@ -16,15 +16,21 @@ from clients.s3_client import S3Client
 from controller import general
 from dependencies import basemap_service, logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
-from routes import basemap, ecmwf, radar, satellite, sync
+from routes import basemap, ecmwf_mslp, ecmwf_tp, radar, satellite, sync
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_tile_reader import BasemapTileReader
-from services.ecmwf_service import ecmwf_service
-from services.ecmwf_sync_strategy import (
-    EcmwfFullSyncStrategy,
-    EcmwfOnDemandStrategy,
-    EcmwfSyncStrategy,
+from services.ecmwf_mslp_service import ecmwf_mslp_service
+from services.ecmwf_mslp_sync_strategy import (
+    EcmwfMslpFullSyncStrategy,
+    EcmwfMslpOnDemandStrategy,
+    EcmwfMslpSyncStrategy,
+)
+from services.ecmwf_tp_service import ecmwf_tp_service
+from services.ecmwf_tp_sync_strategy import (
+    EcmwfTpFullSyncStrategy,
+    EcmwfTpOnDemandStrategy,
+    EcmwfTpSyncStrategy,
 )
 from services.point_value_service import point_value_service
 from services.point_value_strategy import S3CogPointValueStrategy
@@ -64,7 +70,8 @@ async def configure_strategies(
 ) -> tuple[
     SatelliteSyncStrategy,
     RadarSyncStrategy,
-    EcmwfSyncStrategy,
+    EcmwfTpSyncStrategy,
+    EcmwfMslpSyncStrategy,
     S3CogPointValueStrategy,
     Optional[S3Client],
 ]:
@@ -72,6 +79,8 @@ async def configure_strategies(
     s3_client = None
     sat_strategy: SatelliteSyncStrategy
     radar_strategy: RadarSyncStrategy
+    ecmwf_tp_strategy: EcmwfTpSyncStrategy
+    ecmwf_mslp_strategy: EcmwfMslpSyncStrategy
 
     if settings.is_s3_configured():
         s3_client = S3Client(
@@ -90,7 +99,8 @@ async def configure_strategies(
         # Background sync mode (default)
         sat_strategy = SatelliteFullSyncStrategy(client_redis)
         radar_strategy = RadarFullSyncStrategy(client_redis)
-        ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
+        ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(client_redis)
+        ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(client_redis)
 
         sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)
@@ -110,14 +120,27 @@ async def configure_strategies(
             settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
         )
-        ecmwf_strategy = EcmwfOnDemandStrategy(
+        ecmwf_tp_strategy = EcmwfTpOnDemandStrategy(
             client_redis,
             s3_client,
             settings.ecmwf_tile_ttl,
             settings.tileset_listing_ttl,
         )
+        ecmwf_mslp_strategy = EcmwfMslpOnDemandStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_mslp_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
 
-    return sat_strategy, radar_strategy, ecmwf_strategy, point_value_strategy, s3_client
+    return (
+        sat_strategy,
+        radar_strategy,
+        ecmwf_tp_strategy,
+        ecmwf_mslp_strategy,
+        point_value_strategy,
+        s3_client,
+    )
 
 
 async def configure_basemap(
@@ -305,13 +328,19 @@ async def lifespan(_app: FastAPI):
     configure_gdal_vsi_s3()
     await redis_client.connect()
 
-    sat_strategy, radar_strategy, ecmwf_strategy, point_value_strategy, s3_client = (
-        await configure_strategies(redis_client)
-    )
+    (
+        sat_strategy,
+        radar_strategy,
+        ecmwf_tp_strategy,
+        ecmwf_mslp_strategy,
+        point_value_strategy,
+        s3_client,
+    ) = await configure_strategies(redis_client)
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
-    ecmwf_service.set_strategy(ecmwf_strategy)
+    ecmwf_tp_service.set_strategy(ecmwf_tp_strategy)
+    ecmwf_mslp_service.set_strategy(ecmwf_mslp_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
     basemap_runtime = await configure_basemap(redis_client)
@@ -349,6 +378,7 @@ app.add_middleware(
 app.include_router(general.router)
 app.include_router(basemap.router)  # Base map tile proxy
 app.include_router(radar.router)  # Radar routes (most specific)
-app.include_router(ecmwf.router)  # ECMWF precipitation routes
+app.include_router(ecmwf_tp.router)  # ECMWF total precipitation routes
+app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability

@@ -14,7 +14,7 @@ from typing import List, Optional
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
-from services.ecmwf_sync_strategy import is_centered_period_format
+from services.ecmwf_tp_sync_strategy import is_centered_period_format
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -129,10 +129,16 @@ class SyncService(BaseSyncService):
 
         sat_downloaded, sat_errors = await self._sync_satellite_prefixes()
         radar_downloaded, radar_errors = await self._sync_radar()
-        ecmwf_downloaded, ecmwf_errors = await self._sync_ecmwf()
+        ecmwf_tp_downloaded, ecmwf_tp_errors = await self._sync_ecmwf_tp()
+        ecmwf_mslp_downloaded, ecmwf_mslp_errors = await self._sync_ecmwf_mslp()
 
-        errors = sat_errors + radar_errors + ecmwf_errors
-        total_downloaded = sat_downloaded + radar_downloaded + ecmwf_downloaded
+        errors = sat_errors + radar_errors + ecmwf_tp_errors + ecmwf_mslp_errors
+        total_downloaded = (
+            sat_downloaded
+            + radar_downloaded
+            + ecmwf_tp_downloaded
+            + ecmwf_mslp_downloaded
+        )
 
         self._total_cycles += 1
         if errors == 0:
@@ -172,14 +178,16 @@ class SyncService(BaseSyncService):
         logger.info(
             "Sync cycle #%d done in %dms | sat: %d new tiles / %d tilesets"
             " | radar: %d new tiles / %d tilesets"
-            " | ecmwf: %d new tiles | errors: %d",
+            " | ecmwf-tp: %d new tiles | ecmwf-mslp: %d new geojsons"
+            " | errors: %d",
             self._total_cycles,
             duration_ms,
             sat_downloaded,
             sat_count,
             radar_downloaded,
             radar_count,
-            ecmwf_downloaded,
+            ecmwf_tp_downloaded,
+            ecmwf_mslp_downloaded,
             errors,
         )
         if self._consecutive_failures > 0:
@@ -386,8 +394,8 @@ class SyncService(BaseSyncService):
                     count += len(tilesets)
         return count
 
-    async def _sync_ecmwf(self) -> tuple:
-        """Sync ECMWF forecasts/periods from S3 to Redis. Returns (downloaded, errors)."""
+    async def _sync_ecmwf_tp(self) -> tuple:
+        """Sync ECMWF total precipitation forecasts/periods from S3 to Redis. Returns (downloaded, errors)."""
         if self._client is None or self._redis_client is None:
             raise RuntimeError("S3 or Redis client is not initialized")
 
@@ -395,7 +403,9 @@ class SyncService(BaseSyncService):
         errors = 0
 
         try:
-            subdirs = await self._client.get_subdirectories(S3Client.ECMWF_TILES_PREFIX)
+            subdirs = await self._client.get_subdirectories(
+                S3Client.ECMWF_TP_TILES_PREFIX
+            )
             all_forecasts = sorted(
                 (
                     s.rstrip("/").split("/")[-1]
@@ -407,12 +417,12 @@ class SyncService(BaseSyncService):
             active_forecasts = all_forecasts[: self._settings.ecmwf_forecasts_to_keep]
 
             if not active_forecasts:
-                logger.debug("ECMWF sync: no forecasts found in S3")
+                logger.debug("ECMWF-TP sync: no forecasts found in S3")
                 return 0, 0
 
             for forecast_ts in active_forecasts:
                 period_subdirs = await self._client.get_subdirectories(
-                    f"{S3Client.ECMWF_TILES_PREFIX}/{forecast_ts}"
+                    f"{S3Client.ECMWF_TP_TILES_PREFIX}/{forecast_ts}"
                 )
                 periods = sorted(
                     s.rstrip("/").split("/")[-1]
@@ -421,11 +431,13 @@ class SyncService(BaseSyncService):
                     and is_centered_period_format(s.rstrip("/").split("/")[-1])
                 )
 
-                known_periods = await self._redis_client.get_ecmwf_periods(forecast_ts)
+                known_periods = await self._redis_client.get_ecmwf_tp_periods(
+                    forecast_ts
+                )
                 new_periods = [p for p in periods if p not in known_periods]
 
                 for period_ts in new_periods:
-                    stored = await self._client.sync_ecmwf_period_to_redis(
+                    stored = await self._client.sync_ecmwf_tp_period_to_redis(
                         self._redis_client,
                         forecast_ts,
                         period_ts,
@@ -433,21 +445,86 @@ class SyncService(BaseSyncService):
                     )
                     total_downloaded += stored
                     logger.info(
-                        "ECMWF synced %d tiles for %s/%s",
+                        "ECMWF-TP synced %d tiles for %s/%s",
                         stored,
                         forecast_ts,
                         period_ts,
                     )
 
-                await self._redis_client.store_ecmwf_index(
+                await self._redis_client.store_ecmwf_tp_index(
                     forecast_ts, periods, self._settings.ecmwf_tile_ttl
                 )
 
             logger.debug(
-                "ECMWF sync complete: %d forecasts active", len(active_forecasts)
+                "ECMWF-TP sync complete: %d forecasts active", len(active_forecasts)
             )
         except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("ECMWF sync error: %s", e)
+            logger.error("ECMWF-TP sync error: %s", e)
+            errors += 1
+
+        return total_downloaded, errors
+
+    async def _sync_ecmwf_mslp(self) -> tuple:
+        """Sync ECMWF MSLP forecasts/timestamps from S3 to Redis. Returns (downloaded, errors)."""
+        if self._client is None or self._redis_client is None:
+            raise RuntimeError("S3 or Redis client is not initialized")
+
+        total_downloaded = 0
+        errors = 0
+
+        try:
+            subdirs = await self._client.get_subdirectories(
+                S3Client.ECMWF_MSLP_COG_PREFIX
+            )
+            all_forecasts = sorted(
+                (
+                    s.rstrip("/").split("/")[-1]
+                    for s in subdirs
+                    if s.rstrip("/").split("/")[-1]
+                ),
+                reverse=True,
+            )
+            active_forecasts = all_forecasts[: self._settings.ecmwf_forecasts_to_keep]
+
+            if not active_forecasts:
+                logger.debug("ECMWF-MSLP sync: no forecasts found in S3")
+                return 0, 0
+
+            for forecast_ts in active_forecasts:
+                basenames = await self._client.list_object_basenames(
+                    f"{S3Client.ECMWF_MSLP_COG_PREFIX}/{forecast_ts}/", ".tif"
+                )
+                timestamps = sorted(
+                    b for b in basenames if is_centered_period_format(b)
+                )
+
+                known_timestamps = await self._redis_client.get_ecmwf_mslp_timestamps(
+                    forecast_ts
+                )
+                new_timestamps = [t for t in timestamps if t not in known_timestamps]
+
+                if new_timestamps:
+                    stored = await self._client.sync_ecmwf_mslp_forecast_to_redis(
+                        self._redis_client,
+                        forecast_ts,
+                        new_timestamps,
+                        self._settings.ecmwf_mslp_geojson_ttl,
+                    )
+                    total_downloaded += stored
+                    logger.info(
+                        "ECMWF-MSLP synced %d geojsons for %s", stored, forecast_ts
+                    )
+
+                await self._redis_client.store_ecmwf_mslp_index(
+                    forecast_ts, timestamps, self._settings.ecmwf_mslp_geojson_ttl
+                )
+
+            logger.debug(
+                "ECMWF-MSLP sync complete: %d forecasts active",
+                len(active_forecasts),
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("ECMWF-MSLP sync error: %s", e)
             errors += 1
 
         return total_downloaded, errors
