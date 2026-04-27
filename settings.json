@@ -7,13 +7,11 @@
   "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
   "cache_control_tile": "public, max-age=43200, immutable",
   "radar": {
-    "tile_ttl": 2592000,
-    "sync_interval_seconds": 30
+    "tile_ttl": 2592000
   },
   "ecmwf": {
     "tile_ttl": 86400,
-    "forecasts_to_keep": 2,
-    "sync_interval_seconds": 120
+    "forecasts_to_keep": 2
   },
   "basemap": {
     "sync_mode": "no_cache",

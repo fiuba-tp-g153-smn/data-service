@@ -7,7 +7,7 @@ import pytest
 from clients.redis_client import RedisClient
 
 FORECAST_TS = "20260330T1200Z"
-PERIOD_TS = "20260330T1500Z-20260330T1800Z"
+PERIOD_TS = "20260330T1500Z"
 
 
 @pytest.mark.asyncio
@@ -108,16 +108,16 @@ async def test_get_ecmwf_periods_sorted_asc():
     client._redis = AsyncMock()
     client._redis.smembers = AsyncMock(
         return_value={
-            b"20260330T1500Z-20260330T1800Z",
-            b"20260330T1200Z-20260330T1500Z",
+            b"20260330T1500Z",
+            b"20260330T1200Z",
         }
     )
 
     result = await client.get_ecmwf_periods(FORECAST_TS)
 
     assert result == [
-        "20260330T1200Z-20260330T1500Z",
-        "20260330T1500Z-20260330T1800Z",
+        "20260330T1200Z",
+        "20260330T1500Z",
     ]
     client._redis.smembers.assert_awaited_once_with(f"idx:ecmwf:{FORECAST_TS}:periods")
 

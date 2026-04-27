@@ -34,16 +34,13 @@ def test_nested_ecmwf_and_radar_load(tmp_path):
             "ecmwf": {
                 "tile_ttl": 86400,
                 "forecasts_to_keep": 3,
-                "sync_interval_seconds": 120,
             },
-            "radar": {"tile_ttl": 999, "sync_interval_seconds": 7},
+            "radar": {"tile_ttl": 999},
         },
     )
     assert s.ecmwf_tile_ttl == 86400
     assert s.ecmwf_forecasts_to_keep == 3
-    assert s.ecmwf_sync_interval_seconds == 120
     assert s.radar_tile_ttl == 999
-    assert s.radar_sync_interval_seconds == 7
 
 
 def test_legacy_flat_keys_still_work(tmp_path):

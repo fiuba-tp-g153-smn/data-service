@@ -64,6 +64,7 @@ async def configure_strategies(
 ) -> tuple[
     SatelliteSyncStrategy,
     RadarSyncStrategy,
+    EcmwfSyncStrategy,
     S3CogPointValueStrategy,
     Optional[S3Client],
 ]:
@@ -89,6 +90,7 @@ async def configure_strategies(
         # Background sync mode (default)
         sat_strategy = SatelliteFullSyncStrategy(client_redis)
         radar_strategy = RadarFullSyncStrategy(client_redis)
+        ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
 
         sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)
@@ -108,27 +110,14 @@ async def configure_strategies(
             settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
         )
-
-    # ECMWF precipitation (independently configurable sync mode)
-    ecmwf_strategy: EcmwfSyncStrategy
-    if settings.sync_mode == "full":
-        ecmwf_strategy = EcmwfFullSyncStrategy(client_redis)
-        if s3_client is not None:
-            ecmwf_service.configure_sync_clients(s3_client, client_redis)
-            await ecmwf_service.start_sync(logger)
-        else:
-            logger.warning("ECMWF background sync skipped: S3 not configured")
-    else:
-        logger.info("Starting ECMWF in on-demand sync mode")
         ecmwf_strategy = EcmwfOnDemandStrategy(
             client_redis,
             s3_client,
             settings.ecmwf_tile_ttl,
             settings.tileset_listing_ttl,
         )
-    ecmwf_service.set_strategy(ecmwf_strategy)
 
-    return sat_strategy, radar_strategy, point_value_strategy, s3_client
+    return sat_strategy, radar_strategy, ecmwf_strategy, point_value_strategy, s3_client
 
 
 async def configure_basemap(
@@ -307,8 +296,6 @@ async def shutdown_services():
     """Stop background services if sync mode is full."""
     if settings.sync_mode == "full":
         await sync_service.stop(logger)
-    if settings.sync_mode == "full":
-        await ecmwf_service.stop_sync(logger)
 
 
 @asynccontextmanager
@@ -318,12 +305,13 @@ async def lifespan(_app: FastAPI):
     configure_gdal_vsi_s3()
     await redis_client.connect()
 
-    sat_strategy, radar_strategy, point_value_strategy, s3_client = (
+    sat_strategy, radar_strategy, ecmwf_strategy, point_value_strategy, s3_client = (
         await configure_strategies(redis_client)
     )
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
+    ecmwf_service.set_strategy(ecmwf_strategy)
     point_value_service.set_strategy(point_value_strategy)
 
     basemap_runtime = await configure_basemap(redis_client)

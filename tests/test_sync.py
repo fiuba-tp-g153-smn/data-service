@@ -2,6 +2,8 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 from clients.s3_client import S3Client
 from services.radar_sync_strategy import RadarOnDemandStrategy
+from services.sync_service import SyncService
+from settings import Settings
 
 
 @pytest.mark.asyncio
@@ -119,3 +121,140 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
 
     assert elevations == ["elev0", "elev1"]
     assert tilesets == ["20260114T170328Z", "20260114T160328Z"]
+
+
+def _make_sync_service(mock_s3, mock_redis, ecmwf_forecasts_to_keep=2):
+    """Build a SyncService wired to mock S3/Redis clients without touching env."""
+    settings = Settings.__new__(Settings)
+    settings.sync_interval_seconds = 60
+    settings.tile_ttl = 3600
+    settings.ecmwf_tile_ttl = 86400
+    settings.ecmwf_forecasts_to_keep = ecmwf_forecasts_to_keep
+
+    service = SyncService.__new__(SyncService)
+    service._settings = settings  # pylint: disable=protected-access
+    service._sync_interval = 60  # pylint: disable=protected-access
+    service._service_name = "Sync service"  # pylint: disable=protected-access
+    service._sync_prefixes = []  # pylint: disable=protected-access
+    service._client = mock_s3  # pylint: disable=protected-access
+    service._redis_client = mock_redis  # pylint: disable=protected-access
+    service._consecutive_failures = 0  # pylint: disable=protected-access
+    service._total_cycles = 0  # pylint: disable=protected-access
+    return service
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_downloads_new_periods_and_writes_index(mock_redis_client):
+    """SyncService._sync_ecmwf lists forecasts/periods and only downloads new ones."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            # Top-level forecast listing
+            [
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T0000Z/",
+            ],
+            # Periods under forecast 20260330T1200Z
+            [
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/20260330T1500Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/20260330T1800Z/",
+            ],
+            # Periods under forecast 20260330T0000Z
+            [
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T0000Z/20260330T0300Z/",
+            ],
+        ]
+    )
+    mock_s3.sync_ecmwf_period_to_redis = AsyncMock(return_value=4)
+
+    # Pretend the first centered period is already cached on forecast 1; nothing on forecast 2.
+    mock_redis_client.get_ecmwf_periods = AsyncMock(
+        side_effect=[["20260330T1500Z"], []]
+    )
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf()  # pylint: disable=protected-access
+
+    assert errors == 0
+    assert downloaded == 4 * 2  # one new period per forecast → two downloads
+    assert mock_s3.sync_ecmwf_period_to_redis.await_count == 2
+    # Index updates always run, even when nothing was downloaded.
+    assert mock_redis_client.store_ecmwf_index.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_isolates_errors(mock_redis_client):
+    """A failure inside _sync_ecmwf is reported, not raised."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(side_effect=RuntimeError("boom"))
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf()  # pylint: disable=protected-access
+
+    assert downloaded == 0
+    assert errors == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_respects_forecasts_to_keep(mock_redis_client):
+    """Only the top N forecasts are processed (sorted descending)."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T0000Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260329T1200Z/",
+            ],
+            [],  # periods for 20260330T1200Z
+        ]
+    )
+    mock_s3.sync_ecmwf_period_to_redis = AsyncMock(return_value=0)
+
+    service = _make_sync_service(mock_s3, mock_redis_client, ecmwf_forecasts_to_keep=1)
+
+    await service._sync_ecmwf()  # pylint: disable=protected-access
+
+    # Only the most recent forecast queried for periods (1 top-level + 1 nested call).
+    assert mock_s3.get_subdirectories.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_filters_old_format_periods(mock_redis_client):
+    """Periods that don't match the centered single-timestamp format are skipped."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/"],
+            [
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/20260330T1500Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/"
+                "20260330T1200Z-20260330T1500Z/",
+                f"{S3Client.ECMWF_TILES_PREFIX}/20260330T1200Z/20260330T1800Z/",
+            ],
+        ]
+    )
+    mock_s3.sync_ecmwf_period_to_redis = AsyncMock(return_value=1)
+    mock_redis_client.get_ecmwf_periods = AsyncMock(return_value=[])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf()  # pylint: disable=protected-access
+
+    assert errors == 0
+    # Only the two centered periods are downloaded; the legacy one is skipped.
+    assert mock_s3.sync_ecmwf_period_to_redis.await_count == 2
+    assert downloaded == 2
+
+    # Verify the period_ts arguments passed to sync_ecmwf_period_to_redis are the new ones.
+    period_ts_args = [
+        call.args[2] for call in mock_s3.sync_ecmwf_period_to_redis.await_args_list
+    ]
+    assert period_ts_args == ["20260330T1500Z", "20260330T1800Z"]
+
+    # Index also contains only the centered periods.
+    mock_redis_client.store_ecmwf_index.assert_awaited_once()
+    indexed_periods = mock_redis_client.store_ecmwf_index.await_args.args[1]
+    assert indexed_periods == ["20260330T1500Z", "20260330T1800Z"]

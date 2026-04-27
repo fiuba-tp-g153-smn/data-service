@@ -446,9 +446,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `ecmwf_tile_ttl`              | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                 |
 | `ecmwf_forecasts_to_keep`     | How many ECMWF forecast cycles to retain in the hot cache.                                                                                |
 | `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                  |
-| `sync_interval_seconds`       | Seconds between satellite background sync cycles (`full` mode).                                                                           |
-| `radar_sync_interval_seconds` | Seconds between radar background sync cycles (`full` mode).                                                                               |
-| `ecmwf_sync_interval_seconds` | Seconds between ECMWF background sync cycles (`full` mode).                                                                               |
+| `sync_interval_seconds`       | Seconds between background sync cycles (`full` mode); one shared loop covers satellite + radar + ECMWF.                                   |
 | `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                 |
 | `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                               |
 | `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                |

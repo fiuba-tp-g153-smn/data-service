@@ -21,13 +21,13 @@ from services.point_value_service import (
 client = TestClient(app)
 
 FORECAST_TS = "20260330T1200Z"
-PERIOD_TS = "20260330T1500Z-20260330T1800Z"
+PERIOD_TS = "20260330T1500Z"
 BASE = "/products/ecmwf/total-precipitation"
 
 
 def _forecast_list():
     return ForecastListResponse(
-        forecasts=[ForecastRunInfo(forecast_ts=FORECAST_TS, period_count=48)]
+        forecasts=[ForecastRunInfo(forecast_ts=FORECAST_TS, period_count=47)]
     )
 
 
@@ -54,7 +54,7 @@ def test_list_forecasts_returns_200():
         data = response.json()
         assert len(data["forecasts"]) == 1
         assert data["forecasts"][0]["forecast_ts"] == FORECAST_TS
-        assert data["forecasts"][0]["period_count"] == 48
+        assert data["forecasts"][0]["period_count"] == 47
 
 
 def test_list_forecasts_has_cache_headers():
