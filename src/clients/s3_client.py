@@ -203,10 +203,148 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Error listing objects: %s", e)
         return objects
 
+    WRF_TILES_PREFIX = "tiles/wrf"
+    WRF_COG_PREFIX = "cog/wrf"
+    WRF_GEOJSON_PREFIX = "geojson/wrf"
+
     ECMWF_TP_TILES_PREFIX = "tiles/models/ecmwf/total_precipitation"
     ECMWF_TP_COG_PREFIX = "cog/models/ecmwf/total_precipitation"
     ECMWF_MSLP_COG_PREFIX = "cog/models/ecmwf/mean_sea_level_pressure"
     ECMWF_MSLP_GEOJSON_PREFIX = "geojson/models/ecmwf/mean_sea_level_pressure"
+
+    @staticmethod
+    def build_wrf_tile_key(
+        product_id: str, init_tag: str, fxxx: str, z: int, x: int, y: int
+    ) -> str:
+        """Build S3 key for a WRF tile."""
+        return f"tiles/wrf/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
+
+    @staticmethod
+    def build_wrf_cog_key(product_id: str, init_tag: str, fxxx: str) -> str:
+        """Build S3 key for a WRF primary-field COG."""
+        return f"cog/wrf/{product_id}/{init_tag}/{fxxx}.tif"
+
+    @staticmethod
+    def build_wrf_geojson_key(
+        product_id: str, init_tag: str, fxxx: str, layer: str
+    ) -> str:
+        """Build S3 key for a WRF GeoJSON layer (barbs, isobars, shear, ...)."""
+        return f"geojson/wrf/{product_id}/{init_tag}/{fxxx}/{layer}.json"
+
+    async def sync_wrf_step_to_redis(
+        self,
+        redis_client: RedisClient,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        tile_ttl: int,
+    ) -> int:
+        # pylint: disable=too-many-arguments
+        """Download all tiles for a WRF forecast step from S3 and store in Redis."""
+        s3_prefix = f"{self.WRF_TILES_PREFIX}/{product_id}/{init_tag}/{fxxx}/"
+        await self._ensure_connected()
+        s3_objects = await self._list_objects(s3_prefix)
+
+        tile_objects = [obj for obj in s3_objects if obj["Key"].endswith(".webp")]
+        if not tile_objects:
+            return 0
+
+        logger.info(
+            "Downloading %d WRF tiles for %s/%s/%s",
+            len(tile_objects),
+            product_id,
+            init_tag,
+            fxxx,
+        )
+
+        tasks = [
+            self._download_wrf_tile_to_redis(
+                redis_client, obj["Key"], product_id, init_tag, fxxx, tile_ttl
+            )
+            for obj in tile_objects
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return sum(1 for r in results if r is True)
+
+    async def _download_wrf_tile_to_redis(
+        self,
+        redis_client: RedisClient,
+        s3_key: str,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        tile_ttl: int,
+    ) -> bool:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Download a single WRF tile from S3 and store in Redis."""
+        if self._client is None:
+            raise RuntimeError("S3 client is not connected")
+
+        client = self._client
+        async with self._semaphore:
+            try:
+                parts = s3_key.split("/")
+                y_file = parts[-1]
+                x = parts[-2]
+                z = parts[-3]
+                y = y_file.replace(".webp", "")
+
+                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+                async with response["Body"] as stream:
+                    content = await stream.read()
+
+                await redis_client.store_wrf_tile(
+                    product_id,
+                    init_tag,
+                    fxxx,
+                    int(z),
+                    int(x),
+                    int(y),
+                    content,
+                    ttl=tile_ttl,
+                )
+                return True
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to download WRF tile %s: %s", s3_key, e)
+                return False
+
+    async def list_wrf_layers(
+        self, product_id: str, init_tag: str, fxxx: str
+    ) -> List[str]:
+        """List GeoJSON layer names available under a WRF forecast step."""
+        await self._ensure_connected()
+        prefix = f"{self.WRF_GEOJSON_PREFIX}/{product_id}/{init_tag}/{fxxx}/"
+        return await self.list_object_basenames(prefix, ".json")
+
+    async def sync_wrf_geojson_to_redis(
+        self,
+        redis_client: RedisClient,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        layer: str,
+        geojson_ttl: int,
+    ) -> bool:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Download a single WRF GeoJSON layer from S3 and store it in Redis."""
+        if self._client is None:
+            raise RuntimeError("S3 client is not connected")
+
+        client = self._client
+        s3_key = self.build_wrf_geojson_key(product_id, init_tag, fxxx, layer)
+        async with self._semaphore:
+            try:
+                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+                async with response["Body"] as stream:
+                    content = await stream.read()
+
+                await redis_client.store_wrf_geojson(
+                    product_id, init_tag, fxxx, layer, content, ttl=geojson_ttl
+                )
+                return True
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.error("Failed to download WRF GeoJSON %s: %s", s3_key, e)
+                return False
 
     @staticmethod
     def build_ecmwf_tp_tile_key(

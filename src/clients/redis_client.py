@@ -331,6 +331,131 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         )
         return sorted(m.decode() for m in members)
 
+    # ============== WRF Tile Operations ==============
+
+    async def store_wrf_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Store a WRF tile in Redis, optionally with TTL."""
+        key = f"tile:wrf:{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_wrf_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments
+        """Get a WRF tile from Redis."""
+        key = f"tile:wrf:{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}"
+        return await self._conn.get(key)
+
+    # ============== WRF Index Operations ==============
+
+    async def add_wrf_index(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        init_score: float,
+        step_score: float,
+        ttl: int,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Add entries to WRF index sorted sets with TTL."""
+        pipe = await self._conn.pipeline()
+
+        init_key = f"idx:wrf:{product_id}:init_runs"
+        pipe.zadd(init_key, {init_tag.encode(): init_score})
+        pipe.expire(init_key, ttl)
+
+        steps_key = f"idx:wrf:{product_id}:{init_tag}:steps"
+        pipe.zadd(steps_key, {fxxx.encode(): step_score})
+        pipe.expire(steps_key, ttl)
+
+        await pipe.execute()
+
+    async def get_wrf_init_runs(self, product_id: str) -> List[str]:
+        """Get all init run tags for a product, sorted descending (newest first)."""
+        key = f"idx:wrf:{product_id}:init_runs"
+        members = await self._conn.zrevrange(key, 0, -1)  # type: ignore[misc]
+        return [m.decode() for m in members]
+
+    async def get_wrf_steps(self, product_id: str, init_tag: str) -> List[str]:
+        """Get all forecast steps for a product/init_tag, sorted ascending."""
+        key = f"idx:wrf:{product_id}:{init_tag}:steps"
+        members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
+        return [m.decode() for m in members]
+
+    # ============== WRF GeoJSON / Layer Operations ==============
+
+    async def store_wrf_geojson(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        layer: str,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Store a WRF GeoJSON layer (barbs / contours) in Redis."""
+        key = f"geojson:wrf:{product_id}/{init_tag}/{fxxx}/{layer}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_wrf_geojson(
+        self, product_id: str, init_tag: str, fxxx: str, layer: str
+    ) -> Optional[bytes]:
+        """Retrieve a WRF GeoJSON layer from Redis."""
+        key = f"geojson:wrf:{product_id}/{init_tag}/{fxxx}/{layer}"
+        return await self._conn.get(key)
+
+    async def add_wrf_layers(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        layers: List[str],
+        ttl: int,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Register the GeoJSON layers available for a WRF forecast step."""
+        if not layers:
+            return
+        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        pipe = await self._conn.pipeline()
+        for layer in layers:
+            pipe.sadd(key, layer.encode())
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
+    async def get_wrf_layers(
+        self, product_id: str, init_tag: str, fxxx: str
+    ) -> List[str]:
+        """Get all GeoJSON layer names indexed for a forecast step."""
+        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        members = await self._conn.smembers(key)  # type: ignore[misc]
+        return sorted(m.decode() for m in members)
+
     # ============== Base Map Tile Operations ==============
 
     async def store_basemap_tile(

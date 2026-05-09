@@ -53,6 +53,9 @@ class Settings:
     ecmwf_forecasts_to_keep: int
     # ECMWF mean sea level pressure (loaded from settings.json, env overrides)
     ecmwf_mslp_geojson_ttl: int
+    # WRF model (loaded from settings.json, env overrides)
+    wrf_tile_ttl: int = 86400
+    wrf_geojson_ttl: int = 86400
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -138,7 +141,7 @@ class Settings:
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
-    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar")
+    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar", "wrf")
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -176,6 +179,8 @@ class Settings:
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
             "ecmwf_mslp_geojson_ttl",
+            "wrf_tile_ttl",
+            "wrf_geojson_ttl",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -306,6 +311,10 @@ class Settings:
         )
         self.ecmwf_mslp_geojson_ttl = self._env_int(
             "ECMWF_MSLP_GEOJSON_TTL", self.ecmwf_mslp_geojson_ttl
+        )
+        self.wrf_tile_ttl = self._env_int("WRF_TILE_TTL", self.wrf_tile_ttl)
+        self.wrf_geojson_ttl = self._env_int(
+            "WRF_GEOJSON_TTL", self.wrf_geojson_ttl
         )
 
         # Basemap

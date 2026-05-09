@@ -56,6 +56,19 @@ class PointValueService(BaseProductService):
         "ecmwf_mean_sea_level_pressure": "hPa",
     }
 
+    WRF_PRODUCT_UNITS = {
+        "Colmax": "dBZ",
+        "Rafagas": "kt",
+        "Campo900hPa": "g/kg",
+        "Precipitacion1h": "mm",
+        "MUCAPE": "J/kg",
+        "AguaPrecipitable": "mm",
+        "JetCapasBajas": "kt",
+        "CortanteNivelesBajos": "kt",
+        "CAPE_BRN": "J/kg",
+        "Granizo": "",
+    }
+
     def set_strategy(self, strategy: PointValueStrategy) -> None:
         """Set point-value strategy (called during app startup)."""
         self._strategy = strategy
@@ -98,6 +111,21 @@ class PointValueService(BaseProductService):
         """Sample an ECMWF total precipitation COG at a specific coordinate."""
         cog_key = f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
         unit = self.MODEL_UNITS.get("ecmwf_total_precipitation", "1")
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit=unit)
+
+    async def sample_wrf_point(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Sample a WRF primary-field COG at a specific coordinate."""
+        cog_key = f"cog/wrf/{product_id}/{init_tag}/{fxxx}.tif"
+        unit = self.WRF_PRODUCT_UNITS.get(product_id, "")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
 
