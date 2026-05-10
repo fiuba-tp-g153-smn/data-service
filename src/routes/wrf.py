@@ -14,7 +14,7 @@ from models.wrf import (
     WrfPointValueResponse,
     WrfStepListResponse,
 )
-from routes.utils import create_tile_response
+from routes.utils import create_tile_response, make_transparent_tile_response
 from services.point_value_service import (
     CogNotFoundError,
     NoDataOrOutsideError,
@@ -192,17 +192,11 @@ async def get_tile(
 
     tile_data = await wrf_service.get_tile_data(product_id, init_tag, fxxx, z, x, y)
     if not tile_data:
-        logger.warning(
-            "WRF tile not found: %s/%s/%s/%s/%s/%s",
-            product_id,
-            init_tag,
-            fxxx,
-            z,
-            x,
-            y,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Tile not found"
-        )
+        # WRF Lambert domain is curvilinear; gdal2tiles only emits tiles where
+        # the model has data. Tiles outside that footprint legitimately do not
+        # exist, so a 404 here is normal at the model boundary. Return a
+        # transparent WebP instead so Leaflet renders empty pixels and the
+        # frontend's tileerror handler does not surface a "layer down" toast.
+        return make_transparent_tile_response(etag, settings.cache_control_tile)
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)
