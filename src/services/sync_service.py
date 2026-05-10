@@ -565,42 +565,46 @@ class SyncService(BaseSyncService):
 
                     for fxxx_prefix in fxxx_prefixes:
                         fxxx = fxxx_prefix.rstrip("/").split("/")[-1]
-                        if fxxx in existing_steps:
-                            continue
 
-                        downloaded = await self._client.sync_wrf_step_to_redis(
-                            self._redis_client,
-                            product_id,
-                            init_tag,
-                            fxxx,
-                            tile_ttl=self._settings.wrf_tile_ttl,
-                        )
-
-                        if downloaded > 0:
-                            init_score = self._extract_wrf_init_score(init_tag)
-                            step_score = float(
-                                int(fxxx[1:]) if fxxx.startswith("F") else 0
-                            )
-                            await self._redis_client.add_wrf_index(
+                        if fxxx not in existing_steps:
+                            downloaded = await self._client.sync_wrf_step_to_redis(
+                                self._redis_client,
                                 product_id,
                                 init_tag,
                                 fxxx,
-                                init_score,
-                                step_score,
-                                ttl=self._settings.wrf_tile_ttl,
-                            )
-                            total_downloaded += downloaded
-                            logger.info(
-                                "WRF sync: %d tiles for %s/%s/%s",
-                                downloaded,
-                                product_id,
-                                init_tag,
-                                fxxx,
+                                tile_ttl=self._settings.wrf_tile_ttl,
                             )
 
-                            await self._sync_wrf_overlays(
-                                product_id, init_tag, fxxx
-                            )
+                            if downloaded > 0:
+                                init_score = self._extract_wrf_init_score(init_tag)
+                                step_score = float(
+                                    int(fxxx[1:]) if fxxx.startswith("F") else 0
+                                )
+                                await self._redis_client.add_wrf_index(
+                                    product_id,
+                                    init_tag,
+                                    fxxx,
+                                    init_score,
+                                    step_score,
+                                    ttl=self._settings.wrf_tile_ttl,
+                                )
+                                total_downloaded += downloaded
+                                logger.info(
+                                    "WRF sync: %d tiles for %s/%s/%s",
+                                    downloaded,
+                                    product_id,
+                                    init_tag,
+                                    fxxx,
+                                )
+
+                        # Always check overlays. Backend uploads tiles + GeoJSON
+                        # in separate steps; an earlier sync cycle may have
+                        # caught the tiles before the JSONs were uploaded, so
+                        # `existing_steps` membership doesn't imply that the
+                        # overlays were already mirrored to Redis. The overlay
+                        # sync is idempotent (skips fast when Redis is up to
+                        # date), so this is safe to call on every cycle.
+                        await self._sync_wrf_overlays(product_id, init_tag, fxxx)
 
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("WRF sync error: %s", e)
@@ -620,17 +624,29 @@ class SyncService(BaseSyncService):
         if self._client is None or self._redis_client is None:
             return
         try:
-            layers = await self._client.list_wrf_layers(product_id, init_tag, fxxx)
-            if not layers:
+            s3_layers = await self._client.list_wrf_layers(product_id, init_tag, fxxx)
+            if not s3_layers:
                 return
+
+            # Idempotency guard: skip the per-layer S3 GET when Redis already
+            # mirrors every layer reported by S3. Without this, every sync
+            # cycle would re-download GeoJSONs that were already cached and
+            # only refresh their TTL — wasteful at ~10 products × N steps.
+            redis_layers = set(
+                await self._redis_client.get_wrf_layers(product_id, init_tag, fxxx)
+            )
+            missing_layers = [l for l in s3_layers if l not in redis_layers]
+            if not missing_layers:
+                return
+
             await self._redis_client.add_wrf_layers(
                 product_id,
                 init_tag,
                 fxxx,
-                layers,
+                s3_layers,
                 ttl=self._settings.wrf_geojson_ttl,
             )
-            for layer in layers:
+            for layer in missing_layers:
                 await self._client.sync_wrf_geojson_to_redis(
                     self._redis_client,
                     product_id,
@@ -641,7 +657,7 @@ class SyncService(BaseSyncService):
                 )
             logger.info(
                 "WRF sync: %d GeoJSON layers for %s/%s/%s",
-                len(layers),
+                len(missing_layers),
                 product_id,
                 init_tag,
                 fxxx,
