@@ -149,11 +149,13 @@ async def configure_basemap(
     """Bring up the basemap subsystem using the active `basemap_sync_mode`.
 
     Modes (set via `settings.json::basemap_sync_mode` or `BASEMAP_SYNC_MODE`):
-      * ``full``       — scraper on (writes Redis + S3), reader uses
-                         Redis + S3 + relay, tombstones on.
-      * ``on_demand``  — scraper on but writes only S3; reader still uses
-                         Redis and fills it lazily on cold reads.
-      * ``no_cache``   — scraper on, S3-only. Reader skips Redis entirely.
+      * ``full``       — scraper on (writes Redis + S3); reader tries
+                         upstream first, then falls back to Redis, then S3.
+      * ``on_demand``  — scraper on but writes only S3; reader tries
+                         upstream first, then Redis (lazily populated by
+                         the reader on hits), then S3.
+      * ``no_cache``   — scraper on, S3-only. Reader skips Redis tier
+                         entirely (upstream → S3).
       * ``relay_only`` — scraper off, Redis off, S3 off. Reader is a pure
                          provider proxy.
 
@@ -177,7 +179,6 @@ async def configure_basemap(
     scraper_writes_redis = mode == "full"
     redis_cache_enabled = mode in ("full", "on_demand")
     s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
-    negative_cache = settings.basemap_negative_cache_enabled and redis_cache_enabled
 
     if s3_cache_enabled and not settings.is_s3_configured():
         logger.error(
@@ -191,13 +192,12 @@ async def configure_basemap(
 
     logger.info(
         "Basemap mode=%s (scraper=%s, scraper_redis=%s, "
-        "reader_redis=%s, reader_s3=%s, negative_cache=%s)",
+        "reader_redis=%s, reader_s3=%s)",
         mode,
         "on" if run_scraper else "off",
         "on" if scraper_writes_redis else "off",
         "on" if redis_cache_enabled else "off",
         "on" if s3_cache_enabled else "off",
-        "on" if negative_cache else "off",
     )
 
     basemap_s3: Optional[S3Client] = None
@@ -233,8 +233,6 @@ async def configure_basemap(
         tile_ttl=settings.basemap_tile_ttl,
         cache_concurrent=settings.basemap_cache_concurrent,
         online_fallback=settings.basemap_online_fallback_enabled,
-        negative_cache_enabled=negative_cache,
-        negative_cache_ttl=settings.basemap_negative_cache_ttl,
         request_deadline_seconds=settings.basemap_request_deadline_seconds,
         redis_cache_enabled=redis_cache_enabled,
         s3_cache_enabled=s3_cache_enabled,
@@ -287,7 +285,8 @@ async def configure_basemap(
         online_fallback=settings.basemap_online_fallback_enabled,
         s3_client=basemap_s3,
         redis_client=client_redis,
-        presence_ttl=settings.basemap_provider_presence_ttl,
+        http_client=reader_http_client,
+        availability_ttl=settings.basemap_provider_availability_ttl,
     )
     return BasemapRuntime(
         s3_client=basemap_s3,

@@ -382,25 +382,27 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Remove the miss tombstone (called on positive writes, idempotent)."""
         await self._conn.delete(self._basemap_miss_key(provider_id, z, x, y))
 
-    # ============== Base Map Provider Presence Cache ==============
+    # ============== Base Map Provider Availability Cache ==============
 
     @staticmethod
-    def _basemap_presence_key(provider_id: str) -> str:
-        return f"basemap:presence:{provider_id}"
+    def _basemap_availability_key(provider_id: str) -> str:
+        return f"basemap:availability:{provider_id}"
 
-    async def set_basemap_provider_presence(
-        self, provider_id: str, present: bool, ttl: int
+    async def set_basemap_provider_availability(
+        self, provider_id: str, available: bool, ttl: int
     ) -> None:
-        """Cache whether a basemap provider has any tile in the object store."""
+        """Cache whether a basemap provider is currently available to serve."""
         await self._conn.set(
-            self._basemap_presence_key(provider_id),
-            b"1" if present else b"0",
+            self._basemap_availability_key(provider_id),
+            b"1" if available else b"0",
             ex=ttl,
         )
 
-    async def get_basemap_provider_presence(self, provider_id: str) -> Optional[bool]:
-        """Return cached provider-presence flag, or None on miss."""
-        raw = await self._conn.get(self._basemap_presence_key(provider_id))
+    async def get_basemap_provider_availability(
+        self, provider_id: str
+    ) -> Optional[bool]:
+        """Return cached provider-availability flag, or None on miss."""
+        raw = await self._conn.get(self._basemap_availability_key(provider_id))
         if raw is None:
             return None
         return raw == b"1"
