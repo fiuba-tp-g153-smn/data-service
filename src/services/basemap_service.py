@@ -147,12 +147,22 @@ class BasemapService:
 
     async def _refresh_availability(self, provider: BasemapProvider) -> bool:
         """Probe upstream + S3 in parallel, write the result to Redis."""
-        probe_task = self._probe_provider(provider)
-        s3_task = self._has_any_s3_tile(provider)
-        probe_ok, s3_ok = await asyncio.gather(
-            probe_task, s3_task, return_exceptions=False
+        probe_result, s3_result = await asyncio.gather(
+            self._probe_provider(provider),
+            self._has_any_s3_tile(provider),
+            return_exceptions=True,
         )
-        available = bool(probe_ok or s3_ok)
+        for label, result in (("probe", probe_result), ("s3", s3_result)):
+            if isinstance(result, BaseException):
+                logger.debug(
+                    "availability %s failed for %s: %s",
+                    label,
+                    provider.provider_id,
+                    result,
+                )
+        probe_ok = probe_result is True
+        s3_ok = s3_result is True
+        available = probe_ok or s3_ok
 
         if self._redis is not None:
             try:

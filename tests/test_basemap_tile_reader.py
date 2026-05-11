@@ -417,6 +417,28 @@ async def test_s3_nosuchkey_logged_at_debug(caplog):
 
 
 @pytest.mark.asyncio
+async def test_prod_hit_succeeds_when_s3_is_down():
+    """Prod returns bytes; S3 write-through fails — user must still get the tile."""
+    from botocore.exceptions import EndpointConnectionError
+
+    redis = _make_redis()
+    s3 = _make_s3()
+    s3.upload_tile = AsyncMock(
+        side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+    )
+    http = _make_http(data=b"from-prod")
+    reader = _make_reader(redis=redis, s3=s3, http=http)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+
+    assert got == b"from-prod"
+    # Draining lets the failing S3 write run; it must be swallowed by
+    # _run_throttled and not propagate.
+    await _drain(reader)
+    s3.upload_tile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_provider_unavailable_does_not_write_caches():
     """An UNAVAILABLE upstream must not poison the caches with empty data."""
     redis = _make_redis()

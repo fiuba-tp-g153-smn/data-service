@@ -220,6 +220,40 @@ async def test_concurrent_list_providers_single_flight_one_probe_per_provider():
 
 
 @pytest.mark.asyncio
+async def test_provider_listed_when_s3_check_raises_and_probe_succeeds():
+    """S3 outage during the listing must not hide a provider whose prod is healthy."""
+    s3 = MagicMock()
+    s3.has_any_object = AsyncMock(side_effect=RuntimeError("s3 down"))
+    service = _configure(
+        providers=[_make_provider("argenmap")],
+        http=_make_http(data=b"\x89PNG"),
+        s3=s3,
+    )
+
+    resp = await service.list_providers()
+    assert [p.id for p in resp.providers] == ["argenmap"]
+
+
+@pytest.mark.asyncio
+async def test_provider_hidden_when_both_probe_and_s3_raise():
+    """Probe + S3 both raising must not 500 the endpoint; provider is excluded."""
+    http = MagicMock()
+    http.download_tile = AsyncMock(
+        side_effect=ProviderUnavailableError("https://example.test", "down")
+    )
+    s3 = MagicMock()
+    s3.has_any_object = AsyncMock(side_effect=RuntimeError("s3 down"))
+    service = _configure(
+        providers=[_make_provider("argenmap")],
+        http=http,
+        s3=s3,
+    )
+
+    resp = await service.list_providers()
+    assert resp.providers == []
+
+
+@pytest.mark.asyncio
 async def test_providers_listed_in_parallel():
     """When multiple providers are configured, the probes run concurrently."""
     in_flight = 0

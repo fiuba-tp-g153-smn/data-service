@@ -495,9 +495,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 return False
 
     async def download_tile(self, s3_key: str) -> Optional[bytes]:
-        """Download a single tile from S3. Returns raw bytes or None."""
-        client = await self._ensure_connected()
+        """Download a single tile from S3. Returns raw bytes or None.
+
+        Infrastructure failures (`BotoCoreError` family, including
+        `EndpointConnectionError`, plus socket and timeout errors) degrade
+        to ``None`` with a WARNING log so callers can fall back to other
+        tiers instead of surfacing a 5xx to the user.
+        """
         try:
+            client = await self._ensure_connected()
             response = await client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
                 return await stream.read()
@@ -508,8 +514,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 return None
             logger.warning("S3 error for tile %s: %s", s3_key, exc)
             return None
-        except (asyncio.TimeoutError, OSError) as exc:
-            logger.warning("Failed to download tile %s: %s", s3_key, exc)
+        except (BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning("S3 unavailable for tile %s: %s", s3_key, exc)
             return None
 
     @staticmethod
@@ -579,18 +585,27 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             return False
 
     async def has_any_object(self, prefix: str) -> bool:
-        """True if at least one object exists under the given prefix."""
-        client = await self._ensure_connected()
+        """True iff at least one object was positively observed under the prefix.
+
+        Infrastructure failures (`BotoCoreError`/`ClientError`/socket/timeout)
+        are degraded to ``False`` with a WARNING log: callers (provider
+        availability checks) interpret "no observed tile" the same way as
+        "tile genuinely absent", and an S3 outage should not take the
+        listing endpoint down when upstream is still serving.
+        """
         try:
+            client = await self._ensure_connected()
             response = await client.list_objects_v2(
                 Bucket=self._bucket, Prefix=prefix, MaxKeys=1
             )
             return bool(response.get("Contents"))
-        except ClientError as exc:
-            logger.error(
-                "Unexpected S3 error while checking prefix %s: %s", prefix, exc
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning(
+                "S3 unavailable while checking prefix %s; treating as empty: %s",
+                prefix,
+                exc,
             )
-            raise
+            return False
 
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""
