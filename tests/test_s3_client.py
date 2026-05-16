@@ -181,9 +181,7 @@ async def test_download_tile_returns_none_on_generic_botocore_error(
         result = await client.download_tile("basemap/argenmap/3/0/0.png")
 
     assert result is None
-    assert any(
-        "S3 unavailable for tile" in record.message for record in caplog.records
-    )
+    assert any("S3 unavailable for tile" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -195,16 +193,16 @@ async def test_download_tile_returns_none_when_ensure_connected_raises(
     monkeypatch.setattr(
         client,
         "_ensure_connected",
-        AsyncMock(side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")),
+        AsyncMock(
+            side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+        ),
     )
 
     with caplog.at_level(logging.WARNING):
         result = await client.download_tile("basemap/argenmap/3/0/0.png")
 
     assert result is None
-    assert any(
-        "S3 unavailable for tile" in record.message for record in caplog.records
-    )
+    assert any("S3 unavailable for tile" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio

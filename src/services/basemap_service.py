@@ -103,9 +103,7 @@ class BasemapService:
             if self._s3 is None:
                 return False
             try:
-                return await self._s3.has_any_object(
-                    f"basemap/{provider.provider_id}/"
-                )
+                return await self._s3.has_any_object(f"basemap/{provider.provider_id}/")
             except (OSError, asyncio.TimeoutError) as exc:
                 logger.warning(
                     "S3 fallback check failed for %s: %s", provider.provider_id, exc

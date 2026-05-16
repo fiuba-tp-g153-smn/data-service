@@ -54,7 +54,14 @@
       { "id": "satellite", "enabled": true },
       { "id": "topographic", "enabled": true },
       { "id": "googleSatellite", "enabled": true },
-      { "id": "oceanBase", "enabled": true }
+      { "id": "oceanBase", "enabled": true },
+
+      { "id": "ign-provincia", "enabled": true },
+      { "id": "ign-limite-internacional", "enabled": true },
+      { "id": "ign-limite-interdepartamental-o-de-partido", "enabled": true },
+      { "id": "ign-localidad", "enabled": true },
+      { "id": "ign-sublocalidad", "enabled": true },
+      { "id": "ign-gobierno-local", "enabled": true }
     ]
   }
 }
