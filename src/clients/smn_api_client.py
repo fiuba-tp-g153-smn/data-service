@@ -67,7 +67,9 @@ class SmnApiClient:
             logger.info(
                 "SMN token rejected mid-flight; refreshing and retrying once"
             )
-            token = await self._refresh_token()
+            # Pass the rejected token in so the refresh lock's double-check
+            # doesn't hand the same dead token back to a stampede of 401s.
+            token = await self._refresh_token(invalidate=token)
             return await self._get_stations(token)
 
     async def _get_stations(self, token: str) -> List[dict[str, Any]]:
@@ -127,12 +129,19 @@ class SmnApiClient:
             return self._token
         return await self._refresh_token()
 
-    async def _refresh_token(self) -> str:
-        """Mint a new JWT via POST /api-token/auth; serialize concurrent refreshes."""
+    async def _refresh_token(self, invalidate: Optional[str] = None) -> str:
+        """Mint a new JWT via POST /api-token/auth; serialize concurrent refreshes.
+
+        `invalidate` carries the token that was just rejected by upstream. When
+        supplied, the double-check only reuses the cached token if it is
+        *different* from the rejected one (i.e. another waiter already refreshed
+        past it). Without this, a 401 stampede would each hit the lock, see
+        the still-fresh cached token, and hand the dead one back.
+        """
         async with self._refresh_lock:
-            # Double-checked: another waiter may have just refreshed.
             if (
                 self._token
+                and (invalidate is None or self._token != invalidate)
                 and (time.monotonic() - self._token_minted_at) < self._token_cache_ttl
             ):
                 return self._token

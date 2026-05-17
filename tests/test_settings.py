@@ -118,6 +118,12 @@ def _built_settings(tmp_path: Path, data: dict) -> Settings:
     """Build a full Settings, bypassing env reads and triggering _validate."""
     s = Settings.__new__(Settings)
     s._load_from_json(_write_json(tmp_path, data))  # pylint: disable=protected-access
+    # Env-only fields the JSON loader doesn't populate. The weather-stations
+    # validator hard-requires the admin password when auth is on; seed a
+    # placeholder so basemap-focused tests don't trip the unrelated check.
+    s.weather_stations_admin_password = "x"
+    s.smn_api_username = "u"
+    s.smn_api_password = "p"
     s._validate()  # pylint: disable=protected-access
     return s
 
