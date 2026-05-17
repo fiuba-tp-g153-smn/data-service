@@ -9,7 +9,7 @@ from clients.s3_client import S3Client
 from services.ecmwf_tp_sync_strategy import (
     EcmwfTpFullSyncStrategy,
     EcmwfTpOnDemandStrategy,
-    is_centered_period_format,
+    is_valid_timestamp_format,
 )
 
 FORECAST_TS = "20260330T1200Z"
@@ -227,18 +227,18 @@ async def test_on_demand_list_periods_filters_old_format(mock_redis_client):
     assert result == ["20260330T1500Z", "20260330T1800Z"]
 
 
-# ── is_centered_period_format ─────────────────────────────────────────────────
+# ── is_valid_timestamp_format ─────────────────────────────────────────────────
 
 
-def test_is_centered_period_format_accepts_new_format():
-    assert is_centered_period_format("20260330T1500Z") is True
-    assert is_centered_period_format("20260101T0000Z") is True
+def test_is_valid_timestamp_format_accepts_canonical_format():
+    assert is_valid_timestamp_format("20260330T1500Z") is True
+    assert is_valid_timestamp_format("20260101T0000Z") is True
 
 
-def test_is_centered_period_format_rejects_legacy_and_garbage():
-    assert is_centered_period_format("20260330T1500Z-20260330T1800Z") is False
-    assert is_centered_period_format("") is False
-    assert is_centered_period_format("garbage") is False
-    assert is_centered_period_format("20260330") is False
-    assert is_centered_period_format("20260330T1500") is False
-    assert is_centered_period_format("2026033T1500Z") is False  # short date
+def test_is_valid_timestamp_format_rejects_legacy_and_garbage():
+    assert is_valid_timestamp_format("20260330T1500Z-20260330T1800Z") is False
+    assert is_valid_timestamp_format("") is False
+    assert is_valid_timestamp_format("garbage") is False
+    assert is_valid_timestamp_format("20260330") is False
+    assert is_valid_timestamp_format("20260330T1500") is False
+    assert is_valid_timestamp_format("2026033T1500Z") is False  # short date

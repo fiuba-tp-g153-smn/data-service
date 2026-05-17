@@ -142,7 +142,7 @@ async def test_on_demand_list_timestamps_s3_fallback(mock_redis_client):
 
     result = await strategy.list_timestamps(FORECAST_TS)
 
-    # "metadata" is filtered by is_centered_period_format
+    # "metadata" is filtered by is_valid_timestamp_format
     assert result == ["20260413T1500Z", "20260413T1800Z"]
     mock_redis_client.cache_listing.assert_awaited_once()
 

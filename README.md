@@ -281,16 +281,28 @@ tiles-data/                              # S3_TILES_DATA_BUCKET_NAME
 │   │   └── {tileset_id}/{z}/{x}/{y}.webp
 │   ├── radar/
 │   │   └── {radar_id}/{variable}/elev{N}/{tileset_id}/{z}/{x}/{y}.webp
-│   └── ecmwf/
-│       └── {forecast_id}/{period}/{z}/{x}/{y}.webp
-└── cog/
-    ├── {band_id}/{tileset_id}.tif
-    └── radar/{radar_id}/{variable}/elev{N}/{tileset_id}.tif
+│   └── models/ecmwf/
+│       └── total_precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp
+├── cog/
+│   ├── {band_id}/{tileset_id}.tif
+│   ├── radar/{radar_id}/{variable}/elev{N}/{tileset_id}.tif
+│   └── models/ecmwf/
+│       ├── total_precipitation/{forecast_ts}/{period_ts}.tif
+│       └── mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.tif
+└── geojson/
+    └── models/ecmwf/
+        └── mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json
 
 basemap-tiles/                           # S3_BASEMAP_BUCKET_NAME
 └── basemap/
     └── {provider_id}/{z}/{x}/{y}.png    # populated by the basemap scraper
 ```
+
+ECMWF timestamp semantics (`YYYYMMDDTHHmmZ`, every 3 h):
+
+- `{forecast_ts}` — the model run (every 12 h, e.g. `20260517T1200Z`).
+- `{period_ts}` (total precipitation) — **end** of a 6 h accumulation period; the value covers the previous 6 h. Each forecast yields 47 periods (T+6 through T+144 of the run).
+- `{timestamp_ts}` (mean sea level pressure) — instantaneous snapshot at the period-end timestamp; same 47 timestamps as TP.
 
 The basemap bucket has a lifecycle policy automatically applied at
 startup (`basemap_s3_object_ttl_days`, default 35 days) so objects are

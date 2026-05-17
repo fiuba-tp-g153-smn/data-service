@@ -6,7 +6,7 @@ from typing import List, Optional, Protocol
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
-from services.ecmwf_tp_sync_strategy import is_centered_period_format
+from services.ecmwf_tp_sync_strategy import is_valid_timestamp_format
 
 
 class EcmwfMslpSyncStrategy(Protocol):
@@ -112,7 +112,7 @@ class EcmwfMslpOnDemandStrategy:
 
         prefix = f"{S3Client.ECMWF_MSLP_COG_PREFIX}/{forecast_ts}/"
         basenames = await self._s3.list_object_basenames(prefix, ".tif")
-        timestamps = sorted(b for b in basenames if is_centered_period_format(b))
+        timestamps = sorted(b for b in basenames if is_valid_timestamp_format(b))
 
         await self._redis.cache_listing(
             cache_key, json.dumps(timestamps).encode(), self._listing_ttl
