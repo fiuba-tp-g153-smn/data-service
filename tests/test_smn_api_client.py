@@ -25,8 +25,11 @@ async def _build_client(
     defaults.update(overrides)
     client = SmnApiClient(**defaults)
     # Swap the real pool for a MockTransport-backed one so we never hit network.
+    # Preserve the same client-level headers (User-Agent etc.) the real
+    # constructor applies, so tests can assert on them.
+    preserved_headers = dict(client._client.headers)
     await client._client.aclose()
-    client._client = httpx.AsyncClient(transport=transport)
+    client._client = httpx.AsyncClient(transport=transport, headers=preserved_headers)
     return client
 
 
@@ -44,7 +47,8 @@ async def test_first_call_mints_token_then_fetches_stations():
         if request.url.path.endswith("/api-token/auth"):
             return httpx.Response(200, json={"token": "tk-1"})
         if request.url.path.endswith("/weather/station"):
-            assert request.headers.get("api_key") == "tk-1"
+            # SMN requires the "JWT <token>" scheme on the Authorization header.
+            assert request.headers.get("authorization") == "JWT tk-1"
             return httpx.Response(200, json=[{"station_id": 1}])
         return httpx.Response(404)
 
@@ -90,9 +94,10 @@ async def test_401_triggers_one_refresh_and_retries_stations():
             tokens_issued.append(new)
             return httpx.Response(200, json={"token": new})
         # /weather/station: reject the first token, accept the second.
-        presented = request.headers.get("api_key")
+        # Both arrive on the Authorization header prefixed as "JWT <token>".
+        presented = request.headers.get("authorization")
         station_calls.append(presented or "")
-        if presented == "tk-1":
+        if presented == "JWT tk-1":
             return httpx.Response(401, json={"detail": "expired"})
         return httpx.Response(200, json=[{"station_id": 2}])
 
@@ -102,7 +107,7 @@ async def test_401_triggers_one_refresh_and_retries_stations():
         assert data == [{"station_id": 2}]
         assert tokens_issued == ["tk-1", "tk-2"]
         # First attempt with tk-1 got 401, second attempt with tk-2 succeeded.
-        assert station_calls == ["tk-1", "tk-2"]
+        assert station_calls == ["JWT tk-1", "JWT tk-2"]
     finally:
         await client.close()
 
@@ -135,6 +140,93 @@ async def test_5xx_is_retried_then_raises_smn_api_error():
         assert len(sleep_called) == 2
     finally:
         smn_module.asyncio.sleep = original  # type: ignore[assignment]
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_user_agent_and_settling_delay_are_applied():
+    """Configured UA is sent on every request; settling delay fires after a mint."""
+    sent_user_agents: List[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent_user_agents.append(request.headers.get("user-agent", ""))
+        if request.url.path.endswith("/api-token/auth"):
+            return httpx.Response(200, json={"token": "tk-1"})
+        return httpx.Response(200, json=[{"station_id": 1}])
+
+    client = await _build_client(
+        _make_transport(handler),
+        user_agent="curl/9.9.9",
+        token_settling_delay_seconds=0.5,
+    )
+
+    # Patch asyncio.sleep so we observe the delay call without actually waiting.
+    sleeps: List[float] = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    import clients.smn_api_client as smn_module
+
+    original = smn_module.asyncio.sleep
+    smn_module.asyncio.sleep = fake_sleep  # type: ignore[assignment]
+    try:
+        await client.fetch_current_weather_stations()
+    finally:
+        smn_module.asyncio.sleep = original  # type: ignore[assignment]
+        await client.close()
+
+    # Both calls carried the curl UA (not python-httpx).
+    assert sent_user_agents == ["curl/9.9.9", "curl/9.9.9"]
+    # The 0.5s settling delay was observed exactly once (one mint -> one wait).
+    assert 0.5 in sleeps
+
+
+@pytest.mark.asyncio
+async def test_settling_delay_zero_skips_the_sleep_entirely():
+    """Default 0 means asyncio.sleep is not called from the refresh path."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api-token/auth"):
+            return httpx.Response(200, json={"token": "tk-1"})
+        return httpx.Response(200, json=[{"station_id": 1}])
+
+    client = await _build_client(_make_transport(handler))  # default delay=0
+
+    sleeps: List[float] = []
+
+    async def fake_sleep(d):
+        sleeps.append(d)
+
+    import clients.smn_api_client as smn_module
+
+    original = smn_module.asyncio.sleep
+    smn_module.asyncio.sleep = fake_sleep  # type: ignore[assignment]
+    try:
+        await client.fetch_current_weather_stations()
+    finally:
+        smn_module.asyncio.sleep = original  # type: ignore[assignment]
+        await client.close()
+
+    # No sleeps in the happy path: zero refreshes-with-delay, zero retries.
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_persistent_401_surfaces_as_smn_api_error():
+    """Two 401s in a row → SmnApiError (instead of bare _Unauthorized leaking out)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api-token/auth"):
+            return httpx.Response(200, json={"token": "always-rejected"})
+        # Every stations call returns 401 — credentials are bad / no access.
+        return httpx.Response(401, json={"detail": "no access"})
+
+    client = await _build_client(_make_transport(handler))
+    try:
+        with pytest.raises(SmnApiError, match="rejected the freshly-minted token"):
+            await client.fetch_current_weather_stations()
+    finally:
         await client.close()
 
 

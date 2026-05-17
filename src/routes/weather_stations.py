@@ -68,7 +68,19 @@ async def require_api_key(
     """
     if not settings.weather_stations_api_key_auth_enabled:
         return
-    if not x_api_key or not await keystore.is_valid(x_api_key):
+    if not x_api_key:
+        logger.info("weather-stations 401: missing X-API-Key header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-API-Key header",
+        )
+    if not await keystore.is_valid(x_api_key):
+        # Last 4 chars only — enough to disambiguate which key was rejected,
+        # not enough to leak the secret to logs.
+        logger.info(
+            "weather-stations 401: invalid X-API-Key (suffix=...%s)",
+            x_api_key[-4:] if len(x_api_key) >= 4 else "***",
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-API-Key header",
@@ -87,11 +99,22 @@ async def require_admin_password(
     if not expected:
         # Defensive: validator should already enforce this, but a misconfigured
         # deployment must NOT silently accept any header value.
+        logger.error(
+            "weather-stations admin endpoint reached with no admin password "
+            "configured — rejecting with 503"
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Admin endpoints unavailable (no admin password configured)",
         )
-    if not x_admin_password or not hmac.compare_digest(x_admin_password, expected):
+    if not x_admin_password:
+        logger.info("weather-stations admin 401: missing X-Admin-Password header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-Password header",
+        )
+    if not hmac.compare_digest(x_admin_password, expected):
+        logger.warning("weather-stations admin 401: X-Admin-Password mismatch")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing X-Admin-Password header",
@@ -315,6 +338,11 @@ async def create_api_key(
 ) -> AdminKeyCreateResponse:
     """Mint a new API key. Plaintext secret is returned exactly once."""
     created = await keystore.create(body.label)
+    logger.info(
+        "weather-stations admin: API key created id=%s label=%r",
+        created.key_id,
+        created.label,
+    )
     return make_admin_create_response(
         key_id=created.key_id,
         label=created.label,
@@ -391,8 +419,12 @@ async def revoke_api_key(
     """Revoke an API key by id."""
     removed = await keystore.revoke(key_id)
     if not removed:
+        logger.info(
+            "weather-stations admin: revoke skipped, unknown key id=%s", key_id
+        )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Unknown key_id {key_id!r}",
         )
+    logger.info("weather-stations admin: API key revoked id=%s", key_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

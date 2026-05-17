@@ -33,7 +33,12 @@ class SmnRegistryClient:
     ):
         self._url = url
         self._max_retries = max_retries
-        self._client = httpx.AsyncClient(timeout=timeout_seconds)
+        # `follow_redirects=True` because the SMN open-data endpoint commonly
+        # 301s (e.g. http→https). Without this the client treats the 301 as
+        # final and fails with "SMN registry HTTP 301".
+        self._client = httpx.AsyncClient(
+            timeout=timeout_seconds, follow_redirects=True
+        )
 
     async def close(self) -> None:
         await self._client.aclose()

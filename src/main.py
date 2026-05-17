@@ -379,6 +379,9 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         timeout_seconds=settings.weather_stations_http_timeout_seconds,
         max_retries=settings.weather_stations_http_max_retries,
         token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
+        token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
+        user_agent=settings.smn_api_user_agent,
+        log_requests=settings.smn_api_log_requests,
     )
     registry_client = SmnRegistryClient(
         url=settings.smn_stations_registry_url,
