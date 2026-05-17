@@ -17,9 +17,23 @@ from clients.smn_api_client import SmnApiClient
 from clients.smn_registry_client import SmnRegistryClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
 from controller import general
-from dependencies import basemap_service, logger, redis_client, settings
+from dependencies import (
+    basemap_service,
+    logger,
+    redis_client,
+    set_weather_stations_keystore,
+    settings,
+)
 from gdal_config import configure_gdal_vsi_s3
-from routes import basemap, ecmwf_mslp, ecmwf_tp, radar, satellite, sync
+from routes import (
+    basemap,
+    ecmwf_mslp,
+    ecmwf_tp,
+    radar,
+    satellite,
+    sync,
+    weather_stations,
+)
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_tile_reader import BasemapTileReader
@@ -51,6 +65,7 @@ from services.satellite_sync_strategy import (
 )
 from services.sync_service import sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
+from services.weather_stations_service import weather_stations_service
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -325,9 +340,14 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     """
     keystore = WeatherStationsKeystore(settings.weather_stations_keystore_db_path)
     await keystore.connect()
+    set_weather_stations_keystore(keystore)
 
     if settings.weather_stations_sync_mode == "disabled":
         logger.info("Weather stations scraper disabled (sync_mode=disabled)")
+        weather_stations_service.configure(
+            s3_client=None,
+            list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+        )
         return WeatherStationsRuntime(keystore=keystore)
 
     if not settings.is_s3_configured():
@@ -335,6 +355,10 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             "Weather stations refused to start: S3 is not configured but "
             "weather_stations_sync_mode=full requires S3. Configure S3 "
             "credentials or set WEATHER_STATIONS_SYNC_MODE=disabled."
+        )
+        weather_stations_service.configure(
+            s3_client=None,
+            list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
         )
         return WeatherStationsRuntime(keystore=keystore)
 
@@ -369,6 +393,11 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         registry_client=registry_client,
     )
     await scraper.start(logger)
+
+    weather_stations_service.configure(
+        s3_client=weather_s3,
+        list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+    )
 
     return WeatherStationsRuntime(
         keystore=keystore,
@@ -477,3 +506,4 @@ app.include_router(ecmwf_tp.router)  # ECMWF total precipitation routes
 app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
+app.include_router(weather_stations.router)  # SMN weather-stations endpoints
