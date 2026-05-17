@@ -15,7 +15,10 @@ from dependencies import (
     set_weather_stations_keystore,
     settings,
 )
-from routes.weather_stations import router as weather_stations_router
+from routes.weather_stations import (
+    admin_router as weather_stations_admin_router,
+    router as weather_stations_router,
+)
 from services.weather_stations_service import WeatherStationsService
 
 
@@ -104,6 +107,7 @@ async def app_and_keystore(tmp_path):
     app.dependency_overrides[get_weather_stations_keystore] = lambda: keystore
     app.dependency_overrides[get_weather_stations_service] = lambda: svc
     app.include_router(weather_stations_router)
+    app.include_router(weather_stations_admin_router)
 
     # Capture/restore settings flags the tests toggle.
     original_auth_enabled = settings.weather_stations_api_key_auth_enabled

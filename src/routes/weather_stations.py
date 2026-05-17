@@ -32,6 +32,22 @@ from services.weather_stations_service import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/weather-stations", tags=["Weather Stations"])
+# Admin endpoints live on a sibling router with a different tag so Swagger UI
+# can render them as a distinct section. Both routers share the same prefix
+# and dependencies but are scoped to disjoint tags.
+admin_router = APIRouter(
+    prefix="/weather-stations/admin", tags=["Weather Stations · Admin"]
+)
+
+_API_KEY_HEADER_DOC = (
+    "API key minted via `POST /weather-stations/admin/keys`. "
+    "Required on every public read endpoint when "
+    "`weather_stations_api_key_auth_enabled=true` (default)."
+)
+_ADMIN_PASSWORD_HEADER_DOC = (
+    "Master password configured via the `WEATHER_STATIONS_ADMIN_PASSWORD` env "
+    "var. Compared in constant time. Required on every admin endpoint."
+)
 
 
 # ---------------------------------------------------------------------- auth deps
@@ -40,8 +56,8 @@ router = APIRouter(prefix="/weather-stations", tags=["Weather Stations"])
 async def require_api_key(
     x_api_key: Optional[str] = Header(
         default=None,
-        description="API key minted via the admin endpoints.",
-        examples=["abc123…"],
+        description=_API_KEY_HEADER_DOC,
+        examples=["kZ8sJ3w_2x...token_urlsafe(32)"],
     ),
     keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),
 ) -> None:
@@ -62,7 +78,8 @@ async def require_api_key(
 async def require_admin_password(
     x_admin_password: Optional[str] = Header(
         default=None,
-        description="Master password configured via WEATHER_STATIONS_ADMIN_PASSWORD.",
+        description=_ADMIN_PASSWORD_HEADER_DOC,
+        examples=["your-master-password"],
     ),
 ) -> None:
     """Gate admin endpoints with the master password (constant-time compare)."""
@@ -104,6 +121,14 @@ def _raise_not_configured(exc: Exception) -> None:
     summary="Latest weather-stations snapshot",
     response_model=WeatherStationsSnapshot,
     dependencies=[Depends(require_api_key)],
+    description=(
+        "Return the most recent observation snapshot scraped from the SMN "
+        "`/weather/station` endpoint. Refreshed every 5 minutes.\n\n"
+        "Each station carries its own `observed_at`; values may be older "
+        "than `scraped_at` because SMN stations report hourly/3-hourly.\n\n"
+        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        "http://localhost:8080/weather-stations/latest`"
+    ),
     responses={
         401: {"description": "Missing or invalid X-API-Key"},
         503: {"description": "Snapshot not yet available (cold boot or S3 down)"},
@@ -133,6 +158,14 @@ async def get_latest(
     summary="Available time buckets",
     response_model=TilesetsResponse,
     dependencies=[Depends(require_api_key)],
+    description=(
+        "List the hour-bucketed `tileset_id`s currently available in S3 "
+        "(retention window is `weather_stations_s3_object_ttl_days`, "
+        "default 2 days). Each entry maps to a snapshot you can fetch via "
+        "`GET /weather-stations/{tileset_id}`.\n\n"
+        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        "http://localhost:8080/weather-stations/tilesets`"
+    ),
     responses={401: {"description": "Missing or invalid X-API-Key"}},
 )
 async def list_tilesets(
@@ -154,6 +187,16 @@ async def list_tilesets(
     summary="Station registry (metadata)",
     response_model=StationsRegistryResponse,
     dependencies=[Depends(require_api_key)],
+    description=(
+        "Return the canonical SMN EMA station registry (id, name, province, "
+        "decimal-degree coordinates, altitude, OACI code).\n\n"
+        "Sourced from "
+        "`http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones` and "
+        "refreshed by the scraper only when the upstream payload's hash "
+        "changes. Cache aggressively client-side.\n\n"
+        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        "http://localhost:8080/weather-stations/stations`"
+    ),
     responses={
         401: {"description": "Missing or invalid X-API-Key"},
         503: {"description": "Registry not yet populated"},
@@ -183,6 +226,13 @@ async def get_registry(
     summary="Snapshot for a specific time bucket",
     response_model=WeatherStationsSnapshot,
     dependencies=[Depends(require_api_key)],
+    description=(
+        "Return the latest snapshot whose `scraped_at` falls in "
+        "`[tileset_id - N hours, tileset_id]`. `N` defaults to 0 (exact "
+        "hour match required) and is capped at 48.\n\n"
+        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        "'http://localhost:8080/weather-stations/20260517T1400Z?N=6'`"
+    ),
     responses={
         400: {"description": "Malformed tilesetId"},
         401: {"description": "Missing or invalid X-API-Key"},
@@ -193,7 +243,7 @@ async def get_for_tileset(
     response: Response,
     tileset_id: str = PathParam(
         ...,
-        description="Hour-bucket id, e.g. `20260517T1400Z`",
+        description="Hour-bucket id in `YYYYMMDDTHH00Z` UTC format.",
         examples=["20260517T1400Z"],
     ),
     n: float = Query(
@@ -201,8 +251,11 @@ async def get_for_tileset(
         ge=0,
         le=48,
         alias="N",
-        description="Tolerance window in hours; the snapshot returned has "
-        "scraped_at in [tilesetId - N hours, tilesetId].",
+        description=(
+            "Tolerance window in hours; the snapshot returned has "
+            "`scraped_at` in `[tileset_id - N hours, tileset_id]`."
+        ),
+        examples=[0, 6],
     ),
     service: WeatherStationsService = Depends(get_weather_stations_service),
 ) -> WeatherStationsSnapshot:
@@ -231,13 +284,30 @@ async def get_for_tileset(
 # ---------------------------------------------------------------- admin routes
 
 
-@router.post(
-    "/admin/keys",
+@admin_router.post(
+    "/keys",
     status_code=status.HTTP_201_CREATED,
     summary="Create a new API key",
     response_model=AdminKeyCreateResponse,
     dependencies=[Depends(require_admin_password)],
-    responses={401: {"description": "Missing or invalid X-Admin-Password"}},
+    description=(
+        "Mint a new API key for use as the `X-API-Key` header on public "
+        "endpoints. The plaintext `secret` is returned exactly once — store "
+        "it now; the server only persists a SHA-256 hash, so a lost secret "
+        "cannot be recovered (revoke + reissue instead).\n\n"
+        "**Example:**\n"
+        "```bash\n"
+        "curl -X POST \\\n"
+        "  -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        "  -H 'Content-Type: application/json' \\\n"
+        "  -d '{\"label\":\"local-dev\"}' \\\n"
+        "  http://localhost:8080/weather-stations/admin/keys\n"
+        "```"
+    ),
+    responses={
+        201: {"description": "Key minted; `secret` field is returned exactly once"},
+        401: {"description": "Missing or invalid X-Admin-Password"},
+    },
 )
 async def create_api_key(
     body: AdminKeyCreateRequest = Body(...),
@@ -253,12 +323,21 @@ async def create_api_key(
     )
 
 
-@router.get(
-    "/admin/keys",
+@admin_router.get(
+    "/keys",
     status_code=status.HTTP_200_OK,
     summary="List API keys",
     response_model=AdminKeyListResponse,
     dependencies=[Depends(require_admin_password)],
+    description=(
+        "List every active API key. Secrets are never returned — only "
+        "`key_id`, `label`, `created_at`, and `last_used_at`.\n\n"
+        "**Example:**\n"
+        "```bash\n"
+        "curl -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        "  http://localhost:8080/weather-stations/admin/keys\n"
+        "```"
+    ),
     responses={401: {"description": "Missing or invalid X-Admin-Password"}},
 )
 async def list_api_keys(
@@ -279,11 +358,22 @@ async def list_api_keys(
     )
 
 
-@router.delete(
-    "/admin/keys/{key_id}",
+@admin_router.delete(
+    "/keys/{key_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revoke an API key",
     dependencies=[Depends(require_admin_password)],
+    description=(
+        "Revoke an API key by `key_id`. The key takes effect immediately "
+        "(no grace period). Subsequent requests carrying the revoked "
+        "`X-API-Key` will receive 401.\n\n"
+        "**Example:**\n"
+        "```bash\n"
+        "curl -X DELETE \\\n"
+        "  -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        "  http://localhost:8080/weather-stations/admin/keys/$KEY_ID\n"
+        "```"
+    ),
     responses={
         204: {"description": "Key revoked"},
         401: {"description": "Missing or invalid X-Admin-Password"},
@@ -291,7 +381,11 @@ async def list_api_keys(
     },
 )
 async def revoke_api_key(
-    key_id: str = PathParam(..., description="ID returned by POST /admin/keys"),
+    key_id: str = PathParam(
+        ...,
+        description="The `key_id` returned by `POST /weather-stations/admin/keys`.",
+        examples=["1a2b3c4d5e6f7890"],
+    ),
     keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),
 ) -> Response:
     """Revoke an API key by id."""

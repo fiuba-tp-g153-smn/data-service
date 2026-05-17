@@ -488,6 +488,24 @@ app: FastAPI = FastAPI(
         "name": "FIUBA TPF Team N°153 Altamirano, Diem, Gismondi, Valeriani",
     },
     lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "Weather Stations",
+            "description": (
+                "Public read endpoints serving SMN EMA snapshots scraped "
+                "every ~5 minutes. All require the `X-API-Key` header (see "
+                "the **Weather Stations · Admin** section for how to mint one)."
+            ),
+        },
+        {
+            "name": "Weather Stations · Admin",
+            "description": (
+                "Operator-only API-key management. Every endpoint requires "
+                "the `X-Admin-Password` header matching the "
+                "`WEATHER_STATIONS_ADMIN_PASSWORD` env var."
+            ),
+        },
+    ],
 )
 
 # Add CORS middleware for tile serving
@@ -507,3 +525,4 @@ app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
 app.include_router(weather_stations.router)  # SMN weather-stations endpoints
+app.include_router(weather_stations.admin_router)  # Admin API-key management

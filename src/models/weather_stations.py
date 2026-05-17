@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StationObservation(BaseModel):
@@ -19,6 +19,24 @@ class StationObservation(BaseModel):
     weather: Optional[dict] = None
     wind: Optional[dict] = None
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "station_id": 87344,
+                    "observed_at": "2026-05-17T13:00:00Z",
+                    "temperature": 18.4,
+                    "feels_like": 17.9,
+                    "humidity": 62.0,
+                    "pressure": 1013.2,
+                    "visibility": 10.0,
+                    "weather": {"id": 1, "description": "Despejado"},
+                    "wind": {"direction": "Norte", "deg": 5, "speed": 8.2},
+                }
+            ]
+        }
+    )
+
 
 class WeatherStationsSnapshot(BaseModel):
     """One scrape cycle's persisted snapshot (matches the on-disk JSON shape)."""
@@ -26,6 +44,30 @@ class WeatherStationsSnapshot(BaseModel):
     scraped_at: datetime
     source_url: str
     stations: List[StationObservation]
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "scraped_at": "2026-05-17T14:05:00Z",
+                    "source_url": "https://api-test.smn.gob.ar/v1/weather/station",
+                    "stations": [
+                        {
+                            "station_id": 87344,
+                            "observed_at": "2026-05-17T13:00:00Z",
+                            "temperature": 18.4,
+                            "feels_like": 17.9,
+                            "humidity": 62.0,
+                            "pressure": 1013.2,
+                            "visibility": 10.0,
+                            "weather": {"id": 1, "description": "Despejado"},
+                            "wind": {"direction": "Norte", "deg": 5, "speed": 8.2},
+                        }
+                    ],
+                }
+            ]
+        }
+    )
 
 
 class TilesetEntry(BaseModel):
@@ -48,6 +90,27 @@ class TilesetsResponse(BaseModel):
 
     tilesets: List[TilesetEntry]
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "tilesets": [
+                        {
+                            "tileset_id": "20260517T1300Z",
+                            "scraped_at": "2026-05-17T13:55:00Z",
+                            "station_count": 142,
+                        },
+                        {
+                            "tileset_id": "20260517T1400Z",
+                            "scraped_at": "2026-05-17T14:55:00Z",
+                            "station_count": 143,
+                        },
+                    ]
+                }
+            ]
+        }
+    )
+
 
 class StationRegistryEntry(BaseModel):
     """Metadata for one station from the public SMN EMA registry."""
@@ -68,11 +131,43 @@ class StationsRegistryResponse(BaseModel):
     source_url: Optional[str] = None
     stations: List[StationRegistryEntry]
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "fetched_at": "2026-05-17T14:00:00Z",
+                    "source_url": "http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones",
+                    "stations": [
+                        {
+                            "station_id": 87344,
+                            "name": "CORDOBA AERO",
+                            "province": "CORDOBA",
+                            "latitude": -31.2833,
+                            "longitude": -64.2,
+                            "altitude_meters": 495,
+                            "oaci_code": "SACO",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
 
 class AdminKeyCreateRequest(BaseModel):
     """Body for POST /weather-stations/admin/keys."""
 
-    label: str = Field(..., min_length=1, max_length=80)
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=80,
+        description="Human-readable label so you can identify the key later.",
+        examples=["local-dev", "visualizer-prod"],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"label": "local-dev"}]}
+    )
 
 
 class AdminKeyCreateResponse(BaseModel):
@@ -83,10 +178,24 @@ class AdminKeyCreateResponse(BaseModel):
     secret: str = Field(
         ...,
         description=(
-            "Plaintext API key — store it now; the server only keeps a hash."
+            "Plaintext API key — store it now; the server only keeps a hash. "
+            "Use as the `X-API-Key` header on every public read endpoint."
         ),
     )
     created_at: datetime
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "key_id": "1a2b3c4d5e6f7890",
+                    "label": "local-dev",
+                    "secret": "kZ8sJ3w_token_urlsafe_32_chars_minimum_xyz",
+                    "created_at": "2026-05-17T14:00:00Z",
+                }
+            ]
+        }
+    )
 
 
 class AdminKeyListEntry(BaseModel):
@@ -102,6 +211,23 @@ class AdminKeyListResponse(BaseModel):
     """Response listing every active API key (without secrets)."""
 
     keys: List[AdminKeyListEntry]
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "keys": [
+                        {
+                            "key_id": "1a2b3c4d5e6f7890",
+                            "label": "local-dev",
+                            "created_at": "2026-05-17T14:00:00Z",
+                            "last_used_at": "2026-05-17T14:05:12Z",
+                        }
+                    ]
+                }
+            ]
+        }
+    )
 
 
 def make_admin_create_response(
