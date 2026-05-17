@@ -36,6 +36,13 @@ class Settings:
     smn_api_base_url: str = "https://api-test.smn.gob.ar/v1"
     smn_api_username: str = ""
     smn_api_password: str = ""
+    # Public ZIP endpoint serving the canonical station registry (EMA list).
+    # Different host + no auth. Refreshed lazily inside each scrape cycle:
+    # the scraper compares the downloaded payload's hash against the stored
+    # one and only rewrites the registry when it actually changed.
+    smn_stations_registry_url: str = (
+        "http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones"
+    )
     # Master password protecting /weather-stations/admin/* endpoints. Required
     # when weather_stations_api_key_auth_enabled is True (validator enforces).
     weather_stations_admin_password: str = ""
@@ -453,6 +460,9 @@ class Settings:
         self.smn_api_base_url = os.getenv("SMN_API_BASE_URL", self.smn_api_base_url)
         self.smn_api_username = os.getenv("SMN_API_USERNAME", self.smn_api_username)
         self.smn_api_password = os.getenv("SMN_API_PASSWORD", self.smn_api_password)
+        self.smn_stations_registry_url = os.getenv(
+            "SMN_STATIONS_REGISTRY_URL", self.smn_stations_registry_url
+        )
         self.weather_stations_admin_password = os.getenv(
             "WEATHER_STATIONS_ADMIN_PASSWORD", self.weather_stations_admin_password
         )

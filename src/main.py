@@ -13,6 +13,9 @@ from clients.basemap_state_store import BasemapStateStore
 from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
+from clients.smn_api_client import SmnApiClient
+from clients.smn_registry_client import SmnRegistryClient
+from clients.weather_stations_keystore import WeatherStationsKeystore
 from controller import general
 from dependencies import basemap_service, logger, redis_client, settings
 from gdal_config import configure_gdal_vsi_s3
@@ -47,8 +50,22 @@ from services.satellite_sync_strategy import (
     SatelliteSyncStrategy,
 )
 from services.sync_service import sync_service
+from services.weather_stations_scraper_service import WeatherStationsScraperService
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
+@dataclass(slots=True)
+class WeatherStationsRuntime:
+    """Lifecycle holder for weather-stations resources owned by the app lifespan."""
+
+    keystore: WeatherStationsKeystore
+    # All three are absent when sync_mode == "disabled" (keystore stays for
+    # read-side auth gating, but nothing scrapes).
+    s3_client: Optional[S3Client] = None
+    smn_client: Optional[SmnApiClient] = None
+    registry_client: Optional[SmnRegistryClient] = None
+    scraper: Optional[WeatherStationsScraperService] = None
 
 
 @dataclass(slots=True)
@@ -298,6 +315,83 @@ async def configure_basemap(
     )
 
 
+async def configure_weather_stations() -> WeatherStationsRuntime:
+    """Bring up the weather-stations subsystem.
+
+    The keystore is always built (it gates the read endpoints' API-key auth
+    even when no scraper runs). When `weather_stations_sync_mode == "full"`
+    the scraper + its S3/SMN clients are also built and started. Subsystem
+    is S3-only by design — no Redis.
+    """
+    keystore = WeatherStationsKeystore(settings.weather_stations_keystore_db_path)
+    await keystore.connect()
+
+    if settings.weather_stations_sync_mode == "disabled":
+        logger.info("Weather stations scraper disabled (sync_mode=disabled)")
+        return WeatherStationsRuntime(keystore=keystore)
+
+    if not settings.is_s3_configured():
+        logger.error(
+            "Weather stations refused to start: S3 is not configured but "
+            "weather_stations_sync_mode=full requires S3. Configure S3 "
+            "credentials or set WEATHER_STATIONS_SYNC_MODE=disabled."
+        )
+        return WeatherStationsRuntime(keystore=keystore)
+
+    weather_s3 = S3Client(
+        endpoint=settings.s3_tiles_data_endpoint,
+        access_key=settings.s3_tiles_data_access_key,
+        secret_key=settings.s3_tiles_data_secret_key,
+        bucket=settings.s3_weather_stations_bucket_name,
+        secure=settings.s3_tiles_data_secure,
+        max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+    )
+    await weather_s3.connect()
+
+    smn_client = SmnApiClient(
+        base_url=settings.smn_api_base_url,
+        username=settings.smn_api_username,
+        password=settings.smn_api_password,
+        timeout_seconds=settings.weather_stations_http_timeout_seconds,
+        max_retries=settings.weather_stations_http_max_retries,
+        token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
+    )
+    registry_client = SmnRegistryClient(
+        url=settings.smn_stations_registry_url,
+        timeout_seconds=settings.weather_stations_http_timeout_seconds,
+        max_retries=settings.weather_stations_http_max_retries,
+    )
+
+    scraper = WeatherStationsScraperService(
+        settings=settings,
+        s3_client=weather_s3,
+        smn_client=smn_client,
+        registry_client=registry_client,
+    )
+    await scraper.start(logger)
+
+    return WeatherStationsRuntime(
+        keystore=keystore,
+        s3_client=weather_s3,
+        smn_client=smn_client,
+        registry_client=registry_client,
+        scraper=scraper,
+    )
+
+
+async def shutdown_weather_stations(runtime: WeatherStationsRuntime) -> None:
+    """Tear down weather-stations resources in reverse startup order."""
+    if runtime.scraper is not None:
+        await runtime.scraper.stop(logger)
+    if runtime.smn_client is not None:
+        await runtime.smn_client.close()
+    if runtime.registry_client is not None:
+        await runtime.registry_client.close()
+    if runtime.s3_client is not None:
+        await runtime.s3_client.close()
+    await runtime.keystore.close()
+
+
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     """Tear down basemap resources in reverse startup order."""
     if not runtime:
@@ -343,11 +437,13 @@ async def lifespan(_app: FastAPI):
     point_value_service.set_strategy(point_value_strategy)
 
     basemap_runtime = await configure_basemap(redis_client)
+    weather_stations_runtime = await configure_weather_stations()
 
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
+    await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
