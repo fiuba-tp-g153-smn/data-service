@@ -63,5 +63,18 @@
       { "id": "ign-sublocalidad", "enabled": true },
       { "id": "ign-gobierno-local", "enabled": true }
     ]
+  },
+  "weather_stations": {
+    "sync_mode": "full",
+    "scrape_interval_seconds": 300,
+    "scrape_lock_path": "/tmp/weather_stations_scrape.lock",
+    "http_timeout_seconds": 30,
+    "http_max_retries": 3,
+    "token_cache_ttl_seconds": 3600,
+    "s3_object_ttl_days": 2,
+    "list_cache_ttl_seconds": 30,
+    "cache_control_response": "public, max-age=60",
+    "api_key_auth_enabled": true,
+    "keystore_db_path": "data/weather_stations_keys.sqlite"
   }
 }

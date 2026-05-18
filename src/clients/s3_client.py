@@ -183,6 +183,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 logger.error("Failed to download %s to Redis: %s", s3_key, e)
                 return False
 
+    async def list_object_keys(self, prefix: str) -> List[str]:
+        """List full S3 keys under `prefix` (recursive, excludes directory markers).
+
+        Use when you need every key under a prefix, regardless of depth — e.g.
+        the weather-stations read service walking
+        `weather-stations/snapshots/{Y}/{M}/{D}/{H}/...`. Returns `[]` on error
+        instead of raising, mirroring the other read-path tolerance in this
+        client.
+        """
+        objects = await self._list_objects(prefix)
+        return [obj["Key"] for obj in objects]
+
     async def _list_objects(self, prefix: str) -> List[dict]:
         """List all objects under a prefix."""
         if self._client is None:
