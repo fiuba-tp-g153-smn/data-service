@@ -8,7 +8,7 @@ from models.base import BoundingBox
 
 
 class TimestampInfo(BaseModel):
-    """Info for a single MSLP timestamp (instantaneous, T+H of the forecast)."""
+    """Info for a single MSLP snapshot (instantaneous field at timestamp_ts, the period-end)."""
 
     timestamp_ts: str
 

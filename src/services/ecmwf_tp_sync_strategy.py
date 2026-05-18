@@ -8,12 +8,12 @@ from typing import List, Optional, Protocol
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 
-_CENTERED_PERIOD_PATTERN = re.compile(r"^\d{8}T\d{4}Z$")
+_TIMESTAMP_PATTERN = re.compile(r"^\d{8}T\d{4}Z$")
 
 
-def is_centered_period_format(period_ts: str) -> bool:
-    """Return True if period_ts matches the centered single-timestamp format."""
-    return bool(_CENTERED_PERIOD_PATTERN.fullmatch(period_ts))
+def is_valid_timestamp_format(period_ts: str) -> bool:
+    """Return True if period_ts matches the YYYYMMDDTHHmmZ single-timestamp format."""
+    return bool(_TIMESTAMP_PATTERN.fullmatch(period_ts))
 
 
 class EcmwfTpSyncStrategy(Protocol):
@@ -129,7 +129,7 @@ class EcmwfTpOnDemandStrategy:
             s.rstrip("/").split("/")[-1]
             for s in subdirs
             if s.rstrip("/").split("/")[-1]
-            and is_centered_period_format(s.rstrip("/").split("/")[-1])
+            and is_valid_timestamp_format(s.rstrip("/").split("/")[-1])
         )
 
         await self._redis.cache_listing(
