@@ -72,11 +72,15 @@ class BasemapService:
     async def list_providers(self) -> BasemapProvidersResponse:
         """Return base map providers visible to the frontend.
 
-        Each enabled provider is checked in parallel: upstream is actively
+        Overlay-kind providers (e.g. IGN WMS reference layers) are scraped
+        and served like basemaps but excluded from this listing so they
+        don't appear in the basemap-picker UI.
+
+        Each remaining provider is checked in parallel: upstream is actively
         probed (and S3 fallback queried concurrently). A provider is listed
         when the upstream is healthy OR S3 has at least one cached tile.
         """
-        candidates = list(self._providers.values())
+        candidates = [p for p in self._providers.values() if not p.is_overlay]
         flags = await asyncio.gather(
             *(self._check_provider_available(p) for p in candidates)
         )

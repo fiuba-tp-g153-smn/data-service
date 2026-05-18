@@ -10,7 +10,9 @@ from services.basemap_config import BasemapProvider
 from services.basemap_service import BasemapService
 
 
-def _make_provider(provider_id: str, min_zoom: int = 3) -> BasemapProvider:
+def _make_provider(
+    provider_id: str, min_zoom: int = 3, is_overlay: bool = False
+) -> BasemapProvider:
     return BasemapProvider(
         provider_id=provider_id,
         name=provider_id.title(),
@@ -20,6 +22,7 @@ def _make_provider(provider_id: str, min_zoom: int = 3) -> BasemapProvider:
         max_zoom=18,
         cache_max_zoom=11,
         attribution="",
+        is_overlay=is_overlay,
     )
 
 
@@ -251,6 +254,52 @@ async def test_provider_hidden_when_both_probe_and_s3_raise():
 
     resp = await service.list_providers()
     assert resp.providers == []
+
+
+@pytest.mark.asyncio
+async def test_overlay_providers_are_hidden_from_listing_but_kept_in_registry():
+    """Overlay-kind providers (e.g. IGN reference layers) must NOT appear in the
+    basemap-picker listing, but MUST remain in the registry so the tile-serving
+    route can still resolve them."""
+    overlay = _make_provider("ign-provincia", is_overlay=True)
+    basemap = _make_provider("argenmap")
+    http = _make_http(data=b"\x89PNG")
+    service = _configure(providers=[basemap, overlay], http=http, s3=_make_s3())
+
+    resp = await service.list_providers()
+
+    listed_ids = {p.id for p in resp.providers}
+    assert "argenmap" in listed_ids
+    assert "ign-provincia" not in listed_ids
+    # Overlay stays in the registry so /basemap/{id}/{z}/{x}/{y}.png still works.
+    assert "ign-provincia" in service._providers  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_overlay_providers_skip_upstream_probe():
+    """Listing must not probe upstream for overlay providers — they're filtered
+    before the probe, so no HTTP fetch is issued for them."""
+    captured_urls: list[str] = []
+
+    async def capture(url):
+        captured_urls.append(url)
+        return b"\x89PNG"
+
+    http = MagicMock()
+    http.download_tile = AsyncMock(side_effect=capture)
+    service = _configure(
+        providers=[
+            _make_provider("argenmap"),
+            _make_provider("ign-provincia", is_overlay=True),
+        ],
+        http=http,
+        s3=_make_s3(present=False),
+    )
+
+    await service.list_providers()
+
+    # Only the real basemap was probed.
+    assert captured_urls == ["https://example.test/argenmap/3/0/0.png"]
 
 
 @pytest.mark.asyncio

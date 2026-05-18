@@ -38,6 +38,7 @@ class WmsParams:
 
 
 @dataclass(frozen=True, slots=True)
+# pylint: disable-next=too-many-instance-attributes
 class BasemapProvider:
     """Configuration for a single base map tile provider.
 
@@ -46,6 +47,9 @@ class BasemapProvider:
     that template and uses ``wms`` to build a GetMap call. The rest of
     the pipeline (S3 keying, Redis caching, circuit breaker, prod-first
     reader) is kind-agnostic.
+
+    ``is_overlay`` marks transparent layers that are scraped and served
+    like basemaps but must NOT appear in the basemap-picker listing.
     """
 
     provider_id: str
@@ -58,6 +62,7 @@ class BasemapProvider:
     attribution: str
     kind: ProviderKind = ProviderKind.XYZ
     wms: Optional[WmsParams] = None
+    is_overlay: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +87,7 @@ class ProviderDefaults:
     attribution: str
     kind: ProviderKind = ProviderKind.XYZ
     wms: Optional[WmsParams] = None
+    is_overlay: bool = False
 
 
 PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
@@ -165,6 +171,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="provincia_FA003",
             workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
         ),
+        is_overlay=True,
     ),
     "ign-limite-internacional": ProviderDefaults(
         name="Límite internacional (IGN)",
@@ -178,6 +185,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="linea_de_limite_FA004",
             workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
         ),
+        is_overlay=True,
     ),
     "ign-limite-interdepartamental-o-de-partido": ProviderDefaults(
         name="Límite interdepartamental o de partido (IGN)",
@@ -191,6 +199,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="ign:linea_de_limite_070110",
             workspace_url="https://wms.ign.gob.ar/geoserver/ows",
         ),
+        is_overlay=True,
     ),
     "ign-localidad": ProviderDefaults(
         name="Localidad (IGN)",
@@ -204,6 +213,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="ign:localidad_bahra",
             workspace_url="https://wms.ign.gob.ar/geoserver/ows",
         ),
+        is_overlay=True,
     ),
     "ign-sublocalidad": ProviderDefaults(
         name="Sublocalidad (IGN)",
@@ -217,6 +227,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="ign:sublocalidad_entidad_bahra",
             workspace_url="https://wms.ign.gob.ar/geoserver/ows",
         ),
+        is_overlay=True,
     ),
     "ign-gobierno-local": ProviderDefaults(
         name="Gobierno Local (IGN)",
@@ -230,6 +241,7 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
             layer_name="gobiernoslocales_2022",
             workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
         ),
+        is_overlay=True,
     ),
 }
 
@@ -280,6 +292,7 @@ def _load_provider(provider_id: str) -> Optional[BasemapProvider]:
             attribution=defaults.attribution,
             kind=ProviderKind.WMS,
             wms=wms,
+            is_overlay=defaults.is_overlay,
         )
 
     url = os.getenv(f"{_env_prefix(provider_id)}_URL", "")
@@ -300,6 +313,7 @@ def _load_provider(provider_id: str) -> Optional[BasemapProvider]:
         max_zoom=defaults.max_zoom,
         cache_max_zoom=defaults.cache_max_zoom,
         attribution=defaults.attribution,
+        is_overlay=defaults.is_overlay,
     )
 
 
