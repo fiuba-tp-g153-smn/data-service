@@ -173,32 +173,32 @@ async def test_multiple_keys_coexist(keystore):
 
 
 @pytest.mark.asyncio
-async def test_inject_stores_caller_supplied_secret(keystore):
-    created = await keystore.inject("manual", "hiImGabriel")
+async def test_add_custom_stores_caller_supplied_secret(keystore):
+    created = await keystore.add_custom("manual", "hello-world-123")
     assert created.label == "manual"
-    assert created.secret == "hiImGabriel"
+    assert created.secret == "hello-world-123"
     assert created.key_id
 
-    assert await keystore.is_valid("hiImGabriel") is True
+    assert await keystore.is_valid("hello-world-123") is True
     [row] = await keystore.list_all()
     assert row.key_id == created.key_id
     assert row.label == "manual"
 
 
 @pytest.mark.asyncio
-async def test_inject_accepts_arbitrary_non_alphanumeric_secrets(keystore):
-    weird_secrets = ["hi-Im-Gabriel", "Gabriel.2026", "with spaces!", "Ωemoji🚀"]
+async def test_add_custom_accepts_arbitrary_non_alphanumeric_secrets(keystore):
+    weird_secrets = ["hi-Im-FastAPI", "FastAPI.2026", "with spaces!", "Ωemoji🚀"]
     for i, secret in enumerate(weird_secrets):
-        created = await keystore.inject(f"label-{i}", secret)
+        created = await keystore.add_custom(f"label-{i}", secret)
         assert created.secret == secret
         assert await keystore.is_valid(secret) is True
 
 
 @pytest.mark.asyncio
-async def test_inject_rejects_duplicate_secret(keystore):
-    await keystore.inject("first", "shared-secret")
+async def test_add_custom_rejects_duplicate_secret(keystore):
+    await keystore.add_custom("first", "shared-secret")
     with pytest.raises(SecretAlreadyInUseError):
-        await keystore.inject("second", "shared-secret")
+        await keystore.add_custom("second", "shared-secret")
 
 
 @pytest.mark.asyncio

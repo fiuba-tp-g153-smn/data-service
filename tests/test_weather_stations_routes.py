@@ -313,45 +313,45 @@ async def test_auth_disabled_lets_reads_through_without_header(
     assert resp.status_code == 200
 
 
-# ---------------------------------------------------------------- admin inject
+# ------------------------------------------------------------ admin add-custom
 
 
 @pytest.mark.asyncio
-async def test_admin_inject_registers_custom_secret(app_and_keystore):
+async def test_admin_add_custom_registers_custom_secret(app_and_keystore):
     app, _ = app_and_keystore
     client = TestClient(app)
     headers = {"X-Admin-Password": "admin-pw"}
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
-        json={"label": "manual", "secret": "hiImGabriel"},
+        "/weather-stations/admin/keys/add-custom",
+        json={"label": "manual", "secret": "hello-world-123"},
         headers=headers,
     )
     assert resp.status_code == 201
     body = resp.json()
     assert body["label"] == "manual"
-    assert body["secret"] == "hiImGabriel"
+    assert body["secret"] == "hello-world-123"
 
-    # Injected secret immediately works as an X-API-Key.
-    resp = client.get("/weather-stations/latest", headers={"X-API-Key": "hiImGabriel"})
+    # Custom secret immediately works as an X-API-Key.
+    resp = client.get("/weather-stations/latest", headers={"X-API-Key": "hello-world-123"})
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_admin_inject_rejects_duplicate_secret_with_409(app_and_keystore):
+async def test_admin_add_custom_rejects_duplicate_secret_with_409(app_and_keystore):
     app, _ = app_and_keystore
     client = TestClient(app)
     headers = {"X-Admin-Password": "admin-pw"}
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
+        "/weather-stations/admin/keys/add-custom",
         json={"label": "a", "secret": "shared-secret"},
         headers=headers,
     )
     assert resp.status_code == 201
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
+        "/weather-stations/admin/keys/add-custom",
         json={"label": "b", "secret": "shared-secret"},
         headers=headers,
     )
@@ -359,32 +359,32 @@ async def test_admin_inject_rejects_duplicate_secret_with_409(app_and_keystore):
 
 
 @pytest.mark.asyncio
-async def test_admin_inject_rejects_missing_admin_password(app_and_keystore):
+async def test_admin_add_custom_rejects_missing_admin_password(app_and_keystore):
     app, _ = app_and_keystore
     client = TestClient(app)
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
+        "/weather-stations/admin/keys/add-custom",
         json={"label": "a", "secret": "x"},
     )
     assert resp.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_admin_inject_validates_secret_length(app_and_keystore):
+async def test_admin_add_custom_validates_secret_length(app_and_keystore):
     app, _ = app_and_keystore
     client = TestClient(app)
     headers = {"X-Admin-Password": "admin-pw"}
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
+        "/weather-stations/admin/keys/add-custom",
         json={"label": "a", "secret": ""},
         headers=headers,
     )
     assert resp.status_code == 422
 
     resp = client.post(
-        "/weather-stations/admin/keys/inject",
+        "/weather-stations/admin/keys/add-custom",
         json={"label": "a", "secret": "x" * 129},
         headers=headers,
     )

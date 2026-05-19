@@ -18,9 +18,9 @@ from dependencies import (
     settings,
 )
 from models.weather_stations import (
+    AdminKeyAddCustomRequest,
     AdminKeyCreateRequest,
     AdminKeyCreateResponse,
-    AdminKeyInjectRequest,
     AdminKeyListResponse,
     StationsRegistryResponse,
     TilesetsResponse,
@@ -43,15 +43,8 @@ admin_router = APIRouter(
     prefix="/weather-stations/admin", tags=["Weather Stations · Admin"]
 )
 
-_API_KEY_HEADER_DOC = (
-    "API key minted via `POST /weather-stations/admin/keys`. "
-    "Required on every public read endpoint when "
-    "`weather_stations_api_key_auth_enabled=true` (default)."
-)
-_ADMIN_PASSWORD_HEADER_DOC = (
-    "Master password configured via the `WEATHER_STATIONS_ADMIN_PASSWORD` env "
-    "var. Compared in constant time. Required on every admin endpoint."
-)
+_API_KEY_HEADER_DOC = "API key for read endpoints."
+_ADMIN_PASSWORD_HEADER_DOC = "Master password for admin endpoints."
 
 
 # ---------------------------------------------------------------------- auth deps
@@ -317,23 +310,10 @@ async def get_for_tileset(
     summary="Create a new API key",
     response_model=AdminKeyCreateResponse,
     dependencies=[Depends(require_admin_password)],
-    description=(
-        "Mint a new API key for use as the `X-API-Key` header on public "
-        "endpoints. The plaintext `secret` is returned exactly once — store "
-        "it now; the server only persists a SHA-256 hash, so a lost secret "
-        "cannot be recovered (revoke + reissue instead).\n\n"
-        "**Example:**\n"
-        "```bash\n"
-        "curl -X POST \\\n"
-        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
-        "  -H 'Content-Type: application/json' \\\n"
-        '  -d \'{"label":"local-dev"}\' \\\n'
-        "  http://localhost:8080/weather-stations/admin/keys\n"
-        "```"
-    ),
+    description="Mint a new API key. The plaintext secret is returned once.",
     responses={
-        201: {"description": "Key minted; `secret` field is returned exactly once"},
-        401: {"description": "Missing or invalid X-Admin-Password"},
+        201: {"description": "Key created; secret returned once"},
+        401: {"description": "Missing or invalid admin password"},
     },
 )
 async def create_api_key(
@@ -356,45 +336,32 @@ async def create_api_key(
 
 
 @admin_router.post(
-    "/keys/inject",
+    "/keys/add-custom",
     status_code=status.HTTP_201_CREATED,
-    summary="Inject an API key with a caller-provided secret",
+    summary="Add an API key with a caller-provided secret",
     response_model=AdminKeyCreateResponse,
     dependencies=[Depends(require_admin_password)],
-    description=(
-        "Register a caller-provided plaintext secret as a valid API key. "
-        "Useful for ad-hoc dev/demo flows where a human-legible secret is "
-        "preferable to a 43-char random string. The server stores only the "
-        "SHA-256 hash; the chosen secret is echoed back exactly once.\n\n"
-        "**Example:**\n"
-        "```bash\n"
-        "curl -X POST \\\n"
-        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
-        "  -H 'Content-Type: application/json' \\\n"
-        '  -d \'{"label":"manual-gabriel","secret":"hiImGabriel"}\' \\\n'
-        "  http://localhost:8080/weather-stations/admin/keys/inject\n"
-        "```"
-    ),
+    description="Register a caller-supplied plaintext secret as a valid API key.",
     responses={
-        201: {"description": "Key registered; the supplied `secret` is echoed back"},
-        401: {"description": "Missing or invalid X-Admin-Password"},
-        409: {"description": "Secret already in use (same hash already stored)"},
+        201: {"description": "Key added; secret echoed back"},
+        401: {"description": "Missing or invalid admin password"},
+        409: {"description": "Secret already in use"},
     },
 )
-async def inject_api_key(
-    body: AdminKeyInjectRequest = Body(...),
+async def add_custom_api_key(
+    body: AdminKeyAddCustomRequest = Body(...),
     keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),
 ) -> AdminKeyCreateResponse:
-    """Inject a caller-provided secret as a valid API key."""
+    """Register a caller-provided secret as a valid API key."""
     try:
-        created = await keystore.inject(body.label, body.secret)
+        created = await keystore.add_custom(body.label, body.secret)
     except SecretAlreadyInUseError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Secret already in use",
         ) from exc
     logger.info(
-        "weather-stations admin: API key injected id=%s label=%r",
+        "weather-stations admin: API key added (custom) id=%s label=%r",
         created.key_id,
         created.label,
     )
@@ -412,16 +379,8 @@ async def inject_api_key(
     summary="List API keys",
     response_model=AdminKeyListResponse,
     dependencies=[Depends(require_admin_password)],
-    description=(
-        "List every active API key. Secrets are never returned — only "
-        "`key_id`, `label`, `created_at`, and `last_used_at`.\n\n"
-        "**Example:**\n"
-        "```bash\n"
-        'curl -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
-        "  http://localhost:8080/weather-stations/admin/keys\n"
-        "```"
-    ),
-    responses={401: {"description": "Missing or invalid X-Admin-Password"}},
+    description="List every active API key (without secrets).",
+    responses={401: {"description": "Missing or invalid admin password"}},
 )
 async def list_api_keys(
     keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),
@@ -446,27 +405,17 @@ async def list_api_keys(
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revoke an API key",
     dependencies=[Depends(require_admin_password)],
-    description=(
-        "Revoke an API key by `key_id`. The key takes effect immediately "
-        "(no grace period). Subsequent requests carrying the revoked "
-        "`X-API-Key` will receive 401.\n\n"
-        "**Example:**\n"
-        "```bash\n"
-        "curl -X DELETE \\\n"
-        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
-        "  http://localhost:8080/weather-stations/admin/keys/$KEY_ID\n"
-        "```"
-    ),
+    description="Revoke an API key by id. Takes effect immediately.",
     responses={
         204: {"description": "Key revoked"},
-        401: {"description": "Missing or invalid X-Admin-Password"},
-        404: {"description": "Unknown key_id"},
+        401: {"description": "Missing or invalid admin password"},
+        404: {"description": "Unknown key id"},
     },
 )
 async def revoke_api_key(
     key_id: str = PathParam(
         ...,
-        description="The `key_id` returned by `POST /weather-stations/admin/keys`.",
+        description="Id returned when the key was created.",
         examples=["1a2b3c4d5e6f7890"],
     ),
     keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),

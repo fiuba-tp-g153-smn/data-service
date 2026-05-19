@@ -157,29 +157,17 @@ class StationsRegistryResponse(BaseModel):
 class AdminKeyCreateRequest(BaseModel):
     """Body for POST /weather-stations/admin/keys."""
 
-    label: str = Field(
-        ...,
-        min_length=1,
-        max_length=80,
-        description="Human-readable label so you can identify the key later.",
-        examples=["local-dev", "visualizer-prod"],
-    )
+    label: str = Field(..., min_length=1, max_length=80)
 
     model_config = ConfigDict(json_schema_extra={"examples": [{"label": "local-dev"}]})
 
 
 class AdminKeyCreateResponse(BaseModel):
-    """One-time response carrying the new key's plaintext secret."""
+    """Response carrying the new key's plaintext secret (returned once)."""
 
     key_id: str
     label: str
-    secret: str = Field(
-        ...,
-        description=(
-            "Plaintext API key — store it now; the server only keeps a hash. "
-            "Use as the `X-API-Key` header on every public read endpoint."
-        ),
-    )
+    secret: str
     created_at: datetime
 
     model_config = ConfigDict(
@@ -188,7 +176,7 @@ class AdminKeyCreateResponse(BaseModel):
                 {
                     "key_id": "1a2b3c4d5e6f7890",
                     "label": "local-dev",
-                    "secret": "kZ8sJ3w_token_urlsafe_32_chars_minimum_xyz",
+                    "secret": "kZ8sJ3w...",
                     "created_at": "2026-05-17T14:00:00Z",
                 }
             ]
@@ -196,37 +184,21 @@ class AdminKeyCreateResponse(BaseModel):
     )
 
 
-class AdminKeyInjectRequest(BaseModel):
-    """Body for POST /weather-stations/admin/keys/inject."""
+class AdminKeyAddCustomRequest(BaseModel):
+    """Body for POST /weather-stations/admin/keys/add-custom."""
 
-    label: str = Field(
-        ...,
-        min_length=1,
-        max_length=80,
-        description="Human-readable label so you can identify the key later.",
-        examples=["manual-gabriel"],
-    )
-    secret: str = Field(
-        ...,
-        min_length=1,
-        max_length=128,
-        description=(
-            "Arbitrary plaintext secret to register as a valid API key. "
-            "Any non-empty string up to 128 chars is accepted; charset is not "
-            "restricted so human-legible secrets are allowed."
-        ),
-        examples=["hiImGabriel"],
-    )
+    label: str = Field(..., min_length=1, max_length=80)
+    secret: str = Field(..., min_length=1, max_length=128)
 
     model_config = ConfigDict(
         json_schema_extra={
-            "examples": [{"label": "manual-gabriel", "secret": "hiImGabriel"}]
+            "examples": [{"label": "my-custom-key", "secret": "hello-world-123"}]
         }
     )
 
 
 class AdminKeyListEntry(BaseModel):
-    """One row from GET /weather-stations/admin/keys (no secrets)."""
+    """One row from GET /weather-stations/admin/keys."""
 
     key_id: str
     label: str
@@ -235,7 +207,7 @@ class AdminKeyListEntry(BaseModel):
 
 
 class AdminKeyListResponse(BaseModel):
-    """Response listing every active API key (without secrets)."""
+    """List of active API keys (no secrets)."""
 
     keys: List[AdminKeyListEntry]
 
@@ -292,9 +264,9 @@ def make_admin_list_entry(
 
 
 __all__ = [
+    "AdminKeyAddCustomRequest",
     "AdminKeyCreateRequest",
     "AdminKeyCreateResponse",
-    "AdminKeyInjectRequest",
     "AdminKeyListEntry",
     "AdminKeyListResponse",
     "StationObservation",

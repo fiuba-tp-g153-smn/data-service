@@ -42,7 +42,7 @@ class ApiKeyRecord:
 
 @dataclass(frozen=True, slots=True)
 class CreatedApiKey:
-    """Return value of `create`/`inject`: includes the plaintext secret."""
+    """Return value of `create`/`add_custom`: includes the plaintext secret."""
 
     key_id: str
     label: str
@@ -51,7 +51,7 @@ class CreatedApiKey:
 
 
 class SecretAlreadyInUseError(Exception):
-    """Raised by `inject` when the supplied secret is already stored."""
+    """Raised by `add_custom` when the supplied secret is already stored."""
 
 
 def _hash_key(secret: str) -> str:
@@ -72,8 +72,8 @@ class WeatherStationsKeystore:
 
     Object layout: `s3://<bucket>/keys/<sha256(secret)>.json`, where the JSON
     body holds `{key_id, label, created_at, last_used_at}`. Plaintext secrets
-    are returned only at creation/injection time and never persisted; only
-    the hash (as the object name) plus metadata is stored.
+    are returned only at creation time and never persisted; only the hash
+    (as the object name) plus metadata is stored.
 
     Validation is O(1) per hit: `is_valid` hashes the presented secret and
     GETs that exact object. A small in-process positive cache (TTL
@@ -99,7 +99,7 @@ class WeatherStationsKeystore:
         secret = _generate_secret()
         return await self._store_new_secret(label=label, secret=secret)
 
-    async def inject(self, label: str, secret: str) -> CreatedApiKey:
+    async def add_custom(self, label: str, secret: str) -> CreatedApiKey:
         """
         Insert a key with a caller-provided secret.
 
