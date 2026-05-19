@@ -74,8 +74,11 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 class WeatherStationsRuntime:
     """Lifecycle holder for weather-stations resources owned by the app lifespan."""
 
-    keystore: WeatherStationsKeystore
-    # All three are absent when sync_mode == "disabled" (keystore stays for
+    # `keystore` and `api_keys_s3_client` are only None in the degenerate
+    # local-dev case where auth is disabled AND S3 is not configured.
+    keystore: Optional[WeatherStationsKeystore] = None
+    api_keys_s3_client: Optional[S3Client] = None
+    # All four are absent when sync_mode == "disabled" (keystore stays for
     # read-side auth gating, but nothing scrapes).
     s3_client: Optional[S3Client] = None
     smn_client: Optional[SmnApiClient] = None
@@ -333,14 +336,39 @@ async def configure_basemap(
 async def configure_weather_stations() -> WeatherStationsRuntime:
     """Bring up the weather-stations subsystem.
 
-    The keystore is always built (it gates the read endpoints' API-key auth
-    even when no scraper runs). When `weather_stations_sync_mode == "full"`
+    The keystore is built on a dedicated S3 bucket (separate from the
+    weather-stations data bucket) and gates the read endpoints' API-key auth
+    even when no scraper runs. When `weather_stations_sync_mode == "full"`
     the scraper + its S3/SMN clients are also built and started. Subsystem
     is S3-only by design — no Redis.
     """
-    keystore = WeatherStationsKeystore(settings.weather_stations_keystore_db_path)
-    await keystore.connect()
-    set_weather_stations_keystore(keystore)
+    api_keys_s3: Optional[S3Client] = None
+    keystore: Optional[WeatherStationsKeystore] = None
+    if settings.is_s3_configured():
+        api_keys_s3 = S3Client(
+            endpoint=settings.s3_tiles_data_endpoint,
+            access_key=settings.s3_tiles_data_access_key,
+            secret_key=settings.s3_tiles_data_secret_key,
+            bucket=settings.s3_api_keys_bucket_name,
+            secure=settings.s3_tiles_data_secure,
+            max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        )
+        await api_keys_s3.connect()
+        # Bucket is dedicated to this subsystem and the only writer here is the
+        # keystore itself, so creating it on cold start keeps deploys to fresh
+        # S3/MinIO instances zero-touch (no `aws s3 mb` step).
+        await api_keys_s3.ensure_bucket()
+        keystore = WeatherStationsKeystore(api_keys_s3)
+        set_weather_stations_keystore(keystore)
+    else:
+        # Validator already forbids auth_enabled=true without S3, so reaching
+        # here implies auth_enabled=false — admin endpoints will 500 via the
+        # dep, but the read path is open and works without a keystore.
+        logger.warning(
+            "Weather-stations keystore not built: S3 is not configured. "
+            "Admin endpoints (/weather-stations/admin/*) will return 500. "
+            "Configure S3 to enable them."
+        )
 
     if settings.weather_stations_sync_mode == "disabled":
         logger.info("Weather stations scraper disabled (sync_mode=disabled)")
@@ -348,7 +376,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             s3_client=None,
             list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
         )
-        return WeatherStationsRuntime(keystore=keystore)
+        return WeatherStationsRuntime(keystore=keystore, api_keys_s3_client=api_keys_s3)
 
     if not settings.is_s3_configured():
         logger.error(
@@ -360,7 +388,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             s3_client=None,
             list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
         )
-        return WeatherStationsRuntime(keystore=keystore)
+        return WeatherStationsRuntime(keystore=keystore, api_keys_s3_client=api_keys_s3)
 
     weather_s3 = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
@@ -404,6 +432,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
 
     return WeatherStationsRuntime(
         keystore=keystore,
+        api_keys_s3_client=api_keys_s3,
         s3_client=weather_s3,
         smn_client=smn_client,
         registry_client=registry_client,
@@ -421,7 +450,10 @@ async def shutdown_weather_stations(runtime: WeatherStationsRuntime) -> None:
         await runtime.registry_client.close()
     if runtime.s3_client is not None:
         await runtime.s3_client.close()
-    await runtime.keystore.close()
+    if runtime.keystore is not None:
+        await runtime.keystore.close()
+    if runtime.api_keys_s3_client is not None:
+        await runtime.api_keys_s3_client.close()
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:

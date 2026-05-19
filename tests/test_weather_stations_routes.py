@@ -23,14 +23,26 @@ from services.weather_stations_service import WeatherStationsService
 
 
 class _FakeS3:
+    """Shared in-memory S3 stub for both the read service and the keystore."""
+
     def __init__(self, objects):
         self.objects: dict[str, bytes] = dict(objects)
+
+    async def upload_tile(self, key, data, content_type="application/octet-stream"):
+        del content_type
+        self.objects[key] = data
 
     async def download_tile(self, key):
         return self.objects.get(key)
 
+    async def object_exists(self, key):
+        return key in self.objects
+
     async def list_object_keys(self, prefix):
         return [k for k in self.objects if k.startswith(prefix)]
+
+    async def delete_object(self, key):
+        return self.objects.pop(key, None) is not None
 
 
 def _snap_key(ts: datetime) -> str:
@@ -66,15 +78,13 @@ def _meta_body(ts: datetime, count: int) -> bytes:
 
 
 @pytest_asyncio.fixture
-async def app_and_keystore(tmp_path):
+async def app_and_keystore():
     """
     Build a minimal FastAPI app wired to the weather-stations router, a
-    fresh keystore, and a populated read service.
+    fresh S3-backed keystore, and a populated read service. Both share the
+    same in-memory `_FakeS3` (the keystore writes under `keys/`, the read
+    service under `weather-stations/` — no collision).
     """
-    keystore = WeatherStationsKeystore(str(tmp_path / "k.sqlite"))
-    await keystore.connect()
-    set_weather_stations_keystore(keystore)
-
     ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
     s3 = _FakeS3(
         {
@@ -100,6 +110,11 @@ async def app_and_keystore(tmp_path):
             ).encode(),
         }
     )
+
+    keystore = WeatherStationsKeystore(s3)
+    await keystore.connect()
+    set_weather_stations_keystore(keystore)
+
     svc = WeatherStationsService()
     svc.configure(s3, list_cache_ttl=30.0)
 
@@ -129,9 +144,12 @@ async def app_and_keystore(tmp_path):
 async def test_read_endpoints_reject_missing_api_key(app_and_keystore):
     app, _ = app_and_keystore
     client = TestClient(app)
-    for path in ("/weather-stations/latest", "/weather-stations/tilesets",
-                 "/weather-stations/stations",
-                 "/weather-stations/20260517T1400Z"):
+    for path in (
+        "/weather-stations/latest",
+        "/weather-stations/tilesets",
+        "/weather-stations/stations",
+        "/weather-stations/20260517T1400Z",
+    ):
         resp = client.get(path)
         assert resp.status_code == 401, f"{path} should require X-API-Key"
 
@@ -152,9 +170,7 @@ async def test_admin_endpoints_reject_missing_password(app_and_keystore):
     client = TestClient(app)
     resp = client.get("/weather-stations/admin/keys")
     assert resp.status_code == 401
-    resp = client.post(
-        "/weather-stations/admin/keys", json={"label": "x"}
-    )
+    resp = client.post("/weather-stations/admin/keys", json={"label": "x"})
     assert resp.status_code == 401
 
 
@@ -178,14 +194,15 @@ async def test_latest_returns_snapshot_with_cache_control(app_and_keystore):
     created = await keystore.create("test")
     client = TestClient(app)
 
-    resp = client.get(
-        "/weather-stations/latest", headers={"X-API-Key": created.secret}
-    )
+    resp = client.get("/weather-stations/latest", headers={"X-API-Key": created.secret})
     assert resp.status_code == 200
     body = resp.json()
     assert body["scraped_at"] == "2026-05-17T14:00:00Z"
     assert len(body["stations"]) == 2
-    assert resp.headers["cache-control"] == settings.weather_stations_cache_control_response
+    assert (
+        resp.headers["cache-control"]
+        == settings.weather_stations_cache_control_response
+    )
 
 
 @pytest.mark.asyncio
@@ -225,9 +242,7 @@ async def test_tileset_lookup_hits_and_misses(app_and_keystore):
     assert resp.status_code == 404
 
     # Malformed tilesetId -> 400.
-    resp = client.get(
-        "/weather-stations/bogus", headers={"X-API-Key": created.secret}
-    )
+    resp = client.get("/weather-stations/bogus", headers={"X-API-Key": created.secret})
     assert resp.status_code == 400
 
 
@@ -265,9 +280,7 @@ async def test_admin_create_list_and_revoke_roundtrip(app_and_keystore):
     secret = created["secret"]
 
     # Issued key works for read endpoints.
-    resp = client.get(
-        "/weather-stations/latest", headers={"X-API-Key": secret}
-    )
+    resp = client.get("/weather-stations/latest", headers={"X-API-Key": secret})
     assert resp.status_code == 200
 
     # List shows the key (no secret).
@@ -277,21 +290,15 @@ async def test_admin_create_list_and_revoke_roundtrip(app_and_keystore):
     assert any(k["key_id"] == key_id and "secret" not in k for k in listed)
 
     # Revoke.
-    resp = client.delete(
-        f"/weather-stations/admin/keys/{key_id}", headers=headers
-    )
+    resp = client.delete(f"/weather-stations/admin/keys/{key_id}", headers=headers)
     assert resp.status_code == 204
 
     # Read with revoked key now 401s.
-    resp = client.get(
-        "/weather-stations/latest", headers={"X-API-Key": secret}
-    )
+    resp = client.get("/weather-stations/latest", headers={"X-API-Key": secret})
     assert resp.status_code == 401
 
     # Revoking again 404s.
-    resp = client.delete(
-        f"/weather-stations/admin/keys/{key_id}", headers=headers
-    )
+    resp = client.delete(f"/weather-stations/admin/keys/{key_id}", headers=headers)
     assert resp.status_code == 404
 
 
@@ -304,3 +311,81 @@ async def test_auth_disabled_lets_reads_through_without_header(
     client = TestClient(app)
     resp = client.get("/weather-stations/latest")
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------- admin inject
+
+
+@pytest.mark.asyncio
+async def test_admin_inject_registers_custom_secret(app_and_keystore):
+    app, _ = app_and_keystore
+    client = TestClient(app)
+    headers = {"X-Admin-Password": "admin-pw"}
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "manual", "secret": "hiImGabriel"},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["label"] == "manual"
+    assert body["secret"] == "hiImGabriel"
+
+    # Injected secret immediately works as an X-API-Key.
+    resp = client.get("/weather-stations/latest", headers={"X-API-Key": "hiImGabriel"})
+    assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_inject_rejects_duplicate_secret_with_409(app_and_keystore):
+    app, _ = app_and_keystore
+    client = TestClient(app)
+    headers = {"X-Admin-Password": "admin-pw"}
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "a", "secret": "shared-secret"},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "b", "secret": "shared-secret"},
+        headers=headers,
+    )
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_admin_inject_rejects_missing_admin_password(app_and_keystore):
+    app, _ = app_and_keystore
+    client = TestClient(app)
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "a", "secret": "x"},
+    )
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_admin_inject_validates_secret_length(app_and_keystore):
+    app, _ = app_and_keystore
+    client = TestClient(app)
+    headers = {"X-Admin-Password": "admin-pw"}
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "a", "secret": ""},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+    resp = client.post(
+        "/weather-stations/admin/keys/inject",
+        json={"label": "a", "secret": "x" * 129},
+        headers=headers,
+    )
+    assert resp.status_code == 422

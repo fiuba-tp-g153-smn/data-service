@@ -632,6 +632,23 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Unexpected S3 error while checking object %s: %s", key, exc)
             raise
 
+    async def ensure_bucket(self) -> None:
+        """Create the configured bucket if it doesn't already exist.
+
+        Idempotent: a present bucket is a no-op; absence triggers create_bucket.
+        Any other error (auth, network) propagates so the caller can fail fast.
+        """
+        client = await self._ensure_connected()
+        try:
+            await client.head_bucket(Bucket=self._bucket)
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in ("404", "NoSuchBucket", "NotFound"):
+                raise
+        await client.create_bucket(Bucket=self._bucket)
+        logger.info("Created S3 bucket %s", self._bucket)
+
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""
         try:
@@ -664,6 +681,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
 
         return subdirs
+
+    async def delete_object(self, key: str) -> bool:
+        """Delete a single object. Returns True on success, False on error."""
+        client = await self._ensure_connected()
+        try:
+            await client.delete_object(Bucket=self._bucket, Key=key)
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("Error deleting object %s: %s", key, exc)
+            return False
 
     async def delete_prefix(self, prefix: str) -> bool:
         """Recursively delete all objects under a prefix."""

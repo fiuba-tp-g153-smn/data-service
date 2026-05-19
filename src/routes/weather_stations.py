@@ -8,7 +8,10 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Response, status
 
-from clients.weather_stations_keystore import WeatherStationsKeystore
+from clients.weather_stations_keystore import (
+    SecretAlreadyInUseError,
+    WeatherStationsKeystore,
+)
 from dependencies import (
     get_weather_stations_keystore,
     get_weather_stations_service,
@@ -17,6 +20,7 @@ from dependencies import (
 from models.weather_stations import (
     AdminKeyCreateRequest,
     AdminKeyCreateResponse,
+    AdminKeyInjectRequest,
     AdminKeyListResponse,
     StationsRegistryResponse,
     TilesetsResponse,
@@ -149,7 +153,7 @@ def _raise_not_configured(exc: Exception) -> None:
         "`/weather/station` endpoint. Refreshed every 5 minutes.\n\n"
         "Each station carries its own `observed_at`; values may be older "
         "than `scraped_at` because SMN stations report hourly/3-hourly.\n\n"
-        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        '**Example:** `curl -H "X-API-Key: $KEY" '
         "http://localhost:8080/weather-stations/latest`"
     ),
     responses={
@@ -186,7 +190,7 @@ async def get_latest(
         "(retention window is `weather_stations_s3_object_ttl_days`, "
         "default 2 days). Each entry maps to a snapshot you can fetch via "
         "`GET /weather-stations/{tileset_id}`.\n\n"
-        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        '**Example:** `curl -H "X-API-Key: $KEY" '
         "http://localhost:8080/weather-stations/tilesets`"
     ),
     responses={401: {"description": "Missing or invalid X-API-Key"}},
@@ -217,7 +221,7 @@ async def list_tilesets(
         "`http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones` and "
         "refreshed by the scraper only when the upstream payload's hash "
         "changes. Cache aggressively client-side.\n\n"
-        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        '**Example:** `curl -H "X-API-Key: $KEY" '
         "http://localhost:8080/weather-stations/stations`"
     ),
     responses={
@@ -253,7 +257,7 @@ async def get_registry(
         "Return the latest snapshot whose `scraped_at` falls in "
         "`[tileset_id - N hours, tileset_id]`. `N` defaults to 0 (exact "
         "hour match required) and is capped at 48.\n\n"
-        "**Example:** `curl -H \"X-API-Key: $KEY\" "
+        '**Example:** `curl -H "X-API-Key: $KEY" '
         "'http://localhost:8080/weather-stations/20260517T1400Z?N=6'`"
     ),
     responses={
@@ -321,9 +325,9 @@ async def get_for_tileset(
         "**Example:**\n"
         "```bash\n"
         "curl -X POST \\\n"
-        "  -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
         "  -H 'Content-Type: application/json' \\\n"
-        "  -d '{\"label\":\"local-dev\"}' \\\n"
+        '  -d \'{"label":"local-dev"}\' \\\n'
         "  http://localhost:8080/weather-stations/admin/keys\n"
         "```"
     ),
@@ -351,6 +355,57 @@ async def create_api_key(
     )
 
 
+@admin_router.post(
+    "/keys/inject",
+    status_code=status.HTTP_201_CREATED,
+    summary="Inject an API key with a caller-provided secret",
+    response_model=AdminKeyCreateResponse,
+    dependencies=[Depends(require_admin_password)],
+    description=(
+        "Register a caller-provided plaintext secret as a valid API key. "
+        "Useful for ad-hoc dev/demo flows where a human-legible secret is "
+        "preferable to a 43-char random string. The server stores only the "
+        "SHA-256 hash; the chosen secret is echoed back exactly once.\n\n"
+        "**Example:**\n"
+        "```bash\n"
+        "curl -X POST \\\n"
+        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
+        "  -H 'Content-Type: application/json' \\\n"
+        '  -d \'{"label":"manual-gabriel","secret":"hiImGabriel"}\' \\\n'
+        "  http://localhost:8080/weather-stations/admin/keys/inject\n"
+        "```"
+    ),
+    responses={
+        201: {"description": "Key registered; the supplied `secret` is echoed back"},
+        401: {"description": "Missing or invalid X-Admin-Password"},
+        409: {"description": "Secret already in use (same hash already stored)"},
+    },
+)
+async def inject_api_key(
+    body: AdminKeyInjectRequest = Body(...),
+    keystore: WeatherStationsKeystore = Depends(get_weather_stations_keystore),
+) -> AdminKeyCreateResponse:
+    """Inject a caller-provided secret as a valid API key."""
+    try:
+        created = await keystore.inject(body.label, body.secret)
+    except SecretAlreadyInUseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Secret already in use",
+        ) from exc
+    logger.info(
+        "weather-stations admin: API key injected id=%s label=%r",
+        created.key_id,
+        created.label,
+    )
+    return make_admin_create_response(
+        key_id=created.key_id,
+        label=created.label,
+        secret=created.secret,
+        created_at_epoch=created.created_at,
+    )
+
+
 @admin_router.get(
     "/keys",
     status_code=status.HTTP_200_OK,
@@ -362,7 +417,7 @@ async def create_api_key(
         "`key_id`, `label`, `created_at`, and `last_used_at`.\n\n"
         "**Example:**\n"
         "```bash\n"
-        "curl -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        'curl -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
         "  http://localhost:8080/weather-stations/admin/keys\n"
         "```"
     ),
@@ -398,7 +453,7 @@ async def list_api_keys(
         "**Example:**\n"
         "```bash\n"
         "curl -X DELETE \\\n"
-        "  -H \"X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD\" \\\n"
+        '  -H "X-Admin-Password: $WEATHER_STATIONS_ADMIN_PASSWORD" \\\n'
         "  http://localhost:8080/weather-stations/admin/keys/$KEY_ID\n"
         "```"
     ),
@@ -419,9 +474,7 @@ async def revoke_api_key(
     """Revoke an API key by id."""
     removed = await keystore.revoke(key_id)
     if not removed:
-        logger.info(
-            "weather-stations admin: revoke skipped, unknown key id=%s", key_id
-        )
+        logger.info("weather-stations admin: revoke skipped, unknown key id=%s", key_id)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Unknown key_id {key_id!r}",

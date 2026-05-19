@@ -29,6 +29,10 @@ class Settings:
     s3_tiles_data_bucket_name: str = ""
     s3_tiles_data_secure: bool = False
     s3_weather_stations_bucket_name: str = "weather-stations-data"
+    # Dedicated bucket for hashed API key objects (keys/<sha256>.json). Separate
+    # from the weather-stations data bucket so admin keys can survive a wipe
+    # of either bucket independently.
+    s3_api_keys_bucket_name: str = "api-keys"
     redis_url: str = ""
     # SMN API credentials + base URL (env-only). The base is shared by the
     # token endpoint (`/api-token/auth`) and the stations endpoint
@@ -182,7 +186,6 @@ class Settings:
     # enabled=True without a non-empty admin password (otherwise admin endpoints
     # would be unreachable and no keys could ever be issued).
     weather_stations_api_key_auth_enabled: bool = True
-    weather_stations_keystore_db_path: str = "data/weather_stations_keys.sqlite"
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
@@ -476,7 +479,9 @@ class Settings:
             "SMN_API_TOKEN_SETTLING_DELAY_SECONDS",
             self.smn_api_token_settling_delay_seconds,
         )
-        self.smn_api_user_agent = os.getenv("SMN_API_USER_AGENT", self.smn_api_user_agent)
+        self.smn_api_user_agent = os.getenv(
+            "SMN_API_USER_AGENT", self.smn_api_user_agent
+        )
         self.smn_api_log_requests = self._env_bool(
             "SMN_API_LOG_REQUESTS", self.smn_api_log_requests
         )
@@ -526,9 +531,8 @@ class Settings:
             "WEATHER_STATIONS_API_KEY_AUTH_ENABLED",
             self.weather_stations_api_key_auth_enabled,
         )
-        self.weather_stations_keystore_db_path = os.getenv(
-            "WEATHER_STATIONS_KEYSTORE_DB_PATH",
-            self.weather_stations_keystore_db_path,
+        self.s3_api_keys_bucket_name = os.getenv(
+            "S3_API_KEYS_BUCKET_NAME", self.s3_api_keys_bucket_name
         )
 
     def _validate(self) -> None:
@@ -613,6 +617,15 @@ class Settings:
                 "weather_stations_api_key_auth_enabled=true requires "
                 "WEATHER_STATIONS_ADMIN_PASSWORD to be set; otherwise the "
                 "admin endpoints are unreachable and no API keys can be issued."
+            )
+        # The keystore is S3-backed; without S3 there is nowhere to persist
+        # the hashed key objects. Fail fast rather than 500 on first request.
+        if self.weather_stations_api_key_auth_enabled and not self.is_s3_configured():
+            raise ValueError(
+                "weather_stations_api_key_auth_enabled=true requires S3 to be "
+                "configured (S3_TILES_DATA_ENDPOINT/ACCESS_KEY/SECRET_KEY); "
+                "the API key keystore persists to "
+                f"s3://{self.s3_api_keys_bucket_name}/."
             )
         # The scraper cannot mint a JWT without credentials.
         if self.weather_stations_sync_mode == "full" and not (

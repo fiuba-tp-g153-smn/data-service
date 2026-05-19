@@ -16,6 +16,12 @@ import os
 os.environ.setdefault("WEATHER_STATIONS_ADMIN_PASSWORD", "test-admin-password")
 os.environ.setdefault("SMN_API_USERNAME", "test-user")
 os.environ.setdefault("SMN_API_PASSWORD", "test-pass")
+# The keystore now persists to S3, and Settings._validate() refuses to start
+# with auth enabled unless S3 is configured. Tests never touch a real S3 —
+# placeholders satisfy `is_s3_configured()` so the validator passes.
+os.environ.setdefault("S3_TILES_DATA_ENDPOINT", "test-endpoint:9000")
+os.environ.setdefault("S3_TILES_DATA_ACCESS_KEY", "test-access-key")
+os.environ.setdefault("S3_TILES_DATA_SECRET_KEY", "test-secret-key")
 
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 

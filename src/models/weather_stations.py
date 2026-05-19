@@ -165,9 +165,7 @@ class AdminKeyCreateRequest(BaseModel):
         examples=["local-dev", "visualizer-prod"],
     )
 
-    model_config = ConfigDict(
-        json_schema_extra={"examples": [{"label": "local-dev"}]}
-    )
+    model_config = ConfigDict(json_schema_extra={"examples": [{"label": "local-dev"}]})
 
 
 class AdminKeyCreateResponse(BaseModel):
@@ -194,6 +192,35 @@ class AdminKeyCreateResponse(BaseModel):
                     "created_at": "2026-05-17T14:00:00Z",
                 }
             ]
+        }
+    )
+
+
+class AdminKeyInjectRequest(BaseModel):
+    """Body for POST /weather-stations/admin/keys/inject."""
+
+    label: str = Field(
+        ...,
+        min_length=1,
+        max_length=80,
+        description="Human-readable label so you can identify the key later.",
+        examples=["manual-gabriel"],
+    )
+    secret: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description=(
+            "Arbitrary plaintext secret to register as a valid API key. "
+            "Any non-empty string up to 128 chars is accepted; charset is not "
+            "restricted so human-legible secrets are allowed."
+        ),
+        examples=["hiImGabriel"],
+    )
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [{"label": "manual-gabriel", "secret": "hiImGabriel"}]
         }
     )
 
@@ -267,6 +294,7 @@ def make_admin_list_entry(
 __all__ = [
     "AdminKeyCreateRequest",
     "AdminKeyCreateResponse",
+    "AdminKeyInjectRequest",
     "AdminKeyListEntry",
     "AdminKeyListResponse",
     "StationObservation",
