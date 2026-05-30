@@ -181,5 +181,5 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 ## CI/CD
 
-- **test.yml** — Push/PR to non-main: Python 3.13.12, Poetry, pytest + coverage.
+- **test.yml** — Push/PR to non-main: Python 3.13.13, Poetry, pytest + coverage.
 - **deploy.yml** — Push to main: tests → Coolify webhook deployment.
