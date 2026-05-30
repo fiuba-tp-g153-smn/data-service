@@ -183,6 +183,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 logger.error("Failed to download %s to Redis: %s", s3_key, e)
                 return False
 
+    async def list_object_keys(self, prefix: str) -> List[str]:
+        """List full S3 keys under `prefix` (recursive, excludes directory markers).
+
+        Use when you need every key under a prefix, regardless of depth — e.g.
+        the weather-stations read service walking
+        `weather-stations/snapshots/{Y}/{M}/{D}/{H}/...`. Returns `[]` on error
+        instead of raising, mirroring the other read-path tolerance in this
+        client.
+        """
+        objects = await self._list_objects(prefix)
+        return [obj["Key"] for obj in objects]
+
     async def _list_objects(self, prefix: str) -> List[dict]:
         """List all objects under a prefix."""
         if self._client is None:
@@ -641,9 +653,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 return False
 
     async def download_tile(self, s3_key: str) -> Optional[bytes]:
-        """Download a single tile from S3. Returns raw bytes or None."""
-        client = await self._ensure_connected()
+        """Download a single tile from S3. Returns raw bytes or None.
+
+        Infrastructure failures (`BotoCoreError` family, including
+        `EndpointConnectionError`, plus socket and timeout errors) degrade
+        to ``None`` with a WARNING log so callers can fall back to other
+        tiers instead of surfacing a 5xx to the user.
+        """
         try:
+            client = await self._ensure_connected()
             response = await client.get_object(Bucket=self._bucket, Key=s3_key)
             async with response["Body"] as stream:
                 return await stream.read()
@@ -654,8 +672,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 return None
             logger.warning("S3 error for tile %s: %s", s3_key, exc)
             return None
-        except (asyncio.TimeoutError, OSError) as exc:
-            logger.warning("Failed to download tile %s: %s", s3_key, exc)
+        except (BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning("S3 unavailable for tile %s: %s", s3_key, exc)
             return None
 
     @staticmethod
@@ -725,18 +743,27 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             return False
 
     async def has_any_object(self, prefix: str) -> bool:
-        """True if at least one object exists under the given prefix."""
-        client = await self._ensure_connected()
+        """True iff at least one object was positively observed under the prefix.
+
+        Infrastructure failures (`BotoCoreError`/`ClientError`/socket/timeout)
+        are degraded to ``False`` with a WARNING log: callers (provider
+        availability checks) interpret "no observed tile" the same way as
+        "tile genuinely absent", and an S3 outage should not take the
+        listing endpoint down when upstream is still serving.
+        """
         try:
+            client = await self._ensure_connected()
             response = await client.list_objects_v2(
                 Bucket=self._bucket, Prefix=prefix, MaxKeys=1
             )
             return bool(response.get("Contents"))
-        except ClientError as exc:
-            logger.error(
-                "Unexpected S3 error while checking prefix %s: %s", prefix, exc
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning(
+                "S3 unavailable while checking prefix %s; treating as empty: %s",
+                prefix,
+                exc,
             )
-            raise
+            return False
 
     async def object_exists(self, key: str) -> bool:
         """Check if an object exists in S3 using a HEAD request."""
@@ -750,6 +777,23 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
                 return False
             logger.error("Unexpected S3 error while checking object %s: %s", key, exc)
             raise
+
+    async def ensure_bucket(self) -> None:
+        """Create the configured bucket if it doesn't already exist.
+
+        Idempotent: a present bucket is a no-op; absence triggers create_bucket.
+        Any other error (auth, network) propagates so the caller can fail fast.
+        """
+        client = await self._ensure_connected()
+        try:
+            await client.head_bucket(Bucket=self._bucket)
+            return
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code not in ("404", "NoSuchBucket", "NotFound"):
+                raise
+        await client.create_bucket(Bucket=self._bucket)
+        logger.info("Created S3 bucket %s", self._bucket)
 
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""
@@ -783,6 +827,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
 
         return subdirs
+
+    async def delete_object(self, key: str) -> bool:
+        """Delete a single object. Returns True on success, False on error."""
+        client = await self._ensure_connected()
+        try:
+            await client.delete_object(Bucket=self._bucket, Key=key)
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("Error deleting object %s: %s", key, exc)
+            return False
 
     async def delete_prefix(self, prefix: str) -> bool:
         """Recursively delete all objects under a prefix."""

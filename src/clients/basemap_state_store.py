@@ -83,14 +83,17 @@ class BasemapStateStore:
 
     State is cold (on-disk) so it survives process restarts and Redis flushes.
     A completed sweep clears its rows; an interrupted sweep keeps them until
-    resumed. Writes are serialized by an `asyncio.Lock`; all I/O is offloaded
-    via `asyncio.to_thread` to avoid blocking the event loop.
+    resumed. All SQLite access is serialized by `_access_lock`: the connection
+    is opened with `check_same_thread=False` and shared across the thread
+    pool, so concurrent reads on a single statement handle can corrupt
+    `fetchone()`/`fetchall()` results. I/O is offloaded via `asyncio.to_thread`
+    to avoid blocking the event loop.
     """
 
     def __init__(self, db_path: str):
         self._db_path = db_path
         self._conn: Optional[sqlite3.Connection] = None
-        self._write_lock = asyncio.Lock()
+        self._access_lock = asyncio.Lock()
 
     async def connect(self) -> None:
         """Open the SQLite connection and create tables if missing."""
@@ -131,7 +134,8 @@ class BasemapStateStore:
 
     async def get_cursor(self, provider_id: str) -> Optional[Cursor]:
         """Return the stored resume position for a provider, if any."""
-        return await asyncio.to_thread(self._get_cursor_sync, provider_id)
+        async with self._access_lock:
+            return await asyncio.to_thread(self._get_cursor_sync, provider_id)
 
     def _get_cursor_sync(self, provider_id: str) -> Optional[Cursor]:
         row = (
@@ -148,7 +152,7 @@ class BasemapStateStore:
 
     async def set_cursor(self, provider_id: str, zoom: int, tile_index: int) -> None:
         """Upsert the resume position for a provider."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(
                 self._set_cursor_sync, provider_id, zoom, tile_index
             )
@@ -168,7 +172,7 @@ class BasemapStateStore:
 
     async def clear_cursor(self, provider_id: str) -> None:
         """Delete the cursor row for a provider."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._clear_cursor_sync, provider_id)
 
     def _clear_cursor_sync(self, provider_id: str) -> None:
@@ -179,7 +183,7 @@ class BasemapStateStore:
 
     async def add_failed(self, provider_id: str, zoom: int, x: int, y: int) -> None:
         """Record a failed tile for later retry (idempotent)."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._add_failed_sync, provider_id, zoom, x, y)
 
     def _add_failed_sync(self, provider_id: str, zoom: int, x: int, y: int) -> None:
@@ -193,7 +197,7 @@ class BasemapStateStore:
 
     async def remove_failed(self, provider_id: str, zoom: int, x: int, y: int) -> None:
         """Remove a failed tile entry after a successful retry."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._remove_failed_sync, provider_id, zoom, x, y)
 
     def _remove_failed_sync(self, provider_id: str, zoom: int, x: int, y: int) -> None:
@@ -207,7 +211,8 @@ class BasemapStateStore:
 
     async def list_failed(self, provider_id: str, zoom: int) -> List[Tuple[int, int]]:
         """Return all `(x, y)` pairs previously recorded as failed at this zoom."""
-        return await asyncio.to_thread(self._list_failed_sync, provider_id, zoom)
+        async with self._access_lock:
+            return await asyncio.to_thread(self._list_failed_sync, provider_id, zoom)
 
     def _list_failed_sync(self, provider_id: str, zoom: int) -> List[Tuple[int, int]]:
         rows = (
@@ -225,7 +230,7 @@ class BasemapStateStore:
 
     async def clear_failed(self, provider_id: str, zoom: int) -> None:
         """Drop all failed-tile entries for a single (provider, zoom)."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._clear_failed_sync, provider_id, zoom)
 
     def _clear_failed_sync(self, provider_id: str, zoom: int) -> None:
@@ -239,7 +244,7 @@ class BasemapStateStore:
 
     async def clear_failed_for_provider(self, provider_id: str) -> None:
         """Drop all failed-tile entries for a provider across every zoom."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._clear_failed_for_provider_sync, provider_id)
 
     def _clear_failed_for_provider_sync(self, provider_id: str) -> None:
@@ -250,7 +255,8 @@ class BasemapStateStore:
 
     async def get_last_completed(self, provider_id: str) -> Optional[int]:
         """Return the last completion timestamp (unix seconds) for a provider."""
-        return await asyncio.to_thread(self._get_last_completed_sync, provider_id)
+        async with self._access_lock:
+            return await asyncio.to_thread(self._get_last_completed_sync, provider_id)
 
     def _get_last_completed_sync(self, provider_id: str) -> Optional[int]:
         row = (
@@ -267,7 +273,7 @@ class BasemapStateStore:
 
     async def set_last_completed(self, provider_id: str, timestamp: int) -> None:
         """Upsert the last completion timestamp for a provider."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(
                 self._set_last_completed_sync, provider_id, timestamp
             )
@@ -285,7 +291,8 @@ class BasemapStateStore:
 
     async def get_health(self, provider_id: str) -> Optional[ProviderHealth]:
         """Return the circuit-breaker state for a provider, or None if closed."""
-        return await asyncio.to_thread(self._get_health_sync, provider_id)
+        async with self._access_lock:
+            return await asyncio.to_thread(self._get_health_sync, provider_id)
 
     def _get_health_sync(self, provider_id: str) -> Optional[ProviderHealth]:
         row = (
@@ -317,7 +324,7 @@ class BasemapStateStore:
         reason: str,
     ) -> None:
         """Upsert the health row marking the provider's circuit open."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(
                 self._open_circuit_sync,
                 provider_id,
@@ -353,7 +360,7 @@ class BasemapStateStore:
 
     async def close_circuit(self, provider_id: str) -> None:
         """Clear the health row: provider is healthy again."""
-        async with self._write_lock:
+        async with self._access_lock:
             await asyncio.to_thread(self._close_circuit_sync, provider_id)
 
     def _close_circuit_sync(self, provider_id: str) -> None:

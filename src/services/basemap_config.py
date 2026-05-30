@@ -4,14 +4,53 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import Iterator, List, Optional, Tuple
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
+# Web Mercator half-extent in meters (EPSG:3857). Used to map XYZ tiles to
+# GetMap BBOX values for WMS providers.
+_WEB_MERCATOR_HALF_EXTENT = 20037508.342789244
+
+
+class ProviderKind(str, Enum):
+    """Discriminator for how a basemap provider's source URL is built."""
+
+    XYZ = "xyz"
+    WMS = "wms"
+
 
 @dataclass(frozen=True, slots=True)
+class WmsParams:
+    """WMS GetMap parameters for a provider whose kind is ``ProviderKind.WMS``.
+
+    The scraper and reader build GetMap URLs in EPSG:3857 with the tile-grid
+    BBOX so each XYZ ``(z, x, y)`` maps deterministically to one upstream
+    request.
+    """
+
+    layer_name: str
+    workspace_url: str
+    image_format: str = "image/png"
+    wms_version: str = "1.3.0"
+
+
+@dataclass(frozen=True, slots=True)
+# pylint: disable-next=too-many-instance-attributes
 class BasemapProvider:
-    """Configuration for a single base map tile provider."""
+    """Configuration for a single base map tile provider.
+
+    ``kind`` selects the upstream URL shape: ``XYZ`` uses the
+    ``{z}/{x}/{y}`` template in ``source_url_template``; ``WMS`` ignores
+    that template and uses ``wms`` to build a GetMap call. The rest of
+    the pipeline (S3 keying, Redis caching, circuit breaker, prod-first
+    reader) is kind-agnostic.
+
+    ``is_overlay`` marks transparent layers that are scraped and served
+    like basemaps but must NOT appear in the basemap-picker listing.
+    """
 
     provider_id: str
     name: str
@@ -21,6 +60,9 @@ class BasemapProvider:
     max_zoom: int
     cache_max_zoom: int
     attribution: str
+    kind: ProviderKind = ProviderKind.XYZ
+    wms: Optional[WmsParams] = None
+    is_overlay: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +85,9 @@ class ProviderDefaults:
     max_zoom: int
     cache_max_zoom: int
     attribution: str
+    kind: ProviderKind = ProviderKind.XYZ
+    wms: Optional[WmsParams] = None
+    is_overlay: bool = False
 
 
 PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
@@ -110,6 +155,94 @@ PROVIDER_DEFAULTS: dict[str, ProviderDefaults] = {
         cache_max_zoom=11,
         attribution="Tiles © Esri",
     ),
+    # IGN WMS reference overlays. Served from wms.ign.gob.ar as GetMap calls
+    # translated from the standard XYZ tile grid in EPSG:3857. These are
+    # transparent overlays meant to render on top of a raster basemap, so the
+    # frontend instantiates them as overlay layers (not base layers).
+    "ign-provincia": ProviderDefaults(
+        name="Provincia (IGN)",
+        is_tms=False,
+        min_zoom=3,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="provincia_FA003",
+            workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
+        ),
+        is_overlay=True,
+    ),
+    "ign-limite-internacional": ProviderDefaults(
+        name="Límite internacional (IGN)",
+        is_tms=False,
+        min_zoom=3,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="linea_de_limite_FA004",
+            workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
+        ),
+        is_overlay=True,
+    ),
+    "ign-limite-interdepartamental-o-de-partido": ProviderDefaults(
+        name="Límite interdepartamental o de partido (IGN)",
+        is_tms=False,
+        min_zoom=4,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="ign:linea_de_limite_070110",
+            workspace_url="https://wms.ign.gob.ar/geoserver/ows",
+        ),
+        is_overlay=True,
+    ),
+    "ign-localidad": ProviderDefaults(
+        name="Localidad (IGN)",
+        is_tms=False,
+        min_zoom=5,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="ign:localidad_bahra",
+            workspace_url="https://wms.ign.gob.ar/geoserver/ows",
+        ),
+        is_overlay=True,
+    ),
+    "ign-sublocalidad": ProviderDefaults(
+        name="Sublocalidad (IGN)",
+        is_tms=False,
+        min_zoom=7,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="ign:sublocalidad_entidad_bahra",
+            workspace_url="https://wms.ign.gob.ar/geoserver/ows",
+        ),
+        is_overlay=True,
+    ),
+    "ign-gobierno-local": ProviderDefaults(
+        name="Gobierno Local (IGN)",
+        is_tms=False,
+        min_zoom=5,
+        max_zoom=18,
+        cache_max_zoom=11,
+        attribution="Instituto Geográfico Nacional",
+        kind=ProviderKind.WMS,
+        wms=WmsParams(
+            layer_name="gobiernoslocales_2022",
+            workspace_url="https://wms.ign.gob.ar/geoserver/limites/wms",
+        ),
+        is_overlay=True,
+    ),
 }
 
 
@@ -119,11 +252,48 @@ def _env_prefix(provider_id: str) -> str:
 
 
 def _load_provider(provider_id: str) -> Optional[BasemapProvider]:
-    """Merge hardcoded defaults with URL from env var."""
+    """Merge hardcoded defaults with runtime configuration.
+
+    XYZ providers require a ``BASEMAP_<ID>_URL`` env var (kept out of the
+    repo because some endpoints embed API keys). WMS providers carry their
+    upstream URL in :class:`WmsParams`; an optional
+    ``BASEMAP_<ID>_WORKSPACE_URL`` env var lets ops point them at a staging
+    GeoServer without code changes.
+    """
     defaults = PROVIDER_DEFAULTS.get(provider_id)
     if not defaults:
         logger.warning("No defaults for basemap provider '%s'; skipping", provider_id)
         return None
+
+    if defaults.kind is ProviderKind.WMS:
+        if defaults.wms is None:
+            logger.warning(
+                "WMS basemap provider '%s' missing WmsParams in defaults; skipping",
+                provider_id,
+            )
+            return None
+        workspace_url = os.getenv(
+            f"{_env_prefix(provider_id)}_WORKSPACE_URL", defaults.wms.workspace_url
+        )
+        wms = WmsParams(
+            layer_name=defaults.wms.layer_name,
+            workspace_url=workspace_url,
+            image_format=defaults.wms.image_format,
+            wms_version=defaults.wms.wms_version,
+        )
+        return BasemapProvider(
+            provider_id=provider_id,
+            name=defaults.name,
+            source_url_template="",
+            is_tms=defaults.is_tms,
+            min_zoom=defaults.min_zoom,
+            max_zoom=defaults.max_zoom,
+            cache_max_zoom=defaults.cache_max_zoom,
+            attribution=defaults.attribution,
+            kind=ProviderKind.WMS,
+            wms=wms,
+            is_overlay=defaults.is_overlay,
+        )
 
     url = os.getenv(f"{_env_prefix(provider_id)}_URL", "")
     if not url:
@@ -143,6 +313,7 @@ def _load_provider(provider_id: str) -> Optional[BasemapProvider]:
         max_zoom=defaults.max_zoom,
         cache_max_zoom=defaults.cache_max_zoom,
         attribution=defaults.attribution,
+        is_overlay=defaults.is_overlay,
     )
 
 
@@ -223,7 +394,58 @@ def count_tiles(zoom: int, bbox: BoundingBox) -> int:
     return (x_max - x_min + 1) * (y_max - y_min + 1)
 
 
+def tile_bbox_3857(z: int, x: int, y: int) -> Tuple[float, float, float, float]:
+    """Return the EPSG:3857 BBOX ``(min_x, min_y, max_x, max_y)`` of a tile.
+
+    Uses the standard XYZ tile scheme (Y=0 at top). The returned tuple is
+    in meters and matches the axis order WMS GetMap expects for EPSG:3857
+    BBOX values (easting first, then northing).
+    """
+    tile_size = (2.0 * _WEB_MERCATOR_HALF_EXTENT) / (1 << z)
+    min_x = -_WEB_MERCATOR_HALF_EXTENT + x * tile_size
+    max_x = min_x + tile_size
+    max_y = _WEB_MERCATOR_HALF_EXTENT - y * tile_size
+    min_y = max_y - tile_size
+    return min_x, min_y, max_x, max_y
+
+
+def _build_wms_url(provider: BasemapProvider, z: int, x: int, y: int) -> str:
+    """Build a WMS GetMap URL for a single 256x256 tile in EPSG:3857.
+
+    Mirrors the param set Leaflet's ``L.tileLayer.wms`` would send: WMS 1.3.0
+    uses ``CRS`` (not ``SRS``) and BBOX in easting/northing order for
+    EPSG:3857. All values pass through ``urlencode`` so layer names that
+    embed a namespace separator (``ign:foo``) survive proxies and routers.
+    """
+    assert provider.wms is not None  # guarded by ProviderKind.WMS dispatch
+    min_x, min_y, max_x, max_y = tile_bbox_3857(z, x, y)
+    params = urlencode(
+        {
+            "service": "WMS",
+            "version": provider.wms.wms_version,
+            "request": "GetMap",
+            "layers": provider.wms.layer_name,
+            "styles": "",
+            "format": provider.wms.image_format,
+            "transparent": "true",
+            "crs": "EPSG:3857",
+            "width": 256,
+            "height": 256,
+            "bbox": f"{min_x},{min_y},{max_x},{max_y}",
+        }
+    )
+    separator = "&" if "?" in provider.wms.workspace_url else "?"
+    return f"{provider.wms.workspace_url}{separator}{params}"
+
+
 def build_source_url(provider: BasemapProvider, z: int, x: int, y: int) -> str:
-    """Build the external source URL for a tile, handling TMS Y-flip."""
+    """Build the external source URL for a tile.
+
+    XYZ providers substitute the canonical ``{z}/{x}/{y}`` template
+    (handling TMS Y-flip). WMS providers translate the tile to a GetMap
+    BBOX in EPSG:3857 against the configured workspace URL.
+    """
+    if provider.kind is ProviderKind.WMS:
+        return _build_wms_url(provider, z, x, y)
     actual_y = tms_y_flip(y, z) if provider.is_tms else y
     return provider.source_url_template.format(z=z, x=x, y=actual_y)

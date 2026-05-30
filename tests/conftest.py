@@ -1,8 +1,31 @@
 """Shared test fixtures for the data-service test suite."""
 
-from unittest.mock import AsyncMock, MagicMock
+import os
 
-import pytest
+# Settings._validate() runs at module-import time via `dependencies.py`'s
+# top-level `Settings.get_settings()` call. Several validation rules require
+# env vars that operators normally set in `.env` (weather-stations admin
+# password, SMN credentials). Without these, ANY test module that imports
+# `main`, `dependencies`, or any service that transitively pulls in
+# `dependencies` fails to collect — see CI failures like
+# "weather_stations_api_key_auth_enabled=true requires WEATHER_STATIONS_ADMIN_PASSWORD".
+#
+# Set safe placeholder values BEFORE any test module is loaded. `setdefault`
+# preserves real values when present (local dev with actual SMN creds keeps
+# working).
+os.environ.setdefault("WEATHER_STATIONS_ADMIN_PASSWORD", "test-admin-password")
+os.environ.setdefault("SMN_API_USERNAME", "test-user")
+os.environ.setdefault("SMN_API_PASSWORD", "test-pass")
+# The keystore now persists to S3, and Settings._validate() refuses to start
+# with auth enabled unless S3 is configured. Tests never touch a real S3 —
+# placeholders satisfy `is_s3_configured()` so the validator passes.
+os.environ.setdefault("S3_TILES_DATA_ENDPOINT", "test-endpoint:9000")
+os.environ.setdefault("S3_TILES_DATA_ACCESS_KEY", "test-access-key")
+os.environ.setdefault("S3_TILES_DATA_SECRET_KEY", "test-secret-key")
+
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+import pytest  # noqa: E402
 
 
 @pytest.fixture

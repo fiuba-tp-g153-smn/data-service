@@ -13,10 +13,27 @@ from clients.basemap_state_store import BasemapStateStore
 from clients.http_tile_client import HttpTileClient
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
+from clients.smn_api_client import SmnApiClient
+from clients.smn_registry_client import SmnRegistryClient
+from clients.weather_stations_keystore import WeatherStationsKeystore
 from controller import general
-from dependencies import basemap_service, logger, redis_client, settings
+from dependencies import (
+    basemap_service,
+    logger,
+    redis_client,
+    set_weather_stations_keystore,
+    settings,
+)
 from gdal_config import configure_gdal_vsi_s3
-from routes import basemap, ecmwf_mslp, ecmwf_tp, radar, satellite, sync, wrf
+from routes import (
+    basemap,
+    ecmwf_mslp,
+    ecmwf_tp,
+    radar,
+    satellite,
+    sync,
+    weather_stations,
+)
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_tile_reader import BasemapTileReader
@@ -47,10 +64,28 @@ from services.satellite_sync_strategy import (
     SatelliteSyncStrategy,
 )
 from services.sync_service import sync_service
+from services.weather_stations_scraper_service import WeatherStationsScraperService
+from services.weather_stations_service import weather_stations_service
 from services.wrf_service import wrf_service
 from services.wrf_sync_strategy import WrfFullSyncStrategy, WrfOnDemandStrategy, WrfSyncStrategy
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+
+@dataclass(slots=True)
+class WeatherStationsRuntime:
+    """Lifecycle holder for weather-stations resources owned by the app lifespan."""
+
+    # `keystore` and `api_keys_s3_client` are only None in the degenerate
+    # local-dev case where auth is disabled AND S3 is not configured.
+    keystore: Optional[WeatherStationsKeystore] = None
+    api_keys_s3_client: Optional[S3Client] = None
+    # All four are absent when sync_mode == "disabled" (keystore stays for
+    # read-side auth gating, but nothing scrapes).
+    s3_client: Optional[S3Client] = None
+    smn_client: Optional[SmnApiClient] = None
+    registry_client: Optional[SmnRegistryClient] = None
+    scraper: Optional[WeatherStationsScraperService] = None
 
 
 @dataclass(slots=True)
@@ -162,11 +197,13 @@ async def configure_basemap(
     """Bring up the basemap subsystem using the active `basemap_sync_mode`.
 
     Modes (set via `settings.json::basemap_sync_mode` or `BASEMAP_SYNC_MODE`):
-      * ``full``       — scraper on (writes Redis + S3), reader uses
-                         Redis + S3 + relay, tombstones on.
-      * ``on_demand``  — scraper on but writes only S3; reader still uses
-                         Redis and fills it lazily on cold reads.
-      * ``no_cache``   — scraper on, S3-only. Reader skips Redis entirely.
+      * ``full``       — scraper on (writes Redis + S3); reader tries
+                         upstream first, then falls back to Redis, then S3.
+      * ``on_demand``  — scraper on but writes only S3; reader tries
+                         upstream first, then Redis (lazily populated by
+                         the reader on hits), then S3.
+      * ``no_cache``   — scraper on, S3-only. Reader skips Redis tier
+                         entirely (upstream → S3).
       * ``relay_only`` — scraper off, Redis off, S3 off. Reader is a pure
                          provider proxy.
 
@@ -190,7 +227,6 @@ async def configure_basemap(
     scraper_writes_redis = mode == "full"
     redis_cache_enabled = mode in ("full", "on_demand")
     s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
-    negative_cache = settings.basemap_negative_cache_enabled and redis_cache_enabled
 
     if s3_cache_enabled and not settings.is_s3_configured():
         logger.error(
@@ -204,13 +240,12 @@ async def configure_basemap(
 
     logger.info(
         "Basemap mode=%s (scraper=%s, scraper_redis=%s, "
-        "reader_redis=%s, reader_s3=%s, negative_cache=%s)",
+        "reader_redis=%s, reader_s3=%s)",
         mode,
         "on" if run_scraper else "off",
         "on" if scraper_writes_redis else "off",
         "on" if redis_cache_enabled else "off",
         "on" if s3_cache_enabled else "off",
-        "on" if negative_cache else "off",
     )
 
     basemap_s3: Optional[S3Client] = None
@@ -246,8 +281,6 @@ async def configure_basemap(
         tile_ttl=settings.basemap_tile_ttl,
         cache_concurrent=settings.basemap_cache_concurrent,
         online_fallback=settings.basemap_online_fallback_enabled,
-        negative_cache_enabled=negative_cache,
-        negative_cache_ttl=settings.basemap_negative_cache_ttl,
         request_deadline_seconds=settings.basemap_request_deadline_seconds,
         redis_cache_enabled=redis_cache_enabled,
         s3_cache_enabled=s3_cache_enabled,
@@ -300,7 +333,8 @@ async def configure_basemap(
         online_fallback=settings.basemap_online_fallback_enabled,
         s3_client=basemap_s3,
         redis_client=client_redis,
-        presence_ttl=settings.basemap_provider_presence_ttl,
+        http_client=reader_http_client,
+        availability_ttl=settings.basemap_provider_availability_ttl,
     )
     return BasemapRuntime(
         s3_client=basemap_s3,
@@ -310,6 +344,129 @@ async def configure_basemap(
         state_store=state_store,
         scraper=scraper,
     )
+
+
+async def configure_weather_stations() -> WeatherStationsRuntime:
+    """Bring up the weather-stations subsystem.
+
+    The keystore is built on a dedicated S3 bucket (separate from the
+    weather-stations data bucket) and gates the read endpoints' API-key auth
+    even when no scraper runs. When `weather_stations_sync_mode == "full"`
+    the scraper + its S3/SMN clients are also built and started. Subsystem
+    is S3-only by design — no Redis.
+    """
+    api_keys_s3: Optional[S3Client] = None
+    keystore: Optional[WeatherStationsKeystore] = None
+    if settings.is_s3_configured():
+        api_keys_s3 = S3Client(
+            endpoint=settings.s3_tiles_data_endpoint,
+            access_key=settings.s3_tiles_data_access_key,
+            secret_key=settings.s3_tiles_data_secret_key,
+            bucket=settings.s3_api_keys_bucket_name,
+            secure=settings.s3_tiles_data_secure,
+            max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        )
+        await api_keys_s3.connect()
+        # Bucket is dedicated to this subsystem and the only writer here is the
+        # keystore itself, so creating it on cold start keeps deploys to fresh
+        # S3/MinIO instances zero-touch (no `aws s3 mb` step).
+        await api_keys_s3.ensure_bucket()
+        keystore = WeatherStationsKeystore(api_keys_s3)
+        set_weather_stations_keystore(keystore)
+    else:
+        # Validator already forbids auth_enabled=true without S3, so reaching
+        # here implies auth_enabled=false — admin endpoints will 500 via the
+        # dep, but the read path is open and works without a keystore.
+        logger.warning(
+            "Weather-stations keystore not built: S3 is not configured. "
+            "Admin endpoints (/weather-stations/admin/*) will return 500. "
+            "Configure S3 to enable them."
+        )
+
+    if settings.weather_stations_sync_mode == "disabled":
+        logger.info("Weather stations scraper disabled (sync_mode=disabled)")
+        weather_stations_service.configure(
+            s3_client=None,
+            list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+        )
+        return WeatherStationsRuntime(keystore=keystore, api_keys_s3_client=api_keys_s3)
+
+    if not settings.is_s3_configured():
+        logger.error(
+            "Weather stations refused to start: S3 is not configured but "
+            "weather_stations_sync_mode=full requires S3. Configure S3 "
+            "credentials or set WEATHER_STATIONS_SYNC_MODE=disabled."
+        )
+        weather_stations_service.configure(
+            s3_client=None,
+            list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+        )
+        return WeatherStationsRuntime(keystore=keystore, api_keys_s3_client=api_keys_s3)
+
+    weather_s3 = S3Client(
+        endpoint=settings.s3_tiles_data_endpoint,
+        access_key=settings.s3_tiles_data_access_key,
+        secret_key=settings.s3_tiles_data_secret_key,
+        bucket=settings.s3_weather_stations_bucket_name,
+        secure=settings.s3_tiles_data_secure,
+        max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+    )
+    await weather_s3.connect()
+
+    smn_client = SmnApiClient(
+        base_url=settings.smn_api_base_url,
+        username=settings.smn_api_username,
+        password=settings.smn_api_password,
+        timeout_seconds=settings.weather_stations_http_timeout_seconds,
+        max_retries=settings.weather_stations_http_max_retries,
+        token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
+        token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
+        user_agent=settings.smn_api_user_agent,
+        log_requests=settings.smn_api_log_requests,
+    )
+    registry_client = SmnRegistryClient(
+        url=settings.smn_stations_registry_url,
+        timeout_seconds=settings.weather_stations_http_timeout_seconds,
+        max_retries=settings.weather_stations_http_max_retries,
+    )
+
+    scraper = WeatherStationsScraperService(
+        settings=settings,
+        s3_client=weather_s3,
+        smn_client=smn_client,
+        registry_client=registry_client,
+    )
+    await scraper.start(logger)
+
+    weather_stations_service.configure(
+        s3_client=weather_s3,
+        list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+    )
+
+    return WeatherStationsRuntime(
+        keystore=keystore,
+        api_keys_s3_client=api_keys_s3,
+        s3_client=weather_s3,
+        smn_client=smn_client,
+        registry_client=registry_client,
+        scraper=scraper,
+    )
+
+
+async def shutdown_weather_stations(runtime: WeatherStationsRuntime) -> None:
+    """Tear down weather-stations resources in reverse startup order."""
+    if runtime.scraper is not None:
+        await runtime.scraper.stop(logger)
+    if runtime.smn_client is not None:
+        await runtime.smn_client.close()
+    if runtime.registry_client is not None:
+        await runtime.registry_client.close()
+    if runtime.s3_client is not None:
+        await runtime.s3_client.close()
+    if runtime.keystore is not None:
+        await runtime.keystore.close()
+    if runtime.api_keys_s3_client is not None:
+        await runtime.api_keys_s3_client.close()
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
@@ -359,11 +516,13 @@ async def lifespan(_app: FastAPI):
     wrf_service.set_strategy(wrf_strategy)
 
     basemap_runtime = await configure_basemap(redis_client)
+    weather_stations_runtime = await configure_weather_stations()
 
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
+    await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
@@ -379,6 +538,24 @@ app: FastAPI = FastAPI(
         "name": "FIUBA TPF Team N°153 Altamirano, Diem, Gismondi, Valeriani",
     },
     lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "Weather Stations",
+            "description": (
+                "Public read endpoints serving SMN EMA snapshots scraped "
+                "every ~5 minutes. All require the `X-API-Key` header (see "
+                "the **Weather Stations · Admin** section for how to mint one)."
+            ),
+        },
+        {
+            "name": "Weather Stations · Admin",
+            "description": (
+                "Operator-only API-key management. Every endpoint requires "
+                "the `X-Admin-Password` header matching the "
+                "`WEATHER_STATIONS_ADMIN_PASSWORD` env var."
+            ),
+        },
+    ],
 )
 
 # Add CORS middleware for tile serving
@@ -398,3 +575,5 @@ app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(wrf.router)  # WRF model routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
+app.include_router(weather_stations.router)  # SMN weather-stations endpoints
+app.include_router(weather_stations.admin_router)  # Admin API-key management

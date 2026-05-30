@@ -256,3 +256,27 @@ async def test_close_circuit_on_missing_is_a_noop(store):
     """Closing a never-opened circuit is safe."""
     await store.close_circuit("never-tripped")
     assert await store.get_health("never-tripped") is None
+
+
+@pytest.mark.asyncio
+async def test_concurrent_reads_share_one_connection_safely(store):
+    """Parallel reads must not corrupt each other's cursor rows.
+
+    Regression for the `full`-mode scraper flake: with `check_same_thread=False`
+    on a shared sqlite3 connection, unsynchronized concurrent `.execute()` +
+    `.fetchone()` calls on the same statement could yield empty/garbled tuples
+    and raise IndexError when consumed.
+    """
+    import asyncio
+
+    # Seed cursors for many providers, then read them all concurrently.
+    providers = [f"p{i}" for i in range(16)]
+    for i, pid in enumerate(providers):
+        await store.set_cursor(pid, zoom=i % 5, tile_index=i * 7)
+
+    results = await asyncio.gather(
+        *(store.get_cursor(pid) for pid in providers),
+    )
+
+    for i, (pid, cur) in enumerate(zip(providers, results)):
+        assert cur == Cursor(zoom=i % 5, tile_index=i * 7), pid

@@ -138,3 +138,114 @@ async def test_ensure_lifecycle_expiration_does_not_swallow_timeout_as_raise():
 
     # Must not raise.
     await client.ensure_lifecycle_expiration(days=35)
+
+
+@pytest.mark.asyncio
+async def test_download_tile_returns_none_on_endpoint_connection_error(
+    monkeypatch, caplog
+):
+    """S3 unreachable → tile download degrades to None + WARNING."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.get_object = AsyncMock(
+        side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+    )
+    monkeypatch.setattr(client, "_ensure_connected", AsyncMock(return_value=fake))
+
+    with caplog.at_level(logging.WARNING):
+        result = await client.download_tile("basemap/argenmap/3/0/0.png")
+
+    assert result is None
+    assert any(
+        "S3 unavailable for tile" in record.message
+        and "basemap/argenmap/3/0/0.png" in record.message
+        for record in caplog.records
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_download_tile_returns_none_on_generic_botocore_error(
+    monkeypatch, caplog
+):
+    """Any other BotoCoreError subclass also degrades to None."""
+    client = _make_client()
+    fake = MagicMock()
+
+    class _WhateverBotoError(BotoCoreError):
+        fmt = "whatever"
+
+    fake.get_object = AsyncMock(side_effect=_WhateverBotoError())
+    monkeypatch.setattr(client, "_ensure_connected", AsyncMock(return_value=fake))
+
+    with caplog.at_level(logging.WARNING):
+        result = await client.download_tile("basemap/argenmap/3/0/0.png")
+
+    assert result is None
+    assert any("S3 unavailable for tile" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_download_tile_returns_none_when_ensure_connected_raises(
+    monkeypatch, caplog
+):
+    """A connect-time BotoCoreError is also degraded — no exception out."""
+    client = _make_client()
+    monkeypatch.setattr(
+        client,
+        "_ensure_connected",
+        AsyncMock(
+            side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await client.download_tile("basemap/argenmap/3/0/0.png")
+
+    assert result is None
+    assert any("S3 unavailable for tile" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_has_any_object_returns_false_on_endpoint_connection_error(
+    monkeypatch, caplog
+):
+    """S3 unreachable → has_any_object returns False instead of raising."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.list_objects_v2 = AsyncMock(
+        side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+    )
+    monkeypatch.setattr(client, "_ensure_connected", AsyncMock(return_value=fake))
+
+    with caplog.at_level(logging.WARNING):
+        present = await client.has_any_object("basemap/argenmap/")
+
+    assert present is False
+    assert any(
+        "S3 unavailable while checking prefix" in record.message
+        and "basemap/argenmap/" in record.message
+        for record in caplog.records
+    ), caplog.text
+
+
+@pytest.mark.asyncio
+async def test_has_any_object_returns_false_on_client_error(monkeypatch, caplog):
+    """ClientError used to re-raise; it now degrades to False with a warning."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.list_objects_v2 = AsyncMock(
+        side_effect=ClientError(
+            error_response={"Error": {"Code": "AccessDenied", "Message": "denied"}},
+            operation_name="ListObjectsV2",
+        )
+    )
+    monkeypatch.setattr(client, "_ensure_connected", AsyncMock(return_value=fake))
+
+    with caplog.at_level(logging.WARNING):
+        present = await client.has_any_object("basemap/argenmap/")
+
+    assert present is False
+    assert any(
+        "S3 unavailable while checking prefix" in record.message
+        for record in caplog.records
+    )

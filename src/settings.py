@@ -28,7 +28,40 @@ class Settings:
     s3_tiles_data_secret_key: str = ""
     s3_tiles_data_bucket_name: str = ""
     s3_tiles_data_secure: bool = False
+    s3_weather_stations_bucket_name: str = "weather-stations-data"
+    # Dedicated bucket for hashed API key objects (keys/<sha256>.json). Separate
+    # from the weather-stations data bucket so admin keys can survive a wipe
+    # of either bucket independently.
+    s3_api_keys_bucket_name: str = "api-keys"
     redis_url: str = ""
+    # SMN API credentials + base URL (env-only). The base is shared by the
+    # token endpoint (`/api-token/auth`) and the stations endpoint
+    # (`/weather/station`); SmnApiClient appends the path.
+    smn_api_base_url: str = "https://api-test.smn.gob.ar/v1"
+    smn_api_username: str = ""
+    smn_api_password: str = ""
+    # Workarounds for SMN auth-tier quirks. See SmnApiClient docstring.
+    # Default 0.0 keeps the original behavior; set to e.g. 1.0 if SMN rejects
+    # the freshly-minted JWT due to propagation lag in its validation tier.
+    smn_api_token_settling_delay_seconds: float = 0.0
+    # Override the httpx default UA (`python-httpx/X.Y`) with a curl-like
+    # string so SMN's WAF/bot heuristics don't flag us. Configurable in case
+    # SMN ever WAFs on a specific curl version.
+    smn_api_user_agent: str = "curl/8.10.1"
+    # Diagnostic: when True, every outbound SMN request is logged in full
+    # (URL, every header including JWT, body including auth credentials).
+    # Use only for short debugging sessions; never leave on in production.
+    smn_api_log_requests: bool = False
+    # Public ZIP endpoint serving the canonical station registry (EMA list).
+    # Different host + no auth. Refreshed lazily inside each scrape cycle:
+    # the scraper compares the downloaded payload's hash against the stored
+    # one and only rewrites the registry when it actually changed.
+    smn_stations_registry_url: str = (
+        "http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones"
+    )
+    # Master password protecting /weather-stations/admin/* endpoints. Required
+    # when weather_stations_api_key_auth_enabled is True (validator enforces).
+    weather_stations_admin_password: str = ""
     gdal_disable_readdir_on_open: str = "EMPTY_DIR"
     gdal_curl_use_head: str = "NO"
     gdal_vsi_cache: bool = True
@@ -85,19 +118,14 @@ class Settings:
     # When False, disables tier-3 provider proxy — service serves only from
     # Redis/S3 (fully offline reads; scraper still pulls from providers).
     basemap_online_fallback_enabled: bool = True
-    # TTL for the Redis-backed cache of per-provider "has any tile in S3?"
-    # answers used by /basemap/providers when the online fallback is disabled.
-    basemap_provider_presence_ttl: int = 60
+    # TTL for the Redis-backed cache of per-provider availability answers
+    # used by /basemap/providers. Each refresh actively probes upstream and
+    # checks the S3 fallback, so the TTL is the freshness/cost trade-off.
+    basemap_provider_availability_ttl: int = 240
     # Resumable-scrape state (SQLite cold storage + checkpoint knobs)
     basemap_scrape_state_db_path: str = "data/basemap_scraper_state.sqlite"
     basemap_scrape_checkpoint_every: int = 200
     basemap_scrape_checkpoint_seconds: float = 5.0
-    # Redis-backed negative cache for tiles that miss both S3 and the relay.
-    # Short TTL is a trade-off: long enough to suppress concurrent-request
-    # storms and repeat probes; short enough that a freshly-scraped tile is
-    # unmasked quickly even if the scraper-side invalidation hook is bypassed.
-    basemap_negative_cache_enabled: bool = True
-    basemap_negative_cache_ttl: int = 300
     # Reader-path HTTP client (isolated from the scraper's pool). Tight budget
     # so user requests can't queue behind the scraper's retry loop.
     basemap_reader_http_concurrent: int = 8
@@ -139,9 +167,33 @@ class Settings:
     basemap_provider_unhealthy_threshold: int = 5
     basemap_provider_cooldown_schedule: List[int] = [300, 900, 3600, 10800, 21600]
 
+    # --- Weather stations subsystem (loaded from settings.json, env overrides) ---
+    # Operational knobs only — secrets (SMN_*, WEATHER_STATIONS_ADMIN_PASSWORD)
+    # and the bucket name live above as env-only. This subsystem deliberately
+    # does NOT use Redis: reads resolve directly against S3 (LIST + GET) with a
+    # tiny in-process LRU on LIST results.
+    weather_stations_sync_mode: str = "full"
+    weather_stations_scrape_interval_seconds: int = 300
+    weather_stations_scrape_lock_path: str = "/tmp/weather_stations_scrape.lock"
+    weather_stations_http_timeout_seconds: int = 30
+    weather_stations_http_max_retries: int = 3
+    weather_stations_token_cache_ttl_seconds: int = 3600
+    # S3 lifecycle TTL for snapshot objects. Must be >= 1 day. Covers the
+    # frontend's longest tolerance option (48 h) with headroom.
+    weather_stations_s3_object_ttl_days: int = 2
+    # In-process LRU TTL for cached S3 LIST results in the read service.
+    weather_stations_list_cache_ttl_seconds: int = 30
+    weather_stations_cache_control_response: str = "public, max-age=60"
+    # When False, /weather-stations/* read endpoints are open (no X-API-Key).
+    # Local-dev only; production must keep this True. Validator forbids
+    # enabled=True without a non-empty admin password (otherwise admin endpoints
+    # would be unreachable and no keys could ever be issued).
+    weather_stations_api_key_auth_enabled: bool = True
+
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
-    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar", "wrf")
+    _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
+    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar", "weather_stations", "wrf")
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -196,12 +248,10 @@ class Settings:
             "basemap_http_max_retries",
             "basemap_s3_object_ttl_days",
             "basemap_online_fallback_enabled",
-            "basemap_provider_presence_ttl",
+            "basemap_provider_availability_ttl",
             "basemap_scrape_state_db_path",
             "basemap_scrape_checkpoint_every",
             "basemap_scrape_checkpoint_seconds",
-            "basemap_negative_cache_enabled",
-            "basemap_negative_cache_ttl",
             "basemap_reader_http_concurrent",
             "basemap_reader_http_timeout_seconds",
             "basemap_reader_http_max_retries",
@@ -213,6 +263,17 @@ class Settings:
             "basemap_scrape_per_host_concurrent",
             "basemap_provider_unhealthy_threshold",
             "basemap_provider_cooldown_schedule",
+            "weather_stations_sync_mode",
+            "weather_stations_scrape_interval_seconds",
+            "weather_stations_scrape_lock_path",
+            "weather_stations_http_timeout_seconds",
+            "weather_stations_http_max_retries",
+            "weather_stations_token_cache_ttl_seconds",
+            "weather_stations_s3_object_ttl_days",
+            "weather_stations_list_cache_ttl_seconds",
+            "weather_stations_cache_control_response",
+            "weather_stations_api_key_auth_enabled",
+            "weather_stations_keystore_db_path",
         }
 
         for key in json_keys:
@@ -361,8 +422,9 @@ class Settings:
         self.basemap_online_fallback_enabled = self._env_bool(
             "BASEMAP_ONLINE_FALLBACK_ENABLED", self.basemap_online_fallback_enabled
         )
-        self.basemap_provider_presence_ttl = self._env_int(
-            "BASEMAP_PROVIDER_PRESENCE_TTL", self.basemap_provider_presence_ttl
+        self.basemap_provider_availability_ttl = self._env_int(
+            "BASEMAP_PROVIDER_AVAILABILITY_TTL",
+            self.basemap_provider_availability_ttl,
         )
         self.basemap_scrape_state_db_path = os.getenv(
             "BASEMAP_SCRAPE_STATE_DB_PATH", self.basemap_scrape_state_db_path
@@ -372,12 +434,6 @@ class Settings:
         )
         self.basemap_scrape_checkpoint_seconds = self._env_float(
             "BASEMAP_SCRAPE_CHECKPOINT_SECONDS", self.basemap_scrape_checkpoint_seconds
-        )
-        self.basemap_negative_cache_enabled = self._env_bool(
-            "BASEMAP_NEGATIVE_CACHE_ENABLED", self.basemap_negative_cache_enabled
-        )
-        self.basemap_negative_cache_ttl = self._env_int(
-            "BASEMAP_NEGATIVE_CACHE_TTL", self.basemap_negative_cache_ttl
         )
         self.basemap_reader_http_concurrent = self._env_int(
             "BASEMAP_READER_HTTP_CONCURRENT", self.basemap_reader_http_concurrent
@@ -419,6 +475,73 @@ class Settings:
         self.basemap_provider_cooldown_schedule = self._env_int_list(
             "BASEMAP_PROVIDER_COOLDOWN_SCHEDULE",
             self.basemap_provider_cooldown_schedule,
+        )
+
+        # SMN API + weather-stations subsystem
+        self.s3_weather_stations_bucket_name = os.getenv(
+            "S3_WEATHER_STATIONS_BUCKET_NAME", self.s3_weather_stations_bucket_name
+        )
+        self.smn_api_base_url = os.getenv("SMN_API_BASE_URL", self.smn_api_base_url)
+        self.smn_api_username = os.getenv("SMN_API_USERNAME", self.smn_api_username)
+        self.smn_api_password = os.getenv("SMN_API_PASSWORD", self.smn_api_password)
+        self.smn_api_token_settling_delay_seconds = self._env_float(
+            "SMN_API_TOKEN_SETTLING_DELAY_SECONDS",
+            self.smn_api_token_settling_delay_seconds,
+        )
+        self.smn_api_user_agent = os.getenv(
+            "SMN_API_USER_AGENT", self.smn_api_user_agent
+        )
+        self.smn_api_log_requests = self._env_bool(
+            "SMN_API_LOG_REQUESTS", self.smn_api_log_requests
+        )
+        self.smn_stations_registry_url = os.getenv(
+            "SMN_STATIONS_REGISTRY_URL", self.smn_stations_registry_url
+        )
+        self.weather_stations_admin_password = os.getenv(
+            "WEATHER_STATIONS_ADMIN_PASSWORD", self.weather_stations_admin_password
+        )
+        self.weather_stations_sync_mode = (
+            os.getenv("WEATHER_STATIONS_SYNC_MODE", self.weather_stations_sync_mode)
+            or self.weather_stations_sync_mode
+        )
+        self.weather_stations_scrape_interval_seconds = self._env_int(
+            "WEATHER_STATIONS_SCRAPE_INTERVAL_SECONDS",
+            self.weather_stations_scrape_interval_seconds,
+        )
+        self.weather_stations_scrape_lock_path = os.getenv(
+            "WEATHER_STATIONS_SCRAPE_LOCK_PATH",
+            self.weather_stations_scrape_lock_path,
+        )
+        self.weather_stations_http_timeout_seconds = self._env_int(
+            "WEATHER_STATIONS_HTTP_TIMEOUT_SECONDS",
+            self.weather_stations_http_timeout_seconds,
+        )
+        self.weather_stations_http_max_retries = self._env_int(
+            "WEATHER_STATIONS_HTTP_MAX_RETRIES",
+            self.weather_stations_http_max_retries,
+        )
+        self.weather_stations_token_cache_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_TOKEN_CACHE_TTL_SECONDS",
+            self.weather_stations_token_cache_ttl_seconds,
+        )
+        self.weather_stations_s3_object_ttl_days = self._env_int(
+            "WEATHER_STATIONS_S3_OBJECT_TTL_DAYS",
+            self.weather_stations_s3_object_ttl_days,
+        )
+        self.weather_stations_list_cache_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_LIST_CACHE_TTL_SECONDS",
+            self.weather_stations_list_cache_ttl_seconds,
+        )
+        self.weather_stations_cache_control_response = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_RESPONSE",
+            self.weather_stations_cache_control_response,
+        )
+        self.weather_stations_api_key_auth_enabled = self._env_bool(
+            "WEATHER_STATIONS_API_KEY_AUTH_ENABLED",
+            self.weather_stations_api_key_auth_enabled,
+        )
+        self.s3_api_keys_bucket_name = os.getenv(
+            "S3_API_KEYS_BUCKET_NAME", self.s3_api_keys_bucket_name
         )
 
     def _validate(self) -> None:
@@ -475,6 +598,52 @@ class Settings:
             raise ValueError(
                 "basemap_provider_cooldown_schedule must be monotonically "
                 f"non-decreasing (got {schedule})"
+            )
+        if self.weather_stations_sync_mode not in self._WEATHER_STATIONS_SYNC_MODES:
+            raise ValueError(
+                f"Invalid weather_stations_sync_mode="
+                f"{self.weather_stations_sync_mode!r}; "
+                f"expected one of {self._WEATHER_STATIONS_SYNC_MODES}"
+            )
+        if self.weather_stations_scrape_interval_seconds < 60:
+            raise ValueError(
+                "weather_stations_scrape_interval_seconds must be >= 60 "
+                f"(got {self.weather_stations_scrape_interval_seconds})"
+            )
+        if self.weather_stations_s3_object_ttl_days < 1:
+            raise ValueError(
+                "weather_stations_s3_object_ttl_days must be >= 1 "
+                f"(got {self.weather_stations_s3_object_ttl_days})"
+            )
+        # Admin endpoints mint/revoke API keys; if the gateway is on but no
+        # admin password is configured, the system is permanently locked out
+        # (no keys can ever be issued). Fail fast at boot.
+        if (
+            self.weather_stations_api_key_auth_enabled
+            and not self.weather_stations_admin_password
+        ):
+            raise ValueError(
+                "weather_stations_api_key_auth_enabled=true requires "
+                "WEATHER_STATIONS_ADMIN_PASSWORD to be set; otherwise the "
+                "admin endpoints are unreachable and no API keys can be issued."
+            )
+        # The keystore is S3-backed; without S3 there is nowhere to persist
+        # the hashed key objects. Fail fast rather than 500 on first request.
+        if self.weather_stations_api_key_auth_enabled and not self.is_s3_configured():
+            raise ValueError(
+                "weather_stations_api_key_auth_enabled=true requires S3 to be "
+                "configured (S3_TILES_DATA_ENDPOINT/ACCESS_KEY/SECRET_KEY); "
+                "the API key keystore persists to "
+                f"s3://{self.s3_api_keys_bucket_name}/."
+            )
+        # The scraper cannot mint a JWT without credentials.
+        if self.weather_stations_sync_mode == "full" and not (
+            self.smn_api_username and self.smn_api_password
+        ):
+            raise ValueError(
+                "weather_stations_sync_mode='full' requires SMN_API_USERNAME "
+                "and SMN_API_PASSWORD to be set; the scraper needs them to "
+                "mint a JWT for the SMN API."
             )
 
     def is_s3_configured(self) -> bool:

@@ -21,7 +21,7 @@ class ForecastListResponse(BaseModel):
 
 
 class PeriodInfo(BaseModel):
-    """Info for a single centered 6h precipitation accumulation window."""
+    """Info for a single 6h precipitation accumulation period (period_ts is the end timestamp)."""
 
     period_ts: str
 

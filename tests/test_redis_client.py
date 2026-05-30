@@ -125,6 +125,28 @@ async def test_radar_index_operations():
 
 
 @pytest.mark.asyncio
+async def test_basemap_provider_availability_round_trip():
+    """Availability writes a 1/0 byte under the expected key with TTL."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.get = AsyncMock(side_effect=[b"1", b"0", None])
+
+    await client.set_basemap_provider_availability("argenmap", True, ttl=240)
+    client._redis.set.assert_awaited_once_with(
+        "basemap:availability:argenmap", b"1", ex=240
+    )
+
+    available = await client.get_basemap_provider_availability("argenmap")
+    assert available is True
+
+    unavailable = await client.get_basemap_provider_availability("argenmap")
+    assert unavailable is False
+
+    missing = await client.get_basemap_provider_availability("argenmap")
+    assert missing is None
+
+
+@pytest.mark.asyncio
 async def test_sync_status_operations():
     """Verify sync status update and retrieval."""
     client = RedisClient("redis://localhost:6379/0")
