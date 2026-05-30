@@ -27,6 +27,8 @@ router = APIRouter(prefix="/products/wrf", tags=["WRF Model"])
 _ZOOM_MIN = 4
 _ZOOM_MAX = 9
 
+_BARB_ZOOM_LEVELS = {2, 4, 6, 8, 10, 12}
+
 
 @router.get(
     "/{product_id}",
@@ -154,6 +156,50 @@ async def get_geojson_layer(
         )
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="GeoJSON not found"
+        )
+
+    return Response(
+        content=data,
+        media_type="application/geo+json",
+        headers={"Cache-Control": settings.cache_control_tile, "ETag": etag},
+    )
+
+
+@router.get(
+    "/{product_id}/{init_tag}/{fxxx}/barbs/{z}/{x}/{y}.json",
+    status_code=status.HTTP_200_OK,
+    summary="Get WRF Wind-Barb GeoJSON Tile",
+)
+async def get_barb_tile(
+    request: Request,
+    product_id: str = PathParam(..., description="WRF product ID"),
+    init_tag: str = PathParam(..., description="Initialization timestamp"),
+    fxxx: str = PathParam(..., description="Forecast step (e.g. F001)"),
+    z: int = PathParam(..., description="Zoom level"),
+    x: int = PathParam(..., description="Tile X coordinate"),
+    y: int = PathParam(..., description="Tile Y coordinate"),
+):
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    """Serve a wind-barb GeoJSON tile (native zooms: 2, 4, 6, 8, 10)."""
+    if z not in _BARB_ZOOM_LEVELS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Zoom {z} not supported for barb tiles. "
+            f"Valid: {sorted(_BARB_ZOOM_LEVELS)}",
+        )
+
+    etag = f'"{product_id}-{init_tag}-{fxxx}-barbs-{z}-{x}-{y}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
+    data = await wrf_service.get_barb_tile(product_id, init_tag, fxxx, z, x, y)
+    if not data:
+        # Return empty FeatureCollection (not 404) so the browser console stays
+        # clean for tiles outside the WRF Lambert domain.
+        return Response(
+            content=b'{"type":"FeatureCollection","features":[]}',
+            media_type="application/geo+json",
+            headers={"Cache-Control": settings.cache_control_tile, "ETag": etag},
         )
 
     return Response(

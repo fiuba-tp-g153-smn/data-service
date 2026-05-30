@@ -29,6 +29,17 @@ class WrfSyncStrategy(Protocol):
     ) -> Optional[bytes]:
         """Get a GeoJSON layer (barbs / contours) for the given step."""
 
+    async def get_barb_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        """Get a rasterized WRF wind-barb WebP tile for (z, x, y)."""
+
     async def list_init_runs(self, product_id: str) -> List[str]:
         """List available initialization run tags, sorted descending."""
 
@@ -42,10 +53,17 @@ class WrfSyncStrategy(Protocol):
 
 
 class WrfFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it)."""
+    """Reads from pre-populated Redis (background sync fills it).
 
-    def __init__(self, redis_client: RedisClient):
+    Barb tiles are not pre-synced (too many files); they go direct to S3
+    via the optional S3 client passed at construction time.
+    """
+
+    def __init__(
+        self, redis_client: RedisClient, s3_client: Optional[S3Client] = None
+    ):
         self._redis = redis_client
+        self._s3 = s3_client
 
     async def get_tile(
         self,
@@ -62,6 +80,21 @@ class WrfFullSyncStrategy:
         self, product_id: str, init_tag: str, fxxx: str, layer: str
     ) -> Optional[bytes]:
         return await self._redis.get_wrf_geojson(product_id, init_tag, fxxx, layer)
+
+    async def get_barb_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        if not self._s3:
+            return None
+        s3_key = S3Client.build_wrf_barb_tile_key(product_id, init_tag, fxxx, z, x, y)
+        return await self._s3.download_tile(s3_key)
 
     async def list_init_runs(self, product_id: str) -> List[str]:
         return await self._redis.get_wrf_init_runs(product_id)
@@ -138,6 +171,21 @@ class WrfOnDemandStrategy:
                 )
             )
         return data
+
+    async def get_barb_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        if not self._s3:
+            return None
+        s3_key = S3Client.build_wrf_barb_tile_key(product_id, init_tag, fxxx, z, x, y)
+        return await self._s3.download_tile(s3_key)
 
     async def list_init_runs(self, product_id: str) -> List[str]:
         cache_key = f"cache:listing:wrf:{product_id}:init_runs"

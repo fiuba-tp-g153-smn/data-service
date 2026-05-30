@@ -231,6 +231,14 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         """Build S3 key for a WRF GeoJSON layer (barbs, isobars, shear, ...)."""
         return f"geojson/wrf/{product_id}/{init_tag}/{fxxx}/{layer}.json"
 
+    @staticmethod
+    def build_wrf_barb_tile_key(
+        product_id: str, init_tag: str, fxxx: str, z: int, x: int, y: int
+    ) -> str:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Build S3 key for a WRF wind-barb GeoJSON tile (z/x/y)."""
+        return f"geojson/wrf/{product_id}/{init_tag}/{fxxx}/barbs/{z}/{x}/{y}.json"
+
     async def sync_wrf_step_to_redis(
         self,
         redis_client: RedisClient,

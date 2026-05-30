@@ -105,7 +105,7 @@ async def configure_strategies(
         radar_strategy = RadarFullSyncStrategy(client_redis)
         ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(client_redis)
         ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(client_redis)
-        wrf_strategy = WrfFullSyncStrategy(client_redis)
+        wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
 
         sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)

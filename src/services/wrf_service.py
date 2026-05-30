@@ -100,6 +100,23 @@ class WrfService(BaseProductService):
             return None
         return await self._strategy.get_geojson(product_id, init_tag, fxxx, layer)
 
+    async def get_barb_tile(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Get rasterized wind-barb WebP tile bytes via the configured strategy."""
+        if not self._strategy:
+            return None
+        return await self._strategy.get_barb_tile(
+            product_id, init_tag, fxxx, z, x, y
+        )
+
 
 # Singleton instance
 wrf_service = WrfService()
