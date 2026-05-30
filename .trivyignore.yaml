@@ -1,0 +1,14 @@
+# Trivy vulnerability suppressions.
+#
+# perl-base CVEs with no upstream Debian fix as of 2026-05-29 (Fixed Version is
+# empty in the scan). Not exploitable here: this image runs a Python/FastAPI
+# service and never invokes the Perl interpreter (no Archive::Tar extraction,
+# no Perl regex compilation). Re-evaluate after `expires-at` — by then Debian
+# should ship a patched perl-base and the rebuild will clear these on its own.
+vulnerabilities:
+  - id: CVE-2026-42496
+    expires-at: 2026-07-01
+    statement: "perl-base not reachable; service never runs Archive::Tar. No Debian fix available yet."
+  - id: CVE-2026-8376
+    expires-at: 2026-07-01
+    statement: "perl-base not reachable; service never compiles Perl regex. No Debian fix available yet."

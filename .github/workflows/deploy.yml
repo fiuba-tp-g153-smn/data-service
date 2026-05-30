@@ -29,8 +29,8 @@ jobs:
       - name: Scan image for vulnerabilities
         run: |
           trivy image --download-db-only
-          trivy image --format table --exit-code 0 --severity HIGH --scanners vuln,misconfig,license --skip-db-update data-service:scan
-          trivy image --format table --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,license --skip-db-update --quiet data-service:scan
+          trivy image --ignorefile .trivyignore.yaml --format table --exit-code 0 --severity HIGH --scanners vuln,misconfig,license --skip-db-update data-service:scan
+          trivy image --ignorefile .trivyignore.yaml --format table --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,license --skip-db-update --quiet data-service:scan
 
   deploy:
     needs: [test]
