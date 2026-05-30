@@ -33,6 +33,7 @@ from routes import (
     satellite,
     sync,
     weather_stations,
+    wrf,
 )
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
