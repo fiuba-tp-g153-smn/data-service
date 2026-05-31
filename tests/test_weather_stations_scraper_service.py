@@ -321,19 +321,46 @@ async def test_write_through_warms_animation_window_snapshot_bodies():
 
 
 @pytest.mark.asyncio
-async def test_unchanged_registry_skips_redis_write_through():
+async def test_unchanged_registry_still_rewarms_registry_cache():
     s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
     redis = _FakeRedis()
     scraper = _make_scraper(s3, smn, reg, redis_client=redis)
 
     await scraper._run_sync()
-    redis.store.clear()
-    await scraper._run_sync()  # same registry hash → no registry rewrite
+    redis.store.clear()  # keep S3 (stations.json persists across cycles); drop only Redis
+    await scraper._run_sync()  # same registry hash → S3 not rewritten (see S3-level test)
 
-    assert "cache:ws:registry" not in redis.store
-    # ...but the per-cycle observation keys are still refreshed.
+    # cache:ws:registry is re-warmed each cycle (TTL refresh) from the persisted
+    # stations.json, alongside the other always-warm keys — even when unchanged.
+    assert "cache:ws:registry" in redis.store
+    assert redis.store["cache:ws:registry"][1] == 3600
     assert "cache:ws:latest" in redis.store
     assert "cache:ws:tilesets" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_registry_warmed_from_existing_s3_when_unchanged():
+    """Boot case: data already in S3, registry unchanged → still warm the cache."""
+    import hashlib
+
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    seeded_hash = hashlib.sha256(_REGISTRY_TXT.encode("utf-8")).hexdigest()
+    s3.downloads["weather-stations/stations.meta.json"] = json.dumps(
+        {"source_hash": seeded_hash, "station_count": 1, "updated_at": "x"}
+    ).encode()
+    registry_body = json.dumps(
+        {"fetched_at": "x", "source_url": "y", "stations": [{"station_id": 87344}]}
+    ).encode()
+    s3.downloads["weather-stations/stations.json"] = registry_body
+    redis = _FakeRedis()
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()
+
+    # Hash matched → stations.json NOT re-uploaded...
+    assert "weather-stations/stations.json" not in s3.uploads
+    # ...yet cache:ws:registry is warmed from the existing S3 object.
+    assert redis.store["cache:ws:registry"] == (registry_body, 3600)
 
 
 @pytest.mark.asyncio

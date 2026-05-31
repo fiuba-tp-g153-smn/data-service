@@ -110,6 +110,9 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
 
         # Registry refresh is independent of the observations scrape.
         await self._refresh_registry_if_changed()
+        # Keep cache:ws:registry resident every cycle (warms at boot, refreshes
+        # the TTL) — runs even when the SMN observation fetch below fails.
+        await self._warm_registry_cache()
 
         try:
             raw_observations = await self._smn.fetch_current_weather_stations()
@@ -221,8 +224,25 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             (previous or "<none>")[:8],
             source_hash[:8],
         )
-        # Write-through the fresh registry so /stations reads stay warm.
-        await self._redis_set(registry_key(), registry_bytes, self._registry_ttl)
+        # Redis warming is handled unconditionally by _warm_registry_cache() each
+        # cycle, so no write-through here — this method only owns the S3 rewrite.
+
+    async def _warm_registry_cache(self) -> None:
+        """Keep cache:ws:registry resident: warm it from the S3 registry each cycle.
+
+        Warms at boot from the already-present `stations.json` and refreshes the
+        TTL afterwards, independent of whether the registry changed — so
+        `/stations` reads stay warm like the other always-warm keys. Fail-soft.
+        """
+        if not self._cache_enabled:
+            return
+        try:
+            body = await self._s3.download_tile(_REGISTRY_KEY)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Registry cache warm: S3 read failed: %s", exc)
+            return
+        if body is not None:
+            await self._redis_set(registry_key(), body, self._registry_ttl)
 
     async def _warm_observation_cache(self, snapshot_bytes: bytes) -> None:
         """Write-through latest + recomputed tilesets so reads stay warm (fail-soft)."""
