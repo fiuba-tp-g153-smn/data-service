@@ -649,6 +649,24 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         await client.create_bucket(Bucket=self._bucket)
         logger.info("Created S3 bucket %s", self._bucket)
 
+    async def is_reachable(self) -> bool:
+        """Return True if the S3 endpoint answers at all, regardless of whether
+        the bucket exists or we're authorized.
+
+        Only network-level failures count as unreachable, so a fresh S3 with no
+        buckets yet still reports reachable (unlike `check_connection`, which
+        probes a specific bucket and returns False on a 404).
+        """
+        try:
+            client = await self._ensure_connected()
+            await client.list_buckets()
+            return True
+        except ClientError:
+            return True  # endpoint answered (auth/permission) -> reachable
+        except (BotoCoreError, OSError) as exc:
+            logger.debug("S3 endpoint not reachable yet: %s", exc)
+            return False
+
     async def check_connection(self) -> bool:
         """Check if we can connect to S3."""
         try:
