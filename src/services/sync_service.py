@@ -238,14 +238,20 @@ class SyncService(BaseSyncService):
                     sat_downloaded += downloaded
                     prefix_downloaded += downloaded
 
-                    # Score = insertion time, matching the per-tile Redis TTL so
-                    # index entries expire in lockstep with the tiles they point to.
-                    await self._redis_client.add_satellite_tileset(
-                        channel_dir,
-                        tileset_id,
-                        now,
-                        ttl=self._settings.tile_ttl,
-                    )
+                    if downloaded > 0:
+                        # Only index a tileset whose tiles actually landed in
+                        # Redis, so a transient empty/failed S3 read isn't cached
+                        # as "present" and then skipped until the next trim
+                        # (~tile_ttl). Mirrors the radar guard in
+                        # _sync_radar_elevation. Score = insertion time, matching
+                        # the per-tile Redis TTL so index entries expire in
+                        # lockstep with the tiles they point to.
+                        await self._redis_client.add_satellite_tileset(
+                            channel_dir,
+                            tileset_id,
+                            now,
+                            ttl=self._settings.tile_ttl,
+                        )
 
                 # Trim every cycle (even with no new tilesets) so the index stays
                 # bounded to the live-tile window instead of growing unboundedly.

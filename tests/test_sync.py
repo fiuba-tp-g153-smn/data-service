@@ -209,6 +209,37 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
 
 
 @pytest.mark.asyncio
+async def test_sync_satellite_skips_indexing_on_zero_download(mock_redis_client):
+    """A tileset whose download stores 0 tiles is NOT indexed (regression).
+
+    Guards against poisoning idx:sat:{channel}: a transient empty/failed S3 read
+    must not be cached as "present" and then skipped (in full mode = 404) until
+    the next trim ~tile_ttl later. The download is retried next cycle instead.
+    """
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=["tiles/glm_fed/20260611550000/"]
+    )
+    # Download stores nothing (e.g. transient S3 listing failure -> [] -> 0).
+    mock_s3.sync_prefix_to_redis = AsyncMock(return_value=0)
+    mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+    service._sync_prefixes = ["tiles/glm_fed"]  # pylint: disable=protected-access
+
+    downloaded, errors = await service._sync_satellite_prefixes()
+
+    assert downloaded == 0
+    assert errors == 0
+    # The download WAS attempted...
+    mock_s3.sync_prefix_to_redis.assert_awaited_once()
+    # ...but the tileset must NOT be indexed, so it stays "new" and is retried.
+    mock_redis_client.add_satellite_tileset.assert_not_awaited()
+    # Trim still runs once per prefix regardless.
+    mock_redis_client.trim_satellite_index.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sync_radar_trims_expired_each_cycle(mock_redis_client):
     """Radar trim runs once per elevation even when no new tilesets are found."""
     mock_s3 = AsyncMock()
