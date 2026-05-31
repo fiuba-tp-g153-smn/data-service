@@ -364,15 +364,34 @@ async def test_tilesets_miss_caches_iso_string_not_datetime():
 
 
 @pytest.mark.asyncio
-async def test_tileset_snapshot_served_from_cache():
-    from services.weather_stations_cache import snapshot_key
+async def test_tileset_snapshot_body_served_from_cache_without_s3_get():
+    from services.weather_stations_cache import snap_body_key
 
     ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
-    redis = _FakeRedis({snapshot_key("20260517T1400Z", 0.0): _snap_body(ts)})
-    svc, s3 = _svc_with_redis(redis, {})
+    s3_key = _snap_key(ts)
+    # S3 holds the object (so resolution finds the key), but a DIFFERENT body is
+    # seeded in Redis to prove the response came from the cache, not from S3.
+    redis = _FakeRedis({snap_body_key(s3_key): _snap_body(ts, 5)})
+    svc, s3 = _svc_with_redis(redis, {s3_key: _snap_body(ts, 1)})
     out = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
-    assert out is not None
-    assert s3.list_calls == 0 and s3.download_calls == []  # pure Redis hit
+    assert out is not None and len(out["stations"]) == 5  # from Redis body, not S3
+    assert s3.download_calls == []  # no body GET (a resolve LIST is still allowed)
+
+
+@pytest.mark.asyncio
+async def test_tileset_snapshot_miss_caches_body_under_snap_key():
+    from services.weather_stations_cache import snap_body_key
+
+    ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    s3_key = _snap_key(ts)
+    redis = _FakeRedis({})
+    svc, s3 = _svc_with_redis(redis, {s3_key: _snap_body(ts, 2)}, snapshot_ttl=3600)
+    out = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
+    assert out is not None and len(out["stations"]) == 2
+    assert s3.download_calls == [s3_key]
+    await _drain_background_tasks()
+    assert snap_body_key(s3_key) in redis.store
+    assert any(k == snap_body_key(s3_key) and ttl == 3600 for k, _, ttl in redis.sets)
 
 
 @pytest.mark.asyncio
@@ -383,11 +402,8 @@ async def test_tileset_malformed_id_raises_even_with_cache():
         await svc.get_snapshot_for_tileset("not-a-tileset", 0.0)
 
 
-def test_snapshot_key_normalises_n():
-    from services.weather_stations_cache import snapshot_key
+def test_snap_body_key_shape():
+    from services.weather_stations_cache import snap_body_key
 
-    assert snapshot_key("20260517T1400Z", 3) == snapshot_key("20260517T1400Z", 3.0)
-    assert snapshot_key("20260517T1400Z", 3.0) == "cache:ws:snapshot:20260517T1400Z:n3"
-    assert (
-        snapshot_key("20260517T1400Z", 1.5) == "cache:ws:snapshot:20260517T1400Z:n1.5"
-    )
+    key = "weather-stations/snapshots/2026/05/17/14/20260517T140000Z.json"
+    assert snap_body_key(key) == f"cache:ws:snap:{key}"

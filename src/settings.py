@@ -191,6 +191,9 @@ class Settings:
     weather_stations_redis_tilesets_ttl_seconds: int = 600
     weather_stations_redis_snapshot_ttl_seconds: int = 3600
     weather_stations_redis_registry_ttl_seconds: int = 3600
+    # How many of the latest hour-buckets the scraper pre-warms into Redis so the
+    # frontend's timeline animation (latest 24 frames) never reads them from S3.
+    weather_stations_redis_animation_warm_buckets: int = 24
     # When False, /weather-stations/* read endpoints are open (no X-API-Key).
     # Local-dev only; production must keep this True. Validator forbids
     # enabled=True without a non-empty admin password (otherwise admin endpoints
@@ -282,6 +285,7 @@ class Settings:
             "weather_stations_redis_tilesets_ttl_seconds",
             "weather_stations_redis_snapshot_ttl_seconds",
             "weather_stations_redis_registry_ttl_seconds",
+            "weather_stations_redis_animation_warm_buckets",
             "weather_stations_api_key_auth_enabled",
             "weather_stations_keystore_db_path",
         }
@@ -561,6 +565,10 @@ class Settings:
         self.weather_stations_redis_registry_ttl_seconds = self._env_int(
             "WEATHER_STATIONS_REDIS_REGISTRY_TTL_SECONDS",
             self.weather_stations_redis_registry_ttl_seconds,
+        )
+        self.weather_stations_redis_animation_warm_buckets = self._env_int(
+            "WEATHER_STATIONS_REDIS_ANIMATION_WARM_BUCKETS",
+            self.weather_stations_redis_animation_warm_buckets,
         )
         self.weather_stations_api_key_auth_enabled = self._env_bool(
             "WEATHER_STATIONS_API_KEY_AUTH_ENABLED",

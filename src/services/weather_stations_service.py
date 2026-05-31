@@ -27,7 +27,7 @@ from services.weather_stations_cache import (
     parse_snapshot_key,
     parse_tileset_id,
     registry_key,
-    snapshot_key,
+    snap_body_key,
     tilesets_key,
 )
 
@@ -152,22 +152,14 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         Resolve a tilesetId + N-hour tolerance to a snapshot.
 
         Picks the latest snapshot whose scraped_at falls in
-        `[T - N*3600, T]` where T = tileset_id parsed as UTC. Redis-first
-        (keyed by tilesetId + normalised N); on a miss resolves against S3 and
-        caches the result. Raises `TilesetIdFormatError` on a malformed id.
+        `[T - N*3600, T]` where T = tileset_id parsed as UTC. Resolves the
+        matching snapshot key via the (in-process cached) window LIST, then
+        serves its body from Redis (`cache:ws:snap:{key}`, N-independent) with an
+        S3 fallback + write-back. Raises `TilesetIdFormatError` on a malformed id.
         """
         if tolerance_hours < 0:
             raise ValueError("tolerance_hours must be >= 0")
-        # Validate format before the cache lookup so a bad id 400s either way.
         target = parse_tileset_id(tileset_id)
-
-        cache_key = snapshot_key(tileset_id, tolerance_hours)
-        cached = await self._cache_get(cache_key)
-        if cached is not None:
-            parsed = parse_json_or_none(cached, cache_key)
-            if parsed is not None:
-                return parsed
-
         window_start = target - timedelta(hours=tolerance_hours)
         keys = await self._list_snapshot_keys_for_window(window_start, target)
 
@@ -185,6 +177,15 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
 
         if best_key is None:
             return None
+
+        # Body cache keyed by the resolved S3 object — shared across all tolerances
+        # (and pre-warmed by the scraper for the animation window).
+        cache_key = snap_body_key(best_key)
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            parsed = parse_json_or_none(cached, cache_key)
+            if parsed is not None:
+                return parsed
 
         body = await self._require_s3().download_tile(best_key)
         if body is None:

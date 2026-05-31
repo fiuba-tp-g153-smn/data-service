@@ -116,6 +116,8 @@ def _settings(redis_cache_enabled=True):
         weather_stations_redis_latest_ttl_seconds=600,
         weather_stations_redis_tilesets_ttl_seconds=600,
         weather_stations_redis_registry_ttl_seconds=3600,
+        weather_stations_redis_snapshot_ttl_seconds=3600,
+        weather_stations_redis_animation_warm_buckets=24,
     )
 
 
@@ -297,6 +299,25 @@ async def test_write_through_warms_latest_tilesets_and_registry():
     # registry: written through with the registry TTL.
     assert "cache:ws:registry" in redis.store
     assert redis.store["cache:ws:registry"][1] == 3600
+
+
+@pytest.mark.asyncio
+async def test_write_through_warms_animation_window_snapshot_bodies():
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis()
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()
+
+    # The cycle's snapshot body is pre-warmed under its S3-object key with the
+    # snapshot TTL, so animation playback of recent buckets needs no S3 read.
+    snap_keys = [k for k in redis.store if k.startswith("cache:ws:snap:")]
+    assert len(snap_keys) == 1
+    key = snap_keys[0]
+    assert key.startswith("cache:ws:snap:weather-stations/snapshots/")
+    body, ttl = redis.store[key]
+    assert json.loads(body)["stations"][0]["station_id"] == 87344
+    assert ttl == 3600
 
 
 @pytest.mark.asyncio

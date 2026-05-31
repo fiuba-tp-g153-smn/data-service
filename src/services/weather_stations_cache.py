@@ -6,10 +6,11 @@ and the read service (read side) so neither depends on the other and the S3
 layout knowledge lives in one place.
 
 Redis keys (binary `decode_responses=False`, JSON payloads):
-    cache:ws:latest                       raw latest.json bytes
-    cache:ws:tilesets                      assembled tilesets list (JSON)
-    cache:ws:registry                      raw stations.json bytes
-    cache:ws:snapshot:{tileset_id}:n{N}    resolved /{tileset_id}?N= snapshot bytes
+    cache:ws:latest                  raw latest.json bytes
+    cache:ws:tilesets                 assembled tilesets list (JSON)
+    cache:ws:registry                 raw stations.json bytes
+    cache:ws:snap:{s3_object_key}     a snapshot body, keyed by its S3 object so one
+                                      cached body serves every /{tileset_id}?N= tolerance
 """
 
 import asyncio
@@ -59,13 +60,14 @@ def registry_key() -> str:
     return "cache:ws:registry"
 
 
-def snapshot_key(tileset_id: str, n: float) -> str:
-    """Cache key for a resolved `/{tileset_id}?N=` snapshot.
+def snap_body_key(s3_key: str) -> str:
+    """Cache key for a snapshot body, keyed by its S3 object key.
 
-    `N` is normalised with `:g` so `3`, `3.0` and `3` collapse to one key and
-    don't fragment the cache.
+    `N`-independent: the `/{tileset_id}?N=` resolution picks an S3 object, and the
+    same body serves every tolerance that resolves to it — so one cached body
+    backs all of an animation's frames regardless of the chosen `N`.
     """
-    return f"cache:ws:snapshot:{tileset_id}:n{n:g}"
+    return f"cache:ws:snap:{s3_key}"
 
 
 # ---------------------------------------------------------- S3 snapshot-key parsing
@@ -145,16 +147,10 @@ async def _read_station_count(s3: S3Client, snapshot_key_: str) -> int:
     return int(count) if isinstance(count, int) else 0
 
 
-async def compute_tilesets_entries(
-    s3: S3Client, list_keys: Optional[ListKeysFn] = None
-) -> List[dict]:
-    """Group snapshot keys into hour buckets and return tileset entries.
-
-    Walks the snapshots prefix, groups keys into hour buckets
-    (`YYYYMMDDTHH00Z`), keeps the latest snapshot per bucket, and returns its
-    `scraped_at` (ISO-8601 string, so the result is JSON-serialisable for Redis
-    and re-parses cleanly via `TilesetsResponse.model_validate`) plus the
-    `station_count` from the cheap sibling `.meta.json` (0 when missing).
+async def _latest_snapshot_per_bucket(
+    s3: S3Client, list_keys: Optional[ListKeysFn]
+) -> Dict[str, Tuple[datetime, str]]:
+    """LIST the snapshots prefix and keep the latest snapshot key per hour bucket.
 
     `list_keys` lets the read service inject its in-process cached lister (so a
     burst collapses to one S3 LIST); the scraper omits it for a direct LIST.
@@ -172,7 +168,20 @@ async def compute_tilesets_entries(
         existing = per_bucket.get(bucket)
         if existing is None or ts > existing[0]:
             per_bucket[bucket] = (ts, key)
+    return per_bucket
 
+
+async def compute_tilesets_entries(
+    s3: S3Client, list_keys: Optional[ListKeysFn] = None
+) -> List[dict]:
+    """Group snapshot keys into hour buckets and return tileset entries.
+
+    Keeps the latest snapshot per hour bucket (`YYYYMMDDTHH00Z`) and returns its
+    `scraped_at` (ISO-8601 string, so the result is JSON-serialisable for Redis
+    and re-parses cleanly via `TilesetsResponse.model_validate`) plus the
+    `station_count` from the cheap sibling `.meta.json` (0 when missing).
+    """
+    per_bucket = await _latest_snapshot_per_bucket(s3, list_keys)
     if not per_bucket:
         return []
 
@@ -189,3 +198,19 @@ async def compute_tilesets_entries(
         }
         for (tileset_id, (ts, _key)), count in zip(items, counts)
     ]
+
+
+async def recent_snapshot_keys(
+    s3: S3Client, window: int, list_keys: Optional[ListKeysFn] = None
+) -> List[str]:
+    """Return the representative snapshot S3 keys for the latest `window` buckets.
+
+    Newest bucket first. Used by the scraper to pre-warm the animation window's
+    snapshot bodies (`cache:ws:snap:{key}`) so playback never reads them from S3.
+    """
+    if window <= 0:
+        return []
+    per_bucket = await _latest_snapshot_per_bucket(s3, list_keys)
+    # Sort buckets by snapshot time, newest first, take the window.
+    newest = sorted(per_bucket.values(), key=lambda tk: tk[0], reverse=True)
+    return [key for _ts, key in newest[:window]]

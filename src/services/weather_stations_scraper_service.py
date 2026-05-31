@@ -19,7 +19,9 @@ from services.smn_stations_registry import (
 from services.weather_stations_cache import (
     compute_tilesets_entries,
     latest_key,
+    recent_snapshot_keys,
     registry_key,
+    snap_body_key,
     tilesets_key,
 )
 from settings import Settings
@@ -86,6 +88,10 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         self._latest_ttl = settings.weather_stations_redis_latest_ttl_seconds
         self._tilesets_ttl = settings.weather_stations_redis_tilesets_ttl_seconds
         self._registry_ttl = settings.weather_stations_redis_registry_ttl_seconds
+        self._snapshot_ttl = settings.weather_stations_redis_snapshot_ttl_seconds
+        self._animation_warm_buckets = (
+            settings.weather_stations_redis_animation_warm_buckets
+        )
         # Lazy-applied lifecycle policy (self-heals from S3-down boot).
         self._lifecycle_applied = False
         # In-memory cache of the registry hash so we only PUT when the upstream
@@ -133,6 +139,9 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         # Write-through so the read path's shared cache stays warm (fail-soft;
         # runs after the timing log so it doesn't skew the scrape duration).
         await self._warm_observation_cache(snapshot_bytes)
+        # Pre-warm the animation window's snapshot bodies so timeline playback
+        # of the latest N buckets is served entirely from Redis (no S3 reads).
+        await self._warm_recent_snapshot_bodies()
 
     async def _ensure_lifecycle_applied(self) -> None:
         """Idempotently set the bucket lifecycle rule; latches on success."""
@@ -228,6 +237,31 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         await self._redis_set(
             tilesets_key(), json.dumps(entries).encode("utf-8"), self._tilesets_ttl
         )
+
+    async def _warm_recent_snapshot_bodies(self) -> None:
+        """Pre-warm the latest N buckets' snapshot bodies for animation playback.
+
+        Bodies are immutable, so re-warming each cycle just refreshes the TTL so
+        the animation window stays resident. Fail-soft per key — a Redis or S3
+        hiccup on one body never aborts the scrape.
+        """
+        if not self._cache_enabled or self._animation_warm_buckets <= 0:
+            return
+        try:
+            keys = await recent_snapshot_keys(self._s3, self._animation_warm_buckets)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Animation cache warm skipped (listing failed): %s", exc)
+            return
+        for key in keys:
+            try:
+                body = await self._s3.download_tile(key)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                logger.warning(
+                    "Animation cache warm: S3 read failed for %s: %s", key, exc
+                )
+                continue
+            if body is not None:
+                await self._redis_set(snap_body_key(key), body, self._snapshot_ttl)
 
     async def _redis_set(self, key: str, data: bytes, ttl: int) -> None:
         """Fail-soft write-through; a Redis error never aborts the scrape."""
