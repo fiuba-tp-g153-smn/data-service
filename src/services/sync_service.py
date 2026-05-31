@@ -283,6 +283,9 @@ class SyncService(BaseSyncService):
         new_tilesets = 0
         radar_ids_seen: set = set()
 
+        now = time.time()
+        cutoff = now - self._settings.tile_ttl
+
         try:
             # 1. List radar IDs: tiles/radar/{radar_id}/
             radar_prefixes = await self._client.get_subdirectories(RADAR_S3_PREFIX)
@@ -316,6 +319,8 @@ class SyncService(BaseSyncService):
                             variable_id,
                             elevation_id,
                             existing_by_elevation,
+                            now,
+                            cutoff,
                         )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
@@ -337,6 +342,8 @@ class SyncService(BaseSyncService):
         variable_id: str,
         elevation_id: str,
         existing_by_elevation: dict[str, set[str]],
+        now: float,
+        cutoff: float,
     ) -> int:
         """Sync all new tilesets under a single radar elevation prefix."""
         if self._client is None or self._redis_client is None:
@@ -368,11 +375,13 @@ class SyncService(BaseSyncService):
             )
 
             if downloaded > 0:
+                # Score = insertion time, matching the per-tile Redis TTL.
                 await self._redis_client.add_radar_index(
                     radar_id,
                     variable_id,
                     elevation_id,
                     tileset_id,
+                    now,
                     ttl=self._settings.tile_ttl,
                 )
                 downloaded_total += downloaded
@@ -384,6 +393,11 @@ class SyncService(BaseSyncService):
                     elevation_id,
                     tileset_id,
                 )
+
+        # Trim every cycle so the index stays bounded to the live-tile window.
+        await self._redis_client.trim_radar_index(
+            radar_id, variable_id, elevation_id, cutoff
+        )
 
         return downloaded_total
 
@@ -466,6 +480,10 @@ class SyncService(BaseSyncService):
                     forecast_ts, periods, self._settings.ecmwf_tile_ttl
                 )
 
+            # Reconcile the forecasts index to the active set so it can't
+            # accumulate stale forecast timestamps over time.
+            await self._redis_client.prune_ecmwf_tp_forecasts(active_forecasts)
+
             logger.debug(
                 "ECMWF-TP sync complete: %d forecasts active", len(active_forecasts)
             )
@@ -529,6 +547,10 @@ class SyncService(BaseSyncService):
                 await self._redis_client.store_ecmwf_mslp_index(
                     forecast_ts, timestamps, self._settings.ecmwf_mslp_geojson_ttl
                 )
+
+            # Reconcile the forecasts index to the active set so it can't
+            # accumulate stale forecast timestamps over time.
+            await self._redis_client.prune_ecmwf_mslp_forecasts(active_forecasts)
 
             logger.debug(
                 "ECMWF-MSLP sync complete: %d forecasts active",

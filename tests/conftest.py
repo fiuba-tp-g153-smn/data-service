@@ -57,6 +57,7 @@ def mock_redis_client():
     client.get_radar_variables = AsyncMock(return_value=[])
     client.get_radar_elevations = AsyncMock(return_value=[])
     client.get_radar_tilesets = AsyncMock(return_value=[])
+    client.trim_radar_index = AsyncMock(return_value=0)
 
     # Sync status operations
     client.update_sync_status = AsyncMock()
@@ -70,6 +71,7 @@ def mock_redis_client():
     client.store_ecmwf_tp_index = AsyncMock()
     client.get_ecmwf_tp_forecasts = AsyncMock(return_value=[])
     client.get_ecmwf_tp_periods = AsyncMock(return_value=[])
+    client.prune_ecmwf_tp_forecasts = AsyncMock(return_value=0)
 
     # ECMWF MSLP GeoJSON operations
     client.store_ecmwf_mslp_geojson = AsyncMock()
@@ -79,6 +81,7 @@ def mock_redis_client():
     client.store_ecmwf_mslp_index = AsyncMock()
     client.get_ecmwf_mslp_forecasts = AsyncMock(return_value=[])
     client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
+    client.prune_ecmwf_mslp_forecasts = AsyncMock(return_value=0)
 
     # Listing cache (shared across sources)
     client.get_cached_listing = AsyncMock(return_value=None)

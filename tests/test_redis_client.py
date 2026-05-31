@@ -130,13 +130,62 @@ async def test_radar_index_operations():
     mock_pipeline.execute = AsyncMock(return_value=[])
     client._redis = mock_redis
 
-    await client.add_radar_index("RMA1", "DBZH", "elev0", "ts1", ttl=3600)
+    await client.add_radar_index("RMA1", "DBZH", "elev0", "ts1", 1234.0, ttl=3600)
     mock_pipeline.execute.assert_awaited_once()
+    # Tilesets axis is a scored sorted set; the dimension axes stay plain sets.
+    mock_pipeline.zadd.assert_called_once_with(
+        "idx:radar:RMA1:DBZH:elev0:tilesets", {b"ts1": 1234.0}
+    )
+    assert mock_pipeline.sadd.call_count == 3
 
     # Test get operations
     mock_redis.smembers = AsyncMock(return_value={b"RMA1", b"RMA2"})
     radars = await client.get_radar_radars()
     assert sorted(radars) == ["RMA1", "RMA2"]
+
+
+@pytest.mark.asyncio
+async def test_trim_radar_index():
+    """Verify radar trim removes tilesets scored below the cutoff (exclusive)."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zremrangebyscore = AsyncMock(return_value=2)
+
+    removed = await client.trim_radar_index("RMA1", "DBZH", "elev0", 1000.0)
+
+    assert removed == 2
+    client._redis.zremrangebyscore.assert_awaited_once_with(
+        "idx:radar:RMA1:DBZH:elev0:tilesets", "-inf", "(1000.0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prune_ecmwf_tp_forecasts():
+    """Prune removes only forecast members absent from the active keep-list."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.smembers = AsyncMock(return_value={b"f_new", b"f_old1", b"f_old2"})
+
+    removed = await client.prune_ecmwf_tp_forecasts(["f_new"])
+
+    assert removed == 2
+    client._redis.srem.assert_awaited_once()
+    key, *stale = client._redis.srem.await_args.args
+    assert key == "idx:ecmwf_tp:forecasts"
+    assert set(stale) == {b"f_old1", b"f_old2"}
+
+
+@pytest.mark.asyncio
+async def test_prune_ecmwf_forecasts_noop_when_all_active():
+    """Prune does not call srem when every member is still active."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.smembers = AsyncMock(return_value={b"f_a", b"f_b"})
+
+    removed = await client.prune_ecmwf_mslp_forecasts(["f_a", "f_b"])
+
+    assert removed == 0
+    client._redis.srem.assert_not_called()
 
 
 @pytest.mark.asyncio

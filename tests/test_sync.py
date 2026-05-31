@@ -209,6 +209,69 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
 
 
 @pytest.mark.asyncio
+async def test_sync_radar_trims_expired_each_cycle(mock_redis_client):
+    """Radar trim runs once per elevation even when no new tilesets are found."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            ["tiles/radar/RMA1/"],  # radars
+            ["tiles/radar/RMA1/DBZH/"],  # variables
+            ["tiles/radar/RMA1/DBZH/elev0/"],  # elevations
+            ["tiles/radar/RMA1/DBZH/elev0/ts1/"],  # tilesets under elev0
+        ]
+    )
+    # The S3 tileset is already indexed -> zero new tilesets this cycle.
+    mock_redis_client.get_radar_tilesets = AsyncMock(return_value=["ts1"])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_radar()  # pylint: disable=protected-access
+
+    assert errors == 0
+    assert downloaded == 0
+    mock_s3.sync_radar_prefix_to_redis.assert_not_called()
+    mock_redis_client.add_radar_index.assert_not_called()
+
+    mock_redis_client.trim_radar_index.assert_awaited_once()
+    radar, var, elev, cutoff = mock_redis_client.trim_radar_index.await_args.args
+    assert (radar, var, elev) == ("RMA1", "DBZH", "elev0")
+    assert isinstance(cutoff, float)
+    assert cutoff < time.time() - 3599  # now - tile_ttl(3600)
+
+
+@pytest.mark.asyncio
+async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_client):
+    """A newly-seen radar tileset is indexed with an insertion-time (epoch float) score."""
+    before = time.time()
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            ["tiles/radar/RMA1/"],
+            ["tiles/radar/RMA1/DBZH/"],
+            ["tiles/radar/RMA1/DBZH/elev0/"],
+            ["tiles/radar/RMA1/DBZH/elev0/ts1/"],
+        ]
+    )
+    mock_s3.sync_radar_prefix_to_redis = AsyncMock(return_value=3)
+    mock_redis_client.get_radar_tilesets = AsyncMock(return_value=[])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_radar()  # pylint: disable=protected-access
+
+    assert errors == 0
+    assert downloaded == 3
+    mock_redis_client.add_radar_index.assert_awaited_once()
+    args = mock_redis_client.add_radar_index.await_args
+    assert args.args[:4] == ("RMA1", "DBZH", "elev0", "ts1")
+    score = args.args[4]
+    assert isinstance(score, float)
+    assert before <= score <= time.time()
+    assert args.kwargs["ttl"] == service._settings.tile_ttl
+    mock_redis_client.trim_radar_index.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_sync_ecmwf_tp_downloads_new_periods_and_writes_index(mock_redis_client):
     """SyncService._sync_ecmwf_tp lists forecasts/periods and only downloads new ones."""
     mock_s3 = AsyncMock()
@@ -248,6 +311,10 @@ async def test_sync_ecmwf_tp_downloads_new_periods_and_writes_index(mock_redis_c
     assert mock_s3.sync_ecmwf_tp_period_to_redis.await_count == 2
     # Index updates always run, even when nothing was downloaded.
     assert mock_redis_client.store_ecmwf_tp_index.await_count == 2
+    # Forecasts index is reconciled to the active set each cycle.
+    mock_redis_client.prune_ecmwf_tp_forecasts.assert_awaited_once_with(
+        ["20260330T1200Z", "20260330T0000Z"]
+    )
 
 
 @pytest.mark.asyncio
@@ -329,3 +396,30 @@ async def test_sync_ecmwf_tp_filters_old_format_periods(mock_redis_client):
     mock_redis_client.store_ecmwf_tp_index.assert_awaited_once()
     indexed_periods = mock_redis_client.store_ecmwf_tp_index.await_args.args[1]
     assert indexed_periods == ["20260330T1500Z", "20260330T1800Z"]
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
+    """_sync_ecmwf_mslp reconciles the forecasts index to the active set."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=[
+            f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260330T1200Z/",
+            f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260330T0000Z/",
+        ]
+    )
+    mock_s3.list_object_basenames = AsyncMock(return_value=["20260330T1500Z"])
+    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(return_value=1)
+    mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+    service._settings.ecmwf_mslp_geojson_ttl = 86400  # pylint: disable=protected-access
+
+    downloaded, errors = (
+        await service._sync_ecmwf_mslp()
+    )  # pylint: disable=protected-access
+
+    assert errors == 0
+    mock_redis_client.prune_ecmwf_mslp_forecasts.assert_awaited_once_with(
+        ["20260330T1200Z", "20260330T0000Z"]
+    )
