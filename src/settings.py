@@ -180,7 +180,20 @@ class Settings:
     weather_stations_s3_object_ttl_days: int = 2
     # In-process LRU TTL for cached S3 LIST results in the read service.
     weather_stations_list_cache_ttl_seconds: int = 30
-    weather_stations_cache_control_response: str = "public, max-age=60"
+    # Per-endpoint Cache-Control, matched to how fresh each response needs to be.
+    # latest/tilesets refresh every scrape (~5 min); the registry is near-static;
+    # a resolved historical snapshot gets a moderate TTL (safe for the current-hour
+    # bucket, which can still gain a newer best-match).
+    weather_stations_cache_control_latest: str = (
+        "public, max-age=60, stale-while-revalidate=120"
+    )
+    weather_stations_cache_control_tilesets: str = (
+        "public, max-age=60, stale-while-revalidate=120"
+    )
+    weather_stations_cache_control_registry: str = (
+        "public, max-age=3600, stale-while-revalidate=86400"
+    )
+    weather_stations_cache_control_snapshot: str = "public, max-age=300"
     # Shared Redis cache in front of the read path. The scrape loop write-throughs
     # latest/tilesets/registry each cycle so the cache stays warm; TTLs are
     # safety-net backstops (the writer refreshes faster than they expire). The
@@ -279,7 +292,10 @@ class Settings:
             "weather_stations_token_cache_ttl_seconds",
             "weather_stations_s3_object_ttl_days",
             "weather_stations_list_cache_ttl_seconds",
-            "weather_stations_cache_control_response",
+            "weather_stations_cache_control_latest",
+            "weather_stations_cache_control_tilesets",
+            "weather_stations_cache_control_registry",
+            "weather_stations_cache_control_snapshot",
             "weather_stations_redis_cache_enabled",
             "weather_stations_redis_latest_ttl_seconds",
             "weather_stations_redis_tilesets_ttl_seconds",
@@ -542,9 +558,21 @@ class Settings:
             "WEATHER_STATIONS_LIST_CACHE_TTL_SECONDS",
             self.weather_stations_list_cache_ttl_seconds,
         )
-        self.weather_stations_cache_control_response = os.getenv(
-            "WEATHER_STATIONS_CACHE_CONTROL_RESPONSE",
-            self.weather_stations_cache_control_response,
+        self.weather_stations_cache_control_latest = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_LATEST",
+            self.weather_stations_cache_control_latest,
+        )
+        self.weather_stations_cache_control_tilesets = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_TILESETS",
+            self.weather_stations_cache_control_tilesets,
+        )
+        self.weather_stations_cache_control_registry = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_REGISTRY",
+            self.weather_stations_cache_control_registry,
+        )
+        self.weather_stations_cache_control_snapshot = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_SNAPSHOT",
+            self.weather_stations_cache_control_snapshot,
         )
         self.weather_stations_redis_cache_enabled = self._env_bool(
             "WEATHER_STATIONS_REDIS_CACHE_ENABLED",
