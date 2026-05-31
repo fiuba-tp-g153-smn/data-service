@@ -422,12 +422,19 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         s3_client=weather_s3,
         smn_client=smn_client,
         registry_client=registry_client,
+        redis_client=redis_client,
     )
     await scraper.start(logger)
 
     weather_stations_service.configure(
         s3_client=weather_s3,
         list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+        redis_client=redis_client,
+        cache_enabled=settings.weather_stations_redis_cache_enabled,
+        latest_ttl=settings.weather_stations_redis_latest_ttl_seconds,
+        tilesets_ttl=settings.weather_stations_redis_tilesets_ttl_seconds,
+        snapshot_ttl=settings.weather_stations_redis_snapshot_ttl_seconds,
+        registry_ttl=settings.weather_stations_redis_registry_ttl_seconds,
     )
 
     return WeatherStationsRuntime(

@@ -28,10 +28,33 @@ class _FakeS3:
         return self._lifecycle_ok
 
     async def download_tile(self, key):
-        return self.downloads.get(key)
+        # Seeded downloads win; otherwise fall back to what we've uploaded so
+        # the write-through tileset recompute can read its own snapshot metas.
+        if key in self.downloads:
+            return self.downloads[key]
+        up = self.uploads.get(key)
+        return up[0] if up else None
 
     async def upload_tile(self, key, data, content_type="image/png"):
         self.uploads[key] = (data, content_type)
+
+    async def list_object_keys(self, prefix):
+        return [k for k in self.uploads if k.startswith(prefix)]
+
+
+class _FakeRedis:
+    def __init__(self, exc=None):
+        self.store: dict[str, tuple[bytes, int]] = {}
+        self.exc = exc
+
+    async def cache_listing(self, key, data, ttl):
+        if self.exc is not None:
+            raise self.exc
+        self.store[key] = (data, ttl)
+
+    async def get_cached_listing(self, key):
+        v = self.store.get(key)
+        return v[0] if v else None
 
 
 class _FakeSmn:
@@ -82,18 +105,24 @@ _REGISTRY_TXT = (
 )
 
 
-def _settings():
+def _settings(redis_cache_enabled=True):
     return SimpleNamespace(
         weather_stations_scrape_interval_seconds=300,
         weather_stations_scrape_lock_path="/tmp/test_ws_scrape.lock",
         weather_stations_s3_object_ttl_days=2,
         smn_api_base_url="https://api.test/v1",
         smn_stations_registry_url="http://reg.test/x",
+        weather_stations_redis_cache_enabled=redis_cache_enabled,
+        weather_stations_redis_latest_ttl_seconds=600,
+        weather_stations_redis_tilesets_ttl_seconds=600,
+        weather_stations_redis_registry_ttl_seconds=3600,
     )
 
 
-def _make_scraper(s3, smn, registry):
-    return WeatherStationsScraperService(_settings(), s3, smn, registry)
+def _make_scraper(s3, smn, registry, redis_client=None, settings=None):
+    return WeatherStationsScraperService(
+        settings or _settings(), s3, smn, registry, redis_client=redis_client
+    )
 
 
 @pytest.mark.asyncio
@@ -118,11 +147,13 @@ async def test_cold_cycle_writes_registry_snapshot_and_meta():
     snap_keys = [
         k
         for k in s3.uploads
-        if k.startswith("weather-stations/snapshots/")
-        and not k.endswith(".meta.json")
+        if k.startswith("weather-stations/snapshots/") and not k.endswith(".meta.json")
     ]
-    meta_keys = [k for k in s3.uploads if k.endswith(".meta.json")
-                 and k.startswith("weather-stations/snapshots/")]
+    meta_keys = [
+        k
+        for k in s3.uploads
+        if k.endswith(".meta.json") and k.startswith("weather-stations/snapshots/")
+    ]
     assert len(snap_keys) == 1
     assert len(meta_keys) == 1
     assert "weather-stations/latest.json" in s3.uploads
@@ -236,3 +267,78 @@ async def test_bootstrap_loads_registry_hash_from_s3_meta():
     assert "weather-stations/stations.json" not in s3.uploads
     # But snapshot still landed.
     assert "weather-stations/latest.json" in s3.uploads
+
+
+# ------------------------------------------------------------ Redis write-through
+
+
+@pytest.mark.asyncio
+async def test_write_through_warms_latest_tilesets_and_registry():
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis()
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()
+
+    # latest: snapshot bytes with the latest TTL.
+    assert "cache:ws:latest" in redis.store
+    latest_bytes, latest_ttl = redis.store["cache:ws:latest"]
+    assert json.loads(latest_bytes)["stations"][0]["station_id"] == 87344
+    assert latest_ttl == 600
+
+    # tilesets: assembled list with ISO scraped_at + the tilesets TTL.
+    assert "cache:ws:tilesets" in redis.store
+    tiles_bytes, tiles_ttl = redis.store["cache:ws:tilesets"]
+    entries = json.loads(tiles_bytes)
+    assert len(entries) == 1 and entries[0]["station_count"] == 1
+    assert isinstance(entries[0]["scraped_at"], str)  # JSON-serialisable, not datetime
+    assert tiles_ttl == 600
+
+    # registry: written through with the registry TTL.
+    assert "cache:ws:registry" in redis.store
+    assert redis.store["cache:ws:registry"][1] == 3600
+
+
+@pytest.mark.asyncio
+async def test_unchanged_registry_skips_redis_write_through():
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis()
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()
+    redis.store.clear()
+    await scraper._run_sync()  # same registry hash → no registry rewrite
+
+    assert "cache:ws:registry" not in redis.store
+    # ...but the per-cycle observation keys are still refreshed.
+    assert "cache:ws:latest" in redis.store
+    assert "cache:ws:tilesets" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_cache_disabled_skips_write_through():
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis()
+    scraper = _make_scraper(
+        s3, smn, reg, redis_client=redis, settings=_settings(redis_cache_enabled=False)
+    )
+
+    await scraper._run_sync()
+
+    assert redis.store == {}
+    # S3 still written — the cache flag only gates Redis.
+    assert "weather-stations/latest.json" in s3.uploads
+
+
+@pytest.mark.asyncio
+async def test_redis_error_does_not_abort_scrape():
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis(exc=RuntimeError("redis down"))
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()  # must not raise
+
+    # S3 writes still landed despite the Redis outage.
+    assert "weather-stations/latest.json" in s3.uploads
+    assert "weather-stations/stations.json" in s3.uploads
+    assert redis.store == {}

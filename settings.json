@@ -74,6 +74,11 @@
     "s3_object_ttl_days": 2,
     "list_cache_ttl_seconds": 30,
     "cache_control_response": "public, max-age=60",
+    "redis_cache_enabled": true,
+    "redis_latest_ttl_seconds": 600,
+    "redis_tilesets_ttl_seconds": 600,
+    "redis_snapshot_ttl_seconds": 3600,
+    "redis_registry_ttl_seconds": 3600,
     "api_key_auth_enabled": true,
     "keystore_db_path": "data/weather_stations_keys.sqlite"
   }
