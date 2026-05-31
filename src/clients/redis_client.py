@@ -120,6 +120,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             if cursor == 0:
                 break
 
+    async def trim_satellite_index(self, channel_dir: str, min_score: float) -> int:
+        """Drop tilesets older than min_score (epoch seconds) from the index.
+
+        Keeps the index bounded to the live-tile window: tiles are stored with
+        ex=tile_ttl at insertion, so members scored before now-tile_ttl no longer
+        have data behind them. Returns the number of members removed.
+        """
+        key = f"idx:sat:{channel_dir}"
+        return await self._conn.zremrangebyscore(key, "-inf", f"({min_score}")
+
     async def satellite_tileset_exists(self, channel_dir: str, tileset_id: str) -> bool:
         """Check if a tileset exists in the satellite index."""
         key = f"idx:sat:{channel_dir}"

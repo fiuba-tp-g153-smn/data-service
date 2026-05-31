@@ -6,7 +6,6 @@ Runs as a background task during application lifetime.
 """
 
 import logging
-import re
 import time
 from logging import Logger
 from typing import List, Optional
@@ -204,6 +203,9 @@ class SyncService(BaseSyncService):
         sat_downloaded = 0
         errors = 0
 
+        now = time.time()
+        cutoff = now - self._settings.tile_ttl
+
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
                 prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
@@ -236,21 +238,30 @@ class SyncService(BaseSyncService):
                     sat_downloaded += downloaded
                     prefix_downloaded += downloaded
 
-                    score = self._extract_timestamp_score(tileset_id)
+                    # Score = insertion time, matching the per-tile Redis TTL so
+                    # index entries expire in lockstep with the tiles they point to.
                     await self._redis_client.add_satellite_tileset(
                         channel_dir,
                         tileset_id,
-                        score,
+                        now,
                         ttl=self._settings.tile_ttl,
                     )
 
+                # Trim every cycle (even with no new tilesets) so the index stays
+                # bounded to the live-tile window instead of growing unboundedly.
+                trimmed = await self._redis_client.trim_satellite_index(
+                    channel_dir, cutoff
+                )
+
                 logger.info(
-                    "[%s] %d in S3 | %d cached | %d new tilesets | %d tiles downloaded",
+                    "[%s] %d in S3 | %d cached | %d new tilesets"
+                    " | %d tiles downloaded | %d expired trimmed",
                     channel_dir,
                     len(tileset_prefixes),
                     len(existing_tilesets),
                     new_tilesets,
                     prefix_downloaded,
+                    trimmed,
                 )
 
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -528,16 +539,6 @@ class SyncService(BaseSyncService):
             errors += 1
 
         return total_downloaded, errors
-
-    @staticmethod
-    def _extract_timestamp_score(tileset_id: str) -> float:
-        """Extract a numeric timestamp score from a tileset ID for sorted set ordering."""
-        # Format: OR_ABI-L1b-RadF-M6C13_G19_s20250141230210...
-        match = re.search(r"_s(\d{14})", tileset_id)
-        if match:
-            return float(match.group(1))
-        # Fallback: use current time
-        return time.time()
 
 
 # Singleton instance for use across the application

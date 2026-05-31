@@ -92,6 +92,21 @@ async def test_delete_satellite_tileset():
 
 
 @pytest.mark.asyncio
+async def test_trim_satellite_index():
+    """Verify trim removes index members scored below the cutoff (exclusive)."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zremrangebyscore = AsyncMock(return_value=3)
+
+    removed = await client.trim_satellite_index("band_13", 1000.0)
+
+    assert removed == 3
+    client._redis.zremrangebyscore.assert_awaited_once_with(
+        "idx:sat:band_13", "-inf", "(1000.0"
+    )
+
+
+@pytest.mark.asyncio
 async def test_store_radar_tile_with_ttl():
     """Verify radar tile is stored with TTL."""
     client = RedisClient("redis://localhost:6379/0")

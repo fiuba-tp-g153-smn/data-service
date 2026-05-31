@@ -44,6 +44,7 @@ def mock_redis_client():
     client.add_satellite_tileset = AsyncMock()
     client.get_satellite_tilesets = AsyncMock(return_value=[])
     client.delete_satellite_tileset = AsyncMock()
+    client.trim_satellite_index = AsyncMock(return_value=0)
     client.satellite_tileset_exists = AsyncMock(return_value=False)
 
     # Radar tile operations

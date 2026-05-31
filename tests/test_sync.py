@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from clients.s3_client import S3Client
@@ -141,6 +143,69 @@ def _make_sync_service(mock_s3, mock_redis, ecmwf_forecasts_to_keep=2):
     service._consecutive_failures = 0  # pylint: disable=protected-access
     service._total_cycles = 0  # pylint: disable=protected-access
     return service
+
+
+@pytest.mark.asyncio
+async def test_sync_satellite_trims_expired_each_cycle(mock_redis_client):
+    """Trim runs once per prefix even when no new tilesets are found."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=[
+            "tiles/band_13/20260740300213/",
+            "tiles/band_13/20260740400213/",
+        ]
+    )
+    # Both S3 tilesets are already indexed -> zero new tilesets this cycle.
+    mock_redis_client.get_satellite_tilesets = AsyncMock(
+        return_value=["20260740300213", "20260740400213"]
+    )
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+    service._sync_prefixes = ["tiles/band_13"]  # pylint: disable=protected-access
+
+    downloaded, errors = await service._sync_satellite_prefixes()
+
+    assert downloaded == 0
+    assert errors == 0
+    mock_s3.sync_prefix_to_redis.assert_not_called()
+    mock_redis_client.add_satellite_tileset.assert_not_called()
+
+    # Trim still fires once, bounding the index regardless of new arrivals.
+    mock_redis_client.trim_satellite_index.assert_awaited_once()
+    channel_dir, cutoff = mock_redis_client.trim_satellite_index.await_args.args
+    assert channel_dir == "band_13"
+    # cutoff = now - tile_ttl(3600); a recent epoch, well below "now".
+    assert isinstance(cutoff, float)
+    assert cutoff < time.time() - 3599
+
+
+@pytest.mark.asyncio
+async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_client):
+    """A newly-seen tileset is indexed with an insertion-time (epoch float) score."""
+    before = time.time()
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=["tiles/band_13/20260740300213/"]
+    )
+    mock_s3.sync_prefix_to_redis = AsyncMock(return_value=4)
+    mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+    service._sync_prefixes = ["tiles/band_13"]  # pylint: disable=protected-access
+
+    downloaded, errors = await service._sync_satellite_prefixes()
+
+    assert downloaded == 4
+    assert errors == 0
+    mock_redis_client.add_satellite_tileset.assert_awaited_once()
+    args = mock_redis_client.add_satellite_tileset.await_args
+    assert args.args[0] == "band_13"
+    assert args.args[1] == "20260740300213"
+    score = args.args[2]
+    assert isinstance(score, float)
+    assert before <= score <= time.time()
+    assert args.kwargs["ttl"] == service._settings.tile_ttl
+    mock_redis_client.trim_satellite_index.assert_awaited_once()
 
 
 @pytest.mark.asyncio
