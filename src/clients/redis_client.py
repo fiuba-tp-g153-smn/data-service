@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Optional
 
 import redis.asyncio as aioredis
+from redis.exceptions import ResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -227,10 +228,20 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     async def get_radar_tilesets(
         self, radar_id: str, variable_id: str, elevation_id: str
     ) -> List[str]:
-        """Get all tileset IDs for a radar/variable/elevation (newest first)."""
-        members = await self._conn.zrange(
-            f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets", 0, -1
-        )
+        """Get all tileset IDs for a radar/variable/elevation (newest first).
+
+        Self-heals legacy plain-set keys left by the set→zset index migration:
+        a WRONGTYPE means a pre-migration key, which we drop so the next sync
+        recreates it as a sorted set.
+        """
+        key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        try:
+            members = await self._conn.zrange(key, 0, -1)
+        except ResponseError as exc:
+            if "WRONGTYPE" not in str(exc):
+                raise
+            await self._conn.delete(key)
+            return []
         return sorted((m.decode() for m in members), reverse=True)
 
     async def trim_radar_index(

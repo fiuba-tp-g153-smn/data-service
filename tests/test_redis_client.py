@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from redis.exceptions import ResponseError
 from clients.redis_client import RedisClient
 
 
@@ -142,6 +143,54 @@ async def test_radar_index_operations():
     mock_redis.smembers = AsyncMock(return_value={b"RMA1", b"RMA2"})
     radars = await client.get_radar_radars()
     assert sorted(radars) == ["RMA1", "RMA2"]
+
+
+@pytest.mark.asyncio
+async def test_get_radar_tilesets_returns_newest_first():
+    """Sorted-set members are decoded and returned newest (highest) first."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(return_value=[b"ts1", b"ts2", b"ts3"])
+
+    tilesets = await client.get_radar_tilesets("RMA1", "DBZH", "elev0")
+
+    assert tilesets == ["ts3", "ts2", "ts1"]
+    client._redis.zrange.assert_awaited_once_with(
+        "idx:radar:RMA1:DBZH:elev0:tilesets", 0, -1
+    )
+    client._redis.delete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_get_radar_tilesets_self_heals_legacy_wrongtype_key():
+    """A WRONGTYPE (legacy plain-set key) is dropped and read as empty."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(
+        side_effect=ResponseError(
+            "WRONGTYPE Operation against a key holding the wrong kind of value"
+        )
+    )
+
+    tilesets = await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+
+    assert tilesets == []
+    client._redis.delete.assert_awaited_once_with(
+        "idx:radar:RMA1:VRAD:elev0:tilesets"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_radar_tilesets_reraises_other_response_errors():
+    """Non-WRONGTYPE Redis errors propagate instead of being swallowed."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(side_effect=ResponseError("LOADING"))
+
+    with pytest.raises(ResponseError):
+        await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+
+    client._redis.delete.assert_not_called()
 
 
 @pytest.mark.asyncio
