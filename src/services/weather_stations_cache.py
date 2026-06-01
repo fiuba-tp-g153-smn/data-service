@@ -275,6 +275,8 @@ def _observation_to_point(obs: dict) -> dict:
     """Flatten one `StationObservation` dict into a series point (wind unpacked)."""
     raw_wind = obs.get("wind")
     wind = raw_wind if isinstance(raw_wind, dict) else {}
+    raw_weather = obs.get("weather")
+    weather = raw_weather if isinstance(raw_weather, dict) else {}
     return {
         "observed_at": obs.get("observed_at"),
         "temperature": obs.get("temperature"),
@@ -283,6 +285,7 @@ def _observation_to_point(obs: dict) -> dict:
         "pressure": obs.get("pressure"),
         "visibility": obs.get("visibility"),
         "dew_point": magnus_dew_point(obs.get("temperature"), obs.get("humidity")),
+        "condition": weather.get("description"),
         "wind_speed": wind.get("speed"),
         "wind_deg": wind.get("deg"),
         "wind_direction": wind.get("direction"),

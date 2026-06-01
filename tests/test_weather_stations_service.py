@@ -511,6 +511,23 @@ def test_extract_station_series_includes_dew_point():
     assert point["dew_point"] == pytest.approx(9.27, abs=0.05)
 
 
+def test_extract_station_series_includes_condition():
+    bodies = [
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 18.0,
+                    "weather": {"id": 3, "description": "Niebla"},
+                }
+            ]
+        )
+    ]
+    [point] = extract_station_series(bodies, 1)
+    assert point["condition"] == "Niebla"
+
+
 def test_extract_station_series_dew_point_none_without_humidity():
     bodies = [
         _series_body(
