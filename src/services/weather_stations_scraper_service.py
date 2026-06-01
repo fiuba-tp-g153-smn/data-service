@@ -19,8 +19,11 @@ from services.smn_stations_registry import (
 from services.weather_stations_cache import (
     compute_tilesets_entries,
     latest_key,
+    parse_json_or_none,
+    pivot_station_series,
     recent_snapshot_keys,
     registry_key,
+    series_key,
     snap_body_key,
     tilesets_key,
 )
@@ -92,6 +95,8 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         self._animation_warm_buckets = (
             settings.weather_stations_redis_animation_warm_buckets
         )
+        self._series_hours = settings.weather_stations_series_hours
+        self._series_ttl = settings.weather_stations_redis_series_ttl_seconds
         # Lazy-applied lifecycle policy (self-heals from S3-down boot).
         self._lifecycle_applied = False
         # In-memory cache of the registry hash so we only PUT when the upstream
@@ -142,8 +147,8 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         # Write-through so the read path's shared cache stays warm (fail-soft;
         # runs after the timing log so it doesn't skew the scrape duration).
         await self._warm_observation_cache(snapshot_bytes)
-        # Pre-warm the animation window's snapshot bodies so timeline playback
-        # of the latest N buckets is served entirely from Redis (no S3 reads).
+        # Pre-warm the recent snapshot bodies (animation playback) and the
+        # per-station 48 h series (popover history) so both are served from Redis.
         await self._warm_recent_snapshot_bodies()
 
     async def _ensure_lifecycle_applied(self) -> None:
@@ -259,29 +264,56 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         )
 
     async def _warm_recent_snapshot_bodies(self) -> None:
-        """Pre-warm the latest N buckets' snapshot bodies for animation playback.
+        """Pre-warm recent snapshot bodies (animation) + per-station series (popover).
 
-        Bodies are immutable, so re-warming each cycle just refreshes the TTL so
-        the animation window stays resident. Fail-soft per key — a Redis or S3
-        hiccup on one body never aborts the scrape.
+        One S3 read pass over the latest `max(animation, series)` buckets: warm
+        each body under `cache:ws:snap:{key}` within the animation window so
+        timeline playback never reads S3, collect the parsed bodies, then pivot
+        them into per-station `cache:ws:series:{id}` so a station popover's 48 h
+        history is also always resident. Bodies are immutable, so re-warming each
+        cycle just refreshes the TTLs. Fail-soft per key.
         """
-        if not self._cache_enabled or self._animation_warm_buckets <= 0:
+        if not self._cache_enabled:
+            return
+        window = max(self._animation_warm_buckets, self._series_hours)
+        if window <= 0:
             return
         try:
-            keys = await recent_snapshot_keys(self._s3, self._animation_warm_buckets)
+            keys = await recent_snapshot_keys(self._s3, window)
         except Exception as exc:  # pylint: disable=broad-exception-caught
-            logger.warning("Animation cache warm skipped (listing failed): %s", exc)
+            logger.warning("Recent cache warm skipped (listing failed): %s", exc)
             return
-        for key in keys:
+        bodies: List[dict] = []
+        for index, key in enumerate(keys):
             try:
                 body = await self._s3.download_tile(key)
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                logger.warning(
-                    "Animation cache warm: S3 read failed for %s: %s", key, exc
-                )
+                logger.warning("Recent cache warm: S3 read failed for %s: %s", key, exc)
                 continue
-            if body is not None:
+            if body is None:
+                continue
+            if index < self._animation_warm_buckets:
                 await self._redis_set(snap_body_key(key), body, self._snapshot_ttl)
+            parsed = parse_json_or_none(body, key)
+            if parsed is not None:
+                bodies.append(parsed)
+        await self._warm_station_series(bodies)
+
+    async def _warm_station_series(self, bodies: List[dict]) -> None:
+        """Pivot the recent bodies into per-station series and warm each (fail-soft).
+
+        Always-warm: every station's series is written each cycle so a popover
+        open never pivots from S3. Bounded to the latest `series_hours` bodies.
+        """
+        if not self._cache_enabled or self._series_hours <= 0 or not bodies:
+            return
+        series_by_station = pivot_station_series(bodies[: self._series_hours])
+        for station_id, points in series_by_station.items():
+            await self._redis_set(
+                series_key(station_id),
+                json.dumps(points, separators=(",", ":")).encode("utf-8"),
+                self._series_ttl,
+            )
 
     async def _redis_set(self, key: str, data: bytes, ttl: int) -> None:
         """Fail-soft write-through; a Redis error never aborts the scrape."""

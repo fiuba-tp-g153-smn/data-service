@@ -7,6 +7,11 @@ from typing import Optional
 
 import pytest
 
+from services.weather_stations_cache import (
+    extract_station_series,
+    pivot_station_series,
+    series_key,
+)
 from services.weather_stations_service import (
     TilesetIdFormatError,
     WeatherStationsNotConfiguredError,
@@ -407,3 +412,208 @@ def test_snap_body_key_shape():
 
     key = "weather-stations/snapshots/2026/05/17/14/20260517T140000Z.json"
     assert snap_body_key(key) == f"cache:ws:snap:{key}"
+
+
+# ----------------------------------------------- per-station series pivot (pure)
+
+
+def _series_body(stations: list[dict]) -> dict:
+    return {
+        "scraped_at": "2026-05-17T14:00:00Z",
+        "source_url": "x",
+        "stations": stations,
+    }
+
+
+def _obs_body(scraped_at: datetime, observations: list[dict]) -> bytes:
+    return json.dumps(
+        {
+            "scraped_at": scraped_at.isoformat().replace("+00:00", "Z"),
+            "source_url": "x",
+            "stations": observations,
+        }
+    ).encode()
+
+
+def test_extract_station_series_dedupes_sorts_and_flattens_wind():
+    bodies = [
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 18.0,
+                    "wind": {"speed": 8.2, "deg": 5, "direction": "Norte"},
+                },
+                {"station_id": 2, "observed_at": "2026-05-17T14:00:00Z"},
+            ]
+        ),
+        # Same observed_at for station 1 repeats in an adjacent bucket -> deduped.
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 18.0,
+                }
+            ]
+        ),
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T13:00:00Z",
+                    "temperature": 17.0,
+                }
+            ]
+        ),
+    ]
+    series = extract_station_series(bodies, 1)
+    # Deduped to two distinct readings, sorted oldest -> newest.
+    assert [p["observed_at"] for p in series] == [
+        "2026-05-17T13:00:00Z",
+        "2026-05-17T14:00:00Z",
+    ]
+    assert series[0]["temperature"] == 17.0
+    assert series[1]["wind_speed"] == 8.2
+    assert series[1]["wind_deg"] == 5
+    assert series[1]["wind_direction"] == "Norte"
+
+
+def test_extract_station_series_missing_station_is_empty():
+    bodies = [_series_body([{"station_id": 9, "observed_at": "2026-05-17T14:00:00Z"}])]
+    assert extract_station_series(bodies, 1) == []
+
+
+def test_extract_station_series_skips_null_observed_at():
+    bodies = [
+        _series_body([{"station_id": 1, "observed_at": None, "temperature": 5.0}])
+    ]
+    assert extract_station_series(bodies, 1) == []
+
+
+def test_pivot_station_series_groups_each_station_sorted():
+    bodies = [
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 18.0,
+                },
+                {
+                    "station_id": 2,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 10.0,
+                },
+            ]
+        ),
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T13:00:00Z",
+                    "temperature": 17.0,
+                }
+            ]
+        ),
+    ]
+    pivoted = pivot_station_series(bodies)
+    assert set(pivoted) == {1, 2}
+    assert [p["observed_at"] for p in pivoted[1]] == [
+        "2026-05-17T13:00:00Z",
+        "2026-05-17T14:00:00Z",
+    ]
+    assert [p["temperature"] for p in pivoted[2]] == [10.0]
+
+
+# ------------------------------------------------- get_station_series (service)
+
+
+@pytest.mark.asyncio
+async def test_station_series_served_from_cache_without_s3():
+    points = [
+        {
+            "observed_at": "2026-05-17T14:00:00Z",
+            "temperature": 18.0,
+            "feels_like": None,
+            "humidity": None,
+            "pressure": None,
+            "visibility": None,
+            "wind_speed": None,
+            "wind_deg": None,
+            "wind_direction": None,
+        }
+    ]
+    redis = _FakeRedis(
+        {
+            series_key(1): json.dumps(points).encode(),
+            "cache:ws:registry": json.dumps(
+                {"stations": [{"station_id": 1, "name": "A", "province": "P"}]}
+            ).encode(),
+        }
+    )
+    svc, s3 = _svc_with_redis(redis, {})
+    out = await svc.get_station_series(1, 48)
+    assert out["station_id"] == 1
+    assert out["station_name"] == "A"
+    assert out["province"] == "P"
+    assert out["points"] == points
+    assert out["latest"] == points[-1]
+    assert s3.download_calls == []  # pure Redis hit (series + registry)
+
+
+@pytest.mark.asyncio
+async def test_station_series_cold_miss_pivots_from_s3_and_writes_back():
+    h14 = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    h13 = datetime(2026, 5, 17, 13, 0, 0, tzinfo=timezone.utc)
+    objs = {
+        _snap_key(h14): _obs_body(
+            h14,
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 18.0,
+                    "wind": {"speed": 8.0, "deg": 5, "direction": "N"},
+                }
+            ],
+        ),
+        _snap_key(h13): _obs_body(
+            h13,
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T13:00:00Z",
+                    "temperature": 17.0,
+                }
+            ],
+        ),
+    }
+    redis = _FakeRedis({})
+    svc, _ = _svc_with_redis(redis, objs)
+    out = await svc.get_station_series(1, 48)
+    assert [p["observed_at"] for p in out["points"]] == [
+        "2026-05-17T13:00:00Z",
+        "2026-05-17T14:00:00Z",
+    ]
+    assert out["latest"]["temperature"] == 18.0
+    assert out["points"][1]["wind_speed"] == 8.0
+    await _drain_background_tasks()
+    assert series_key(1) in redis.store  # rebuilt series written back
+
+
+@pytest.mark.asyncio
+async def test_station_series_unknown_station_returns_empty_points():
+    h14 = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    objs = {
+        _snap_key(h14): _obs_body(
+            h14, [{"station_id": 1, "observed_at": "2026-05-17T14:00:00Z"}]
+        )
+    }
+    redis = _FakeRedis({})
+    svc, _ = _svc_with_redis(redis, objs)
+    out = await svc.get_station_series(999, 48)
+    assert out["station_id"] == 999
+    assert out["points"] == []
+    assert out["latest"] is None

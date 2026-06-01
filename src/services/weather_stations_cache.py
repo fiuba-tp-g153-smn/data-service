@@ -70,6 +70,15 @@ def snap_body_key(s3_key: str) -> str:
     return f"cache:ws:snap:{s3_key}"
 
 
+def series_key(station_id: int) -> str:
+    """Cache key for a single station's pre-pivoted history series.
+
+    Warmed every cycle by the scraper (`pivot_station_series`) so a popover open
+    never pivots from S3, and read-through-rebuilt on a cold miss.
+    """
+    return f"cache:ws:series:{station_id}"
+
+
 # ---------------------------------------------------------- S3 snapshot-key parsing
 
 
@@ -214,3 +223,95 @@ async def recent_snapshot_keys(
     # Sort buckets by snapshot time, newest first, take the window.
     newest = sorted(per_bucket.values(), key=lambda tk: tk[0], reverse=True)
     return [key for _ts, key in newest[:window]]
+
+
+# ----------------------------------------------------- per-station series pivot
+
+
+def _parse_observed_at(value: object) -> Optional[datetime]:
+    """Parse an ISO-8601 `observed_at` (with `Z` or offset) into a UTC datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _observation_to_point(obs: dict) -> dict:
+    """Flatten one `StationObservation` dict into a series point (wind unpacked)."""
+    raw_wind = obs.get("wind")
+    wind = raw_wind if isinstance(raw_wind, dict) else {}
+    return {
+        "observed_at": obs.get("observed_at"),
+        "temperature": obs.get("temperature"),
+        "feels_like": obs.get("feels_like"),
+        "humidity": obs.get("humidity"),
+        "pressure": obs.get("pressure"),
+        "visibility": obs.get("visibility"),
+        "wind_speed": wind.get("speed"),
+        "wind_deg": wind.get("deg"),
+        "wind_direction": wind.get("direction"),
+    }
+
+
+def _sorted_points(by_observed_at: Dict[str, dict]) -> List[dict]:
+    """Drop points with an unparseable timestamp, sort ascending by reading time."""
+    parsed = [
+        (ts, point)
+        for raw, point in by_observed_at.items()
+        if (ts := _parse_observed_at(raw)) is not None
+    ]
+    parsed.sort(key=lambda tp: tp[0])
+    return [point for _ts, point in parsed]
+
+
+def extract_station_series(bodies: List[dict], station_id: int) -> List[dict]:
+    """Pull one station's history out of a list of snapshot bodies.
+
+    Each body holds all stations at one scrape time; we keep the matching
+    observation, dedupe by `observed_at` (adjacent hour buckets repeat the same
+    hourly/3-hourly SMN reading), and return points sorted oldest→newest.
+    """
+    by_observed_at: Dict[str, dict] = {}
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        stations = body.get("stations")
+        if not isinstance(stations, list):
+            continue
+        for obs in stations:
+            if not isinstance(obs, dict) or obs.get("station_id") != station_id:
+                continue
+            observed_at = obs.get("observed_at")
+            if isinstance(observed_at, str) and observed_at not in by_observed_at:
+                by_observed_at[observed_at] = _observation_to_point(obs)
+            break  # one observation per station per body
+    return _sorted_points(by_observed_at)
+
+
+def pivot_station_series(bodies: List[dict]) -> Dict[int, List[dict]]:
+    """Pivot a list of snapshot bodies into `station_id -> sorted series` in one pass.
+
+    Used by the scraper to warm every station's `series_key` per cycle (one S3
+    read pass, then a single in-memory pivot), mirroring `extract_station_series`
+    for the read path's cold-miss rebuild.
+    """
+    per_station: Dict[int, Dict[str, dict]] = {}
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        stations = body.get("stations")
+        if not isinstance(stations, list):
+            continue
+        for obs in stations:
+            if not isinstance(obs, dict):
+                continue
+            station_id = obs.get("station_id")
+            observed_at = obs.get("observed_at")
+            if not isinstance(station_id, int) or not isinstance(observed_at, str):
+                continue
+            bucket = per_station.setdefault(station_id, {})
+            if observed_at not in bucket:
+                bucket[observed_at] = _observation_to_point(obs)
+    return {sid: _sorted_points(points) for sid, points in per_station.items()}

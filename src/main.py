@@ -435,6 +435,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         tilesets_ttl=settings.weather_stations_redis_tilesets_ttl_seconds,
         snapshot_ttl=settings.weather_stations_redis_snapshot_ttl_seconds,
         registry_ttl=settings.weather_stations_redis_registry_ttl_seconds,
+        series_ttl=settings.weather_stations_redis_series_ttl_seconds,
     )
 
     return WeatherStationsRuntime(

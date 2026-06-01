@@ -22,11 +22,14 @@ from services.weather_stations_cache import (
     TilesetIdFormatError,
     compute_tilesets_entries,
     day_prefixes_covering,
+    extract_station_series,
     latest_key,
     parse_json_or_none,
     parse_snapshot_key,
     parse_tileset_id,
+    recent_snapshot_keys,
     registry_key,
+    series_key,
     snap_body_key,
     tilesets_key,
 )
@@ -68,6 +71,7 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         self._tilesets_ttl: int = 600
         self._snapshot_ttl: int = 3600
         self._registry_ttl: int = 3600
+        self._series_ttl: int = 3600
         self._list_cache_ttl: float = 0.0
         # Per-prefix cached LIST result: prefix -> (expires_monotonic, keys).
         self._list_cache: Dict[str, Tuple[float, List[str]]] = {}
@@ -84,6 +88,7 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         tilesets_ttl: int = 600,
         snapshot_ttl: int = 3600,
         registry_ttl: int = 3600,
+        series_ttl: int = 3600,
     ) -> None:
         """Attach runtime dependencies. Pass `None` for `s3_client` when disabled.
 
@@ -98,6 +103,7 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         self._tilesets_ttl = tilesets_ttl
         self._snapshot_ttl = snapshot_ttl
         self._registry_ttl = registry_ttl
+        self._series_ttl = series_ttl
 
     # ------------------------------------------------------------------ /latest
 
@@ -180,20 +186,84 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
 
         # Body cache keyed by the resolved S3 object — shared across all tolerances
         # (and pre-warmed by the scraper for the animation window).
-        cache_key = snap_body_key(best_key)
+        return await self._get_snapshot_body(best_key)
+
+    # ----------------------------------------------- /station/{id}/series?hours=
+
+    async def get_station_series(self, station_id: int, hours: int) -> dict:
+        """Bundle one station's last-`hours` history into a single response dict.
+
+        The whole feature is one payload: the pre-pivoted points (Redis-first via
+        `series_key`, rebuilt from the recent snapshot bodies on a cold miss),
+        plus the station's name/province and the `latest` point — so the frontend
+        makes exactly one request. `points: []` when the station has no readings.
+        """
+        points = await self._station_series_points(station_id, hours)
+        name, province = await self._station_meta(station_id)
+        return {
+            "station_id": station_id,
+            "station_name": name,
+            "province": province,
+            "hours": hours,
+            "points": points,
+            "latest": points[-1] if points else None,
+        }
+
+    async def _station_series_points(self, station_id: int, hours: int) -> List[dict]:
+        """Redis-first list of series points; rebuild + write-back on a cold miss."""
+        cache_key = series_key(station_id)
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            try:
+                points = json.loads(cached)
+                if isinstance(points, list):
+                    return points
+            except json.JSONDecodeError:
+                pass  # corrupt cache → rebuild
+
+        keys = await recent_snapshot_keys(
+            self._require_s3(), hours, list_keys=self._cached_list
+        )
+        bodies = await asyncio.gather(*(self._get_snapshot_body(k) for k in keys))
+        points = extract_station_series(
+            [b for b in bodies if b is not None], station_id
+        )
+        self._cache_set_bg(
+            cache_key, json.dumps(points).encode("utf-8"), self._series_ttl
+        )
+        return points
+
+    async def _station_meta(
+        self, station_id: int
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Look up a station's (name, province) from the warm registry cache."""
+        registry = await self.get_stations_registry()
+        if not isinstance(registry, dict):
+            return None, None
+        for entry in registry.get("stations", []):
+            if isinstance(entry, dict) and entry.get("station_id") == station_id:
+                return entry.get("name"), entry.get("province")
+        return None, None
+
+    # --------------------------------------------------------------- internals
+
+    async def _get_snapshot_body(self, snapshot_key: str) -> Optional[dict]:
+        """Redis-first read of one snapshot body (`cache:ws:snap:{key}`) + S3 fallback.
+
+        Shared by the `?N` resolution and the series rebuild; the cached body is
+        pre-warmed by the scraper for the animation window.
+        """
+        cache_key = snap_body_key(snapshot_key)
         cached = await self._cache_get(cache_key)
         if cached is not None:
             parsed = parse_json_or_none(cached, cache_key)
             if parsed is not None:
                 return parsed
-
-        body = await self._require_s3().download_tile(best_key)
+        body = await self._require_s3().download_tile(snapshot_key)
         if body is None:
             return None
         self._cache_set_bg(cache_key, body, self._snapshot_ttl)
-        return parse_json_or_none(body, best_key)
-
-    # --------------------------------------------------------------- internals
+        return parse_json_or_none(body, snapshot_key)
 
     async def _get_cached_object(
         self, cache_key: str, s3_key: str, ttl: int

@@ -118,6 +118,8 @@ def _settings(redis_cache_enabled=True):
         weather_stations_redis_registry_ttl_seconds=3600,
         weather_stations_redis_snapshot_ttl_seconds=3600,
         weather_stations_redis_animation_warm_buckets=24,
+        weather_stations_series_hours=48,
+        weather_stations_redis_series_ttl_seconds=3600,
     )
 
 

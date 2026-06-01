@@ -22,6 +22,7 @@ from models.weather_stations import (
     AdminKeyCreateRequest,
     AdminKeyCreateResponse,
     AdminKeyListResponse,
+    StationSeriesResponse,
     StationsRegistryResponse,
     TilesetsResponse,
     WeatherStationsSnapshot,
@@ -244,6 +245,57 @@ async def get_registry(
         _cache_control(settings.weather_stations_cache_control_registry)
     )
     return StationsRegistryResponse.model_validate(payload)
+
+
+@router.get(
+    "/station/{station_id}/series",
+    status_code=status.HTTP_200_OK,
+    summary="One station's 48 h history (bundled)",
+    response_model=StationSeriesResponse,
+    dependencies=[Depends(require_api_key)],
+    description=(
+        "Return a single station's recent history as **one bundled payload**: "
+        "every variable (temperature, feels-like, humidity, pressure, "
+        "visibility, wind) across every reading in the last `hours` (default/max "
+        "48), plus the station name/province and the `latest` point. The "
+        "data-service pivots the per-hour snapshots server-side, so the client "
+        "makes exactly one request instead of ~48.\n\n"
+        "Points are deduped by `observed_at` (SMN reports hourly/3-hourly) and "
+        "sorted oldest→newest. An unknown station returns `200` with "
+        "`points: []`.\n\n"
+        '**Example:** `curl -H "X-API-Key: $KEY" '
+        "'http://localhost:8080/weather-stations/station/87344/series?hours=48'`"
+    ),
+    responses={
+        401: {"description": "Missing or invalid X-API-Key"},
+        503: {"description": "Service not configured / S3 down"},
+    },
+)
+async def get_station_series(
+    response: Response,
+    station_id: int = PathParam(
+        ...,
+        description="Numeric SMN station id (as in the registry).",
+        examples=[87344],
+    ),
+    hours: int = Query(
+        settings.weather_stations_series_hours,
+        ge=1,
+        le=settings.weather_stations_series_hours,
+        description="History window in hours (bounded by the warm/retention window).",
+        examples=[48],
+    ),
+    service: WeatherStationsService = Depends(get_weather_stations_service),
+) -> StationSeriesResponse:
+    """Bundle one station's last-`hours` history into a single response."""
+    try:
+        payload = await service.get_station_series(station_id, hours)
+    except WeatherStationsNotConfiguredError as exc:
+        _raise_not_configured(exc)
+    response.headers.update(
+        _cache_control(settings.weather_stations_cache_control_series)
+    )
+    return StationSeriesResponse.model_validate(payload)
 
 
 @router.get(
