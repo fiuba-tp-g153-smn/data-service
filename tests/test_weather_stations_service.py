@@ -9,6 +9,7 @@ import pytest
 
 from services.weather_stations_cache import (
     extract_station_series,
+    magnus_dew_point,
     pivot_station_series,
     series_key,
 )
@@ -490,6 +491,75 @@ def test_extract_station_series_skips_null_observed_at():
         _series_body([{"station_id": 1, "observed_at": None, "temperature": 5.0}])
     ]
     assert extract_station_series(bodies, 1) == []
+
+
+def test_extract_station_series_includes_dew_point():
+    bodies = [
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 20.0,
+                    "humidity": 50.0,
+                }
+            ]
+        )
+    ]
+    [point] = extract_station_series(bodies, 1)
+    # Magnus dew point for 20 °C / 50 % RH ≈ 9.27 °C.
+    assert point["dew_point"] == pytest.approx(9.27, abs=0.05)
+
+
+def test_extract_station_series_dew_point_none_without_humidity():
+    bodies = [
+        _series_body(
+            [
+                {
+                    "station_id": 1,
+                    "observed_at": "2026-05-17T14:00:00Z",
+                    "temperature": 20.0,
+                }
+            ]
+        )
+    ]
+    [point] = extract_station_series(bodies, 1)
+    assert point["dew_point"] is None
+
+
+# ----------------------------------------------------------- Magnus dew point
+
+
+def test_magnus_dew_point_typical_value():
+    assert magnus_dew_point(20.0, 50.0) == pytest.approx(9.27, abs=0.05)
+
+
+def test_magnus_dew_point_saturated_air_equals_temperature():
+    # At 100 % RH the dew point equals the air temperature.
+    assert magnus_dew_point(15.0, 100.0) == pytest.approx(15.0, abs=0.05)
+
+
+def test_magnus_dew_point_clamps_slight_sensor_overread():
+    # 100.3 % is clamped to 100 % rather than rejected.
+    assert magnus_dew_point(15.0, 100.3) == pytest.approx(15.0, abs=0.05)
+
+
+@pytest.mark.parametrize(
+    "temperature,humidity",
+    [
+        (None, 50.0),
+        (20.0, None),
+        ("x", 50.0),
+        (float("nan"), 50.0),
+        (20.0, 0.0),  # log(0) guard
+        (20.0, -5.0),
+        (20.0, 110.0),  # impossible humidity
+        (100.0, 50.0),  # temperature outside Magnus' valid range
+        (-60.0, 50.0),
+    ],
+)
+def test_magnus_dew_point_invalid_inputs_return_none(temperature, humidity):
+    assert magnus_dew_point(temperature, humidity) is None
 
 
 def test_pivot_station_series_groups_each_station_sorted():

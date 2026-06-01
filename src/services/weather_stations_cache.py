@@ -16,9 +16,10 @@ Redis keys (binary `decode_responses=False`, JSON payloads):
 import asyncio
 import json
 import logging
+import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from clients.s3_client import S3Client
 
@@ -238,6 +239,38 @@ def _parse_observed_at(value: object) -> Optional[datetime]:
         return None
 
 
+# Magnus (Magnus-Tetens) dew-point: empirically accurate roughly over -45..60 °C.
+_DEW_T_MIN, _DEW_T_MAX = -45.0, 60.0
+_DEW_HR_TOLERANCE = 100.5  # accept + clamp slight sensor over-read (e.g. 100.3 %)
+_DEW_B, _DEW_C = 17.625, 243.04
+
+
+def magnus_dew_point(temperature: Any, humidity: Any) -> Optional[float]:
+    """Dew point (°C) from air temperature + relative humidity via the Magnus formula.
+
+    Fail-soft for batch use: returns `None` (never raises) for missing, non-numeric,
+    non-finite, or out-of-range inputs, so one bad reading can't break a series.
+    Humidity must be in `(0, 100]`; values up to 100.5 % are clamped to 100 (sensor
+    noise), and temperature must fall within the formula's valid `[-45, 60]` range.
+    """
+    if temperature is None or humidity is None:
+        return None
+    try:
+        t = float(temperature)
+        hr = float(humidity)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(t) and math.isfinite(hr)):
+        return None
+    if hr <= 0 or hr > _DEW_HR_TOLERANCE:
+        return None
+    hr = min(hr, 100.0)
+    if not _DEW_T_MIN <= t <= _DEW_T_MAX:
+        return None
+    gamma = math.log(hr / 100.0) + (_DEW_B * t) / (_DEW_C + t)
+    return round((_DEW_C * gamma) / (_DEW_B - gamma), 2)
+
+
 def _observation_to_point(obs: dict) -> dict:
     """Flatten one `StationObservation` dict into a series point (wind unpacked)."""
     raw_wind = obs.get("wind")
@@ -249,6 +282,7 @@ def _observation_to_point(obs: dict) -> dict:
         "humidity": obs.get("humidity"),
         "pressure": obs.get("pressure"),
         "visibility": obs.get("visibility"),
+        "dew_point": magnus_dew_point(obs.get("temperature"), obs.get("humidity")),
         "wind_speed": wind.get("speed"),
         "wind_deg": wind.get("deg"),
         "wind_direction": wind.get("direction"),

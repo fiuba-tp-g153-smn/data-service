@@ -84,6 +84,9 @@ class StationSeriesPoint(BaseModel):
     humidity: Optional[float] = None
     pressure: Optional[float] = None
     visibility: Optional[float] = None
+    # Dew point (°C), computed server-side via the Magnus formula from
+    # temperature + humidity; None when either is missing or out of range.
+    dew_point: Optional[float] = None
     wind_speed: Optional[float] = None
     wind_deg: Optional[float] = None
     wind_direction: Optional[str] = None
