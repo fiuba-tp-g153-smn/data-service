@@ -33,6 +33,7 @@ from routes import (
     satellite,
     sync,
     weather_stations,
+    wrf,
 )
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
@@ -66,6 +67,8 @@ from services.satellite_sync_strategy import (
 from services.sync_service import sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from services.weather_stations_service import weather_stations_service
+from services.wrf_service import wrf_service
+from services.wrf_sync_strategy import WrfFullSyncStrategy, WrfOnDemandStrategy, WrfSyncStrategy
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -109,6 +112,7 @@ async def configure_strategies(
     EcmwfMslpSyncStrategy,
     S3CogPointValueStrategy,
     Optional[S3Client],
+    WrfSyncStrategy,
 ]:
     """Configure and return sync strategies based on settings."""
     s3_client = None
@@ -116,6 +120,7 @@ async def configure_strategies(
     radar_strategy: RadarSyncStrategy
     ecmwf_tp_strategy: EcmwfTpSyncStrategy
     ecmwf_mslp_strategy: EcmwfMslpSyncStrategy
+    wrf_strategy: WrfSyncStrategy
 
     if settings.is_s3_configured():
         s3_client = S3Client(
@@ -136,6 +141,7 @@ async def configure_strategies(
         radar_strategy = RadarFullSyncStrategy(client_redis)
         ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(client_redis)
         ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(client_redis)
+        wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
 
         sync_service.set_redis_client(client_redis)
         await sync_service.start(logger)
@@ -167,6 +173,13 @@ async def configure_strategies(
             settings.ecmwf_mslp_geojson_ttl,
             settings.tileset_listing_ttl,
         )
+        wrf_strategy = WrfOnDemandStrategy(
+            client_redis,
+            s3_client,
+            settings.wrf_tile_ttl,
+            settings.wrf_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
 
     return (
         sat_strategy,
@@ -175,6 +188,7 @@ async def configure_strategies(
         ecmwf_mslp_strategy,
         point_value_strategy,
         s3_client,
+        wrf_strategy,
     )
 
 
@@ -540,6 +554,7 @@ async def lifespan(_app: FastAPI):
         ecmwf_mslp_strategy,
         point_value_strategy,
         s3_client,
+        wrf_strategy,
     ) = await configure_strategies(redis_client)
 
     satellite_service.set_strategy(sat_strategy)
@@ -547,6 +562,7 @@ async def lifespan(_app: FastAPI):
     ecmwf_tp_service.set_strategy(ecmwf_tp_strategy)
     ecmwf_mslp_service.set_strategy(ecmwf_mslp_strategy)
     point_value_service.set_strategy(point_value_strategy)
+    wrf_service.set_strategy(wrf_strategy)
 
     basemap_runtime = await configure_basemap(redis_client)
     weather_stations_runtime = await configure_weather_stations()
@@ -605,6 +621,7 @@ app.include_router(basemap.router)  # Base map tile proxy
 app.include_router(radar.router)  # Radar routes (most specific)
 app.include_router(ecmwf_tp.router)  # ECMWF total precipitation routes
 app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
+app.include_router(wrf.router)  # WRF model routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
 app.include_router(weather_stations.router)  # SMN weather-stations endpoints
