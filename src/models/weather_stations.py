@@ -70,6 +70,83 @@ class WeatherStationsSnapshot(BaseModel):
     )
 
 
+class StationSeriesPoint(BaseModel):
+    """One timestamped observation in a station's history series.
+
+    Flattened from `StationObservation` (wind unpacked) so charts can read each
+    numeric variable directly. `observed_at` is the SMN reading time, not the
+    scrape time.
+    """
+
+    observed_at: datetime
+    temperature: Optional[float] = None
+    feels_like: Optional[float] = None
+    humidity: Optional[float] = None
+    pressure: Optional[float] = None
+    visibility: Optional[float] = None
+    # Dew point (°C), computed server-side via the Magnus formula from
+    # temperature + humidity; None when either is missing or out of range.
+    dew_point: Optional[float] = None
+    # SMN weather description (e.g. "Niebla", "Despejado"); None when absent.
+    condition: Optional[str] = None
+    wind_speed: Optional[float] = None
+    wind_deg: Optional[float] = None
+    wind_direction: Optional[str] = None
+
+
+class StationSeriesResponse(BaseModel):
+    """A single station's last-`hours` history, bundled in one payload.
+
+    The whole feature is served by this one object: every variable across every
+    timestamp, plus the station's name/province and the `latest` point — so the
+    frontend needs no companion registry/snapshot request.
+    """
+
+    station_id: int
+    station_name: Optional[str] = None
+    province: Optional[str] = None
+    hours: int
+    points: List[StationSeriesPoint]
+    latest: Optional[StationSeriesPoint] = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "station_id": 87344,
+                    "station_name": "CORDOBA AERO",
+                    "province": "CORDOBA",
+                    "hours": 48,
+                    "points": [
+                        {
+                            "observed_at": "2026-05-17T13:00:00Z",
+                            "temperature": 18.4,
+                            "feels_like": 17.9,
+                            "humidity": 62.0,
+                            "pressure": 1013.2,
+                            "visibility": 10.0,
+                            "wind_speed": 8.2,
+                            "wind_deg": 5,
+                            "wind_direction": "Norte",
+                        }
+                    ],
+                    "latest": {
+                        "observed_at": "2026-05-17T13:00:00Z",
+                        "temperature": 18.4,
+                        "feels_like": 17.9,
+                        "humidity": 62.0,
+                        "pressure": 1013.2,
+                        "visibility": 10.0,
+                        "wind_speed": 8.2,
+                        "wind_deg": 5,
+                        "wind_direction": "Norte",
+                    },
+                }
+            ]
+        }
+    )
+
+
 class TilesetEntry(BaseModel):
     """One available time bucket exposed via /weather-stations/tilesets."""
 
@@ -271,6 +348,8 @@ __all__ = [
     "AdminKeyListResponse",
     "StationObservation",
     "StationRegistryEntry",
+    "StationSeriesPoint",
+    "StationSeriesResponse",
     "StationsRegistryResponse",
     "TilesetEntry",
     "TilesetsResponse",

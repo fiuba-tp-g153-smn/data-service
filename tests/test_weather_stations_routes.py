@@ -149,6 +149,7 @@ async def test_read_endpoints_reject_missing_api_key(app_and_keystore):
         "/weather-stations/tilesets",
         "/weather-stations/stations",
         "/weather-stations/20260517T1400Z",
+        "/weather-stations/station/0/series",
     ):
         resp = client.get(path)
         assert resp.status_code == 401, f"{path} should require X-API-Key"
@@ -251,6 +252,45 @@ async def test_tileset_lookup_hits_and_misses(app_and_keystore):
     # Malformed tilesetId -> 400.
     resp = client.get("/weather-stations/bogus", headers={"X-API-Key": created.secret})
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_station_series_returns_bundled_history(app_and_keystore):
+    app, keystore = app_and_keystore
+    created = await keystore.create("test")
+    client = TestClient(app)
+    resp = client.get(
+        "/weather-stations/station/0/series?hours=48",
+        headers={"X-API-Key": created.secret},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["station_id"] == 0
+    # Name/province come bundled from the registry — no companion request needed.
+    assert body["station_name"] == "A"
+    assert body["province"] == "P"
+    assert len(body["points"]) == 1
+    assert body["points"][0]["observed_at"] == "2026-05-17T14:00:00Z"
+    assert body["latest"]["observed_at"] == "2026-05-17T14:00:00Z"
+    assert (
+        resp.headers["cache-control"] == settings.weather_stations_cache_control_series
+    )
+
+
+@pytest.mark.asyncio
+async def test_station_series_unknown_station_is_empty(app_and_keystore):
+    app, keystore = app_and_keystore
+    created = await keystore.create("test")
+    client = TestClient(app)
+    resp = client.get(
+        "/weather-stations/station/999/series",
+        headers={"X-API-Key": created.secret},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["station_id"] == 999
+    assert body["points"] == []
+    assert body["latest"] is None
 
 
 @pytest.mark.asyncio

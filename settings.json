@@ -77,12 +77,15 @@
     "cache_control_tilesets": "public, max-age=60, stale-while-revalidate=120",
     "cache_control_registry": "public, max-age=3600, stale-while-revalidate=86400",
     "cache_control_snapshot": "public, max-age=300",
+    "cache_control_series": "public, max-age=300",
     "redis_cache_enabled": true,
     "redis_latest_ttl_seconds": 600,
     "redis_tilesets_ttl_seconds": 600,
     "redis_snapshot_ttl_seconds": 3600,
     "redis_registry_ttl_seconds": 3600,
+    "redis_series_ttl_seconds": 3600,
     "redis_animation_warm_buckets": 24,
+    "series_hours": 48,
     "api_key_auth_enabled": true,
     "keystore_db_path": "data/weather_stations_keys.sqlite"
   }

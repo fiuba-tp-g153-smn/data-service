@@ -16,9 +16,10 @@ Redis keys (binary `decode_responses=False`, JSON payloads):
 import asyncio
 import json
 import logging
+import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from clients.s3_client import S3Client
 
@@ -68,6 +69,15 @@ def snap_body_key(s3_key: str) -> str:
     backs all of an animation's frames regardless of the chosen `N`.
     """
     return f"cache:ws:snap:{s3_key}"
+
+
+def series_key(station_id: int) -> str:
+    """Cache key for a single station's pre-pivoted history series.
+
+    Warmed every cycle by the scraper (`pivot_station_series`) so a popover open
+    never pivots from S3, and read-through-rebuilt on a cold miss.
+    """
+    return f"cache:ws:series:{station_id}"
 
 
 # ---------------------------------------------------------- S3 snapshot-key parsing
@@ -214,3 +224,131 @@ async def recent_snapshot_keys(
     # Sort buckets by snapshot time, newest first, take the window.
     newest = sorted(per_bucket.values(), key=lambda tk: tk[0], reverse=True)
     return [key for _ts, key in newest[:window]]
+
+
+# ----------------------------------------------------- per-station series pivot
+
+
+def _parse_observed_at(value: object) -> Optional[datetime]:
+    """Parse an ISO-8601 `observed_at` (with `Z` or offset) into a UTC datetime."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+# Magnus (Magnus-Tetens) dew-point: empirically accurate roughly over -45..60 °C.
+_DEW_T_MIN, _DEW_T_MAX = -45.0, 60.0
+_DEW_HR_TOLERANCE = 100.5  # accept + clamp slight sensor over-read (e.g. 100.3 %)
+_DEW_B, _DEW_C = 17.625, 243.04
+
+
+def magnus_dew_point(temperature: Any, humidity: Any) -> Optional[float]:
+    """Dew point (°C) from air temperature + relative humidity via the Magnus formula.
+
+    Fail-soft for batch use: returns `None` (never raises) for missing, non-numeric,
+    non-finite, or out-of-range inputs, so one bad reading can't break a series.
+    Humidity must be in `(0, 100]`; values up to 100.5 % are clamped to 100 (sensor
+    noise), and temperature must fall within the formula's valid `[-45, 60]` range.
+    """
+    if temperature is None or humidity is None:
+        return None
+    try:
+        t = float(temperature)
+        hr = float(humidity)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(t) and math.isfinite(hr)):
+        return None
+    if hr <= 0 or hr > _DEW_HR_TOLERANCE:
+        return None
+    hr = min(hr, 100.0)
+    if not _DEW_T_MIN <= t <= _DEW_T_MAX:
+        return None
+    gamma = math.log(hr / 100.0) + (_DEW_B * t) / (_DEW_C + t)
+    return round((_DEW_C * gamma) / (_DEW_B - gamma), 2)
+
+
+def _observation_to_point(obs: dict) -> dict:
+    """Flatten one `StationObservation` dict into a series point (wind unpacked)."""
+    raw_wind = obs.get("wind")
+    wind = raw_wind if isinstance(raw_wind, dict) else {}
+    raw_weather = obs.get("weather")
+    weather = raw_weather if isinstance(raw_weather, dict) else {}
+    return {
+        "observed_at": obs.get("observed_at"),
+        "temperature": obs.get("temperature"),
+        "feels_like": obs.get("feels_like"),
+        "humidity": obs.get("humidity"),
+        "pressure": obs.get("pressure"),
+        "visibility": obs.get("visibility"),
+        "dew_point": magnus_dew_point(obs.get("temperature"), obs.get("humidity")),
+        "condition": weather.get("description"),
+        "wind_speed": wind.get("speed"),
+        "wind_deg": wind.get("deg"),
+        "wind_direction": wind.get("direction"),
+    }
+
+
+def _sorted_points(by_observed_at: Dict[str, dict]) -> List[dict]:
+    """Drop points with an unparseable timestamp, sort ascending by reading time."""
+    parsed = [
+        (ts, point)
+        for raw, point in by_observed_at.items()
+        if (ts := _parse_observed_at(raw)) is not None
+    ]
+    parsed.sort(key=lambda tp: tp[0])
+    return [point for _ts, point in parsed]
+
+
+def extract_station_series(bodies: List[dict], station_id: int) -> List[dict]:
+    """Pull one station's history out of a list of snapshot bodies.
+
+    Each body holds all stations at one scrape time; we keep the matching
+    observation, dedupe by `observed_at` (adjacent hour buckets repeat the same
+    hourly/3-hourly SMN reading), and return points sorted oldest→newest.
+    """
+    by_observed_at: Dict[str, dict] = {}
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        stations = body.get("stations")
+        if not isinstance(stations, list):
+            continue
+        for obs in stations:
+            if not isinstance(obs, dict) or obs.get("station_id") != station_id:
+                continue
+            observed_at = obs.get("observed_at")
+            if isinstance(observed_at, str) and observed_at not in by_observed_at:
+                by_observed_at[observed_at] = _observation_to_point(obs)
+            break  # one observation per station per body
+    return _sorted_points(by_observed_at)
+
+
+def pivot_station_series(bodies: List[dict]) -> Dict[int, List[dict]]:
+    """Pivot a list of snapshot bodies into `station_id -> sorted series` in one pass.
+
+    Used by the scraper to warm every station's `series_key` per cycle (one S3
+    read pass, then a single in-memory pivot), mirroring `extract_station_series`
+    for the read path's cold-miss rebuild.
+    """
+    per_station: Dict[int, Dict[str, dict]] = {}
+    for body in bodies:
+        if not isinstance(body, dict):
+            continue
+        stations = body.get("stations")
+        if not isinstance(stations, list):
+            continue
+        for obs in stations:
+            if not isinstance(obs, dict):
+                continue
+            station_id = obs.get("station_id")
+            observed_at = obs.get("observed_at")
+            if not isinstance(station_id, int) or not isinstance(observed_at, str):
+                continue
+            bucket = per_station.setdefault(station_id, {})
+            if observed_at not in bucket:
+                bucket[observed_at] = _observation_to_point(obs)
+    return {sid: _sorted_points(points) for sid, points in per_station.items()}
