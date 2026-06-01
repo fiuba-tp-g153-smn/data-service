@@ -6,7 +6,6 @@ Runs as a background task during application lifetime.
 """
 
 import logging
-import re
 import time
 from logging import Logger
 from typing import List, Optional
@@ -207,6 +206,9 @@ class SyncService(BaseSyncService):
         sat_downloaded = 0
         errors = 0
 
+        now = time.time()
+        cutoff = now - self._settings.tile_ttl
+
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
                 prefix, prefix.rstrip("/").rsplit("/", maxsplit=1)[-1]
@@ -239,21 +241,36 @@ class SyncService(BaseSyncService):
                     sat_downloaded += downloaded
                     prefix_downloaded += downloaded
 
-                    score = self._extract_timestamp_score(tileset_id)
-                    await self._redis_client.add_satellite_tileset(
-                        channel_dir,
-                        tileset_id,
-                        score,
-                        ttl=self._settings.tile_ttl,
-                    )
+                    if downloaded > 0:
+                        # Only index a tileset whose tiles actually landed in
+                        # Redis, so a transient empty/failed S3 read isn't cached
+                        # as "present" and then skipped until the next trim
+                        # (~tile_ttl). Mirrors the radar guard in
+                        # _sync_radar_elevation. Score = insertion time, matching
+                        # the per-tile Redis TTL so index entries expire in
+                        # lockstep with the tiles they point to.
+                        await self._redis_client.add_satellite_tileset(
+                            channel_dir,
+                            tileset_id,
+                            now,
+                            ttl=self._settings.tile_ttl,
+                        )
+
+                # Trim every cycle (even with no new tilesets) so the index stays
+                # bounded to the live-tile window instead of growing unboundedly.
+                trimmed = await self._redis_client.trim_satellite_index(
+                    channel_dir, cutoff
+                )
 
                 logger.info(
-                    "[%s] %d in S3 | %d cached | %d new tilesets | %d tiles downloaded",
+                    "[%s] %d in S3 | %d cached | %d new tilesets"
+                    " | %d tiles downloaded | %d expired trimmed",
                     channel_dir,
                     len(tileset_prefixes),
                     len(existing_tilesets),
                     new_tilesets,
                     prefix_downloaded,
+                    trimmed,
                 )
 
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -274,6 +291,9 @@ class SyncService(BaseSyncService):
         errors = 0
         new_tilesets = 0
         radar_ids_seen: set = set()
+
+        now = time.time()
+        cutoff = now - self._settings.tile_ttl
 
         try:
             # 1. List radar IDs: tiles/radar/{radar_id}/
@@ -308,6 +328,8 @@ class SyncService(BaseSyncService):
                             variable_id,
                             elevation_id,
                             existing_by_elevation,
+                            now,
+                            cutoff,
                         )
 
         except Exception as e:  # pylint: disable=broad-exception-caught
@@ -329,6 +351,8 @@ class SyncService(BaseSyncService):
         variable_id: str,
         elevation_id: str,
         existing_by_elevation: dict[str, set[str]],
+        now: float,
+        cutoff: float,
     ) -> int:
         """Sync all new tilesets under a single radar elevation prefix."""
         if self._client is None or self._redis_client is None:
@@ -360,11 +384,13 @@ class SyncService(BaseSyncService):
             )
 
             if downloaded > 0:
+                # Score = insertion time, matching the per-tile Redis TTL.
                 await self._redis_client.add_radar_index(
                     radar_id,
                     variable_id,
                     elevation_id,
                     tileset_id,
+                    now,
                     ttl=self._settings.tile_ttl,
                 )
                 downloaded_total += downloaded
@@ -376,6 +402,11 @@ class SyncService(BaseSyncService):
                     elevation_id,
                     tileset_id,
                 )
+
+        # Trim every cycle so the index stays bounded to the live-tile window.
+        await self._redis_client.trim_radar_index(
+            radar_id, variable_id, elevation_id, cutoff
+        )
 
         return downloaded_total
 
@@ -458,6 +489,10 @@ class SyncService(BaseSyncService):
                     forecast_ts, periods, self._settings.ecmwf_tile_ttl
                 )
 
+            # Reconcile the forecasts index to the active set so it can't
+            # accumulate stale forecast timestamps over time.
+            await self._redis_client.prune_ecmwf_tp_forecasts(active_forecasts)
+
             logger.debug(
                 "ECMWF-TP sync complete: %d forecasts active", len(active_forecasts)
             )
@@ -521,6 +556,10 @@ class SyncService(BaseSyncService):
                 await self._redis_client.store_ecmwf_mslp_index(
                     forecast_ts, timestamps, self._settings.ecmwf_mslp_geojson_ttl
                 )
+
+            # Reconcile the forecasts index to the active set so it can't
+            # accumulate stale forecast timestamps over time.
+            await self._redis_client.prune_ecmwf_mslp_forecasts(active_forecasts)
 
             logger.debug(
                 "ECMWF-MSLP sync complete: %d forecasts active",
@@ -678,16 +717,6 @@ class SyncService(BaseSyncService):
         Format: 20260430_060000 → 20260430060000.0
         """
         return float(init_tag.replace("_", ""))
-
-    @staticmethod
-    def _extract_timestamp_score(tileset_id: str) -> float:
-        """Extract a numeric timestamp score from a tileset ID for sorted set ordering."""
-        # Format: OR_ABI-L1b-RadF-M6C13_G19_s20250141230210...
-        match = re.search(r"_s(\d{14})", tileset_id)
-        if match:
-            return float(match.group(1))
-        # Fallback: use current time
-        return time.time()
 
 
 # Singleton instance for use across the application

@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List, Optional
 
 import redis.asyncio as aioredis
+from redis.exceptions import ResponseError
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             if cursor == 0:
                 break
 
+    async def trim_satellite_index(self, channel_dir: str, min_score: float) -> int:
+        """Drop tilesets older than min_score (epoch seconds) from the index.
+
+        Keeps the index bounded to the live-tile window: tiles are stored with
+        ex=tile_ttl at insertion, so members scored before now-tile_ttl no longer
+        have data behind them. Returns the number of members removed.
+        """
+        key = f"idx:sat:{channel_dir}"
+        return await self._conn.zremrangebyscore(key, "-inf", f"({min_score}")
+
     async def satellite_tileset_exists(self, channel_dir: str, tileset_id: str) -> bool:
         """Check if a tileset exists in the satellite index."""
         key = f"idx:sat:{channel_dir}"
@@ -168,9 +179,15 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         variable_id: str,
         elevation_id: str,
         tileset_id: str,
+        score: float,
         ttl: int = 3600,
     ) -> None:
-        """Add entries to radar index sets with TTL."""
+        """Add entries to radar index sets with TTL.
+
+        The tilesets axis is a sorted set scored by insertion time so it can be
+        trimmed to the live-tile window (see trim_radar_index); the radar/variable/
+        elevation dimensions are low-cardinality plain sets.
+        """
         pipe = await self._conn.pipeline()
 
         radars_key = "idx:radar:radars"
@@ -186,7 +203,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         pipe.expire(elevs_key, ttl)
 
         tilesets_key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
-        pipe.sadd(tilesets_key, tileset_id.encode())
+        pipe.zadd(tilesets_key, {tileset_id.encode(): score})
         pipe.expire(tilesets_key, ttl)
 
         await pipe.execute()
@@ -211,11 +228,36 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     async def get_radar_tilesets(
         self, radar_id: str, variable_id: str, elevation_id: str
     ) -> List[str]:
-        """Get all tileset IDs for a radar/variable/elevation."""
-        members = await self._conn.smembers(  # type: ignore[misc]
-            f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
-        )
+        """Get all tileset IDs for a radar/variable/elevation (newest first).
+
+        Self-heals legacy plain-set keys left by the set→zset index migration:
+        a WRONGTYPE means a pre-migration key, which we drop so the next sync
+        recreates it as a sorted set.
+        """
+        key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        try:
+            members = await self._conn.zrange(key, 0, -1)
+        except ResponseError as exc:
+            if "WRONGTYPE" not in str(exc):
+                raise
+            await self._conn.delete(key)
+            return []
         return sorted((m.decode() for m in members), reverse=True)
+
+    async def trim_radar_index(
+        self,
+        radar_id: str,
+        variable_id: str,
+        elevation_id: str,
+        min_score: float,
+    ) -> int:
+        """Drop tilesets older than min_score (epoch seconds) from a radar elevation.
+
+        Keeps the index bounded to the live-tile window, the radar analogue of
+        trim_satellite_index. Returns the number of members removed.
+        """
+        key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        return await self._conn.zremrangebyscore(key, "-inf", f"({min_score}")
 
     # ============== ECMWF Total Precipitation Tile Operations ==============
 
@@ -275,6 +317,24 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             f"idx:ecmwf_tp:{forecast_ts}:periods"
         )
         return sorted(m.decode() for m in members)
+
+    async def _prune_index_set(self, key: str, keep: List[str]) -> int:
+        """Remove members of a plain-set index not present in `keep`.
+
+        Reconciles a forecast set to the currently-active forecasts so it stays
+        bounded; stale per-forecast sub-keys self-expire once no longer re-synced.
+        Returns the number of members removed.
+        """
+        keepset = {k.encode() for k in keep}
+        members = await self._conn.smembers(key)  # type: ignore[misc]
+        stale = [m for m in members if m not in keepset]
+        if stale:
+            await self._conn.srem(key, *stale)  # type: ignore[misc]
+        return len(stale)
+
+    async def prune_ecmwf_tp_forecasts(self, keep: List[str]) -> int:
+        """Reconcile the ECMWF-TP forecasts index to the active forecasts."""
+        return await self._prune_index_set("idx:ecmwf_tp:forecasts", keep)
 
     # ============== ECMWF Mean Sea Level Pressure GeoJSON Operations ==============
 
@@ -455,6 +515,10 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    async def prune_ecmwf_mslp_forecasts(self, keep: List[str]) -> int:
+        """Reconcile the ECMWF-MSLP forecasts index to the active forecasts."""
+        return await self._prune_index_set("idx:ecmwf_mslp:forecasts", keep)
 
     # ============== Base Map Tile Operations ==============
 

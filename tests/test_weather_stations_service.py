@@ -113,7 +113,10 @@ async def test_tilesets_groups_by_hour_and_pairs_counts_correctly():
     entries = await svc.list_tilesets()
     assert [(e["tileset_id"], e["station_count"]) for e in entries] == [
         ("20260517T1200Z", 3),  # only snapshot at 12:00 has count=3
-        ("20260517T1400Z", 1),  # 14:00 bucket picks the LATEST (14:05) which has count=1
+        (
+            "20260517T1400Z",
+            1,
+        ),  # 14:00 bucket picks the LATEST (14:05) which has count=1
     ]
 
 
@@ -228,9 +231,17 @@ async def test_get_registry_returns_parsed():
         {
             "fetched_at": "2026-05-17T14:00:00Z",
             "source_url": "x",
-            "stations": [{"station_id": 1, "name": "A", "province": "P",
-                          "latitude": -30.0, "longitude": -60.0,
-                          "altitude_meters": 50, "oaci_code": None}],
+            "stations": [
+                {
+                    "station_id": 1,
+                    "name": "A",
+                    "province": "P",
+                    "latitude": -30.0,
+                    "longitude": -60.0,
+                    "altitude_meters": 50,
+                    "oaci_code": None,
+                }
+            ],
         }
     ).encode()
     svc = _new_service({"weather-stations/stations.json": body})
@@ -243,3 +254,156 @@ async def test_get_registry_returns_parsed():
 async def test_get_registry_returns_none_on_miss():
     svc = _new_service({})
     assert await svc.get_stations_registry() is None
+
+
+# --------------------------------------------------------------- Redis cache path
+
+
+class _FakeRedis:
+    def __init__(self, store=None, raise_on_get=False):
+        self.store: dict[str, bytes] = dict(store or {})
+        self.raise_on_get = raise_on_get
+        self.sets: list[tuple[str, bytes, int]] = []
+
+    async def get_cached_listing(self, key):
+        if self.raise_on_get:
+            raise RuntimeError("redis down")
+        return self.store.get(key)
+
+    async def cache_listing(self, key, data, ttl):
+        self.store[key] = data
+        self.sets.append((key, data, ttl))
+
+
+def _svc_with_redis(redis, objects=None, **ttls):
+    svc = WeatherStationsService()
+    svc.configure(
+        _FakeS3(objects),
+        list_cache_ttl=30.0,
+        redis_client=redis,
+        latest_ttl=ttls.get("latest_ttl", 600),
+        tilesets_ttl=ttls.get("tilesets_ttl", 600),
+        snapshot_ttl=ttls.get("snapshot_ttl", 3600),
+        registry_ttl=ttls.get("registry_ttl", 3600),
+    )
+    return svc, svc._s3
+
+
+async def _drain_background_tasks():
+    """Yield so fire-and-forget write-back tasks run."""
+    await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_latest_served_from_cache_without_touching_s3():
+    ts = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    redis = _FakeRedis({"cache:ws:latest": _snap_body(ts, 3)})
+    svc, s3 = _svc_with_redis(redis, {})
+    out = await svc.get_latest_snapshot()
+    assert out["scraped_at"] == "2026-05-17T14:05:00Z"
+    assert s3.download_calls == []  # pure Redis hit
+
+
+@pytest.mark.asyncio
+async def test_latest_miss_reads_s3_and_writes_back_with_ttl():
+    ts = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    redis = _FakeRedis({})
+    svc, s3 = _svc_with_redis(
+        redis, {"weather-stations/latest.json": _snap_body(ts, 2)}
+    )
+    out = await svc.get_latest_snapshot()
+    assert out is not None and len(out["stations"]) == 2
+    assert s3.download_calls == ["weather-stations/latest.json"]
+    await _drain_background_tasks()
+    assert "cache:ws:latest" in redis.store
+    assert any(k == "cache:ws:latest" and ttl == 600 for k, _, ttl in redis.sets)
+
+
+@pytest.mark.asyncio
+async def test_redis_read_error_falls_back_to_s3():
+    ts = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    redis = _FakeRedis({}, raise_on_get=True)
+    svc, s3 = _svc_with_redis(redis, {"weather-stations/latest.json": _snap_body(ts)})
+    out = await svc.get_latest_snapshot()  # error treated as a miss
+    assert out is not None
+    assert s3.download_calls == ["weather-stations/latest.json"]
+
+
+@pytest.mark.asyncio
+async def test_tilesets_cache_roundtrips_iso_and_validates_as_response():
+    from models.weather_stations import TilesetsResponse
+
+    entries = [
+        {
+            "tileset_id": "20260517T1400Z",
+            "scraped_at": "2026-05-17T14:05:00Z",
+            "station_count": 1,
+        }
+    ]
+    redis = _FakeRedis({"cache:ws:tilesets": json.dumps(entries).encode()})
+    svc, s3 = _svc_with_redis(redis, {})
+    out = await svc.list_tilesets()
+    assert out == entries
+    assert s3.list_calls == 0  # served from Redis, no S3 LIST
+    # The route validates the cached list unchanged.
+    model = TilesetsResponse.model_validate({"tilesets": out})
+    assert model.tilesets[0].tileset_id == "20260517T1400Z"
+
+
+@pytest.mark.asyncio
+async def test_tilesets_miss_caches_iso_string_not_datetime():
+    ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    objs = {_snap_key(ts): _snap_body(ts), _meta_key(_snap_key(ts)): _meta_body(ts, 1)}
+    redis = _FakeRedis({})
+    svc, _ = _svc_with_redis(redis, objs)
+    out = await svc.list_tilesets()
+    assert out[0]["scraped_at"] == "2026-05-17T14:00:00Z"  # ISO string
+    await _drain_background_tasks()
+    cached = json.loads(redis.store["cache:ws:tilesets"])
+    assert cached[0]["scraped_at"] == "2026-05-17T14:00:00Z"
+
+
+@pytest.mark.asyncio
+async def test_tileset_snapshot_body_served_from_cache_without_s3_get():
+    from services.weather_stations_cache import snap_body_key
+
+    ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    s3_key = _snap_key(ts)
+    # S3 holds the object (so resolution finds the key), but a DIFFERENT body is
+    # seeded in Redis to prove the response came from the cache, not from S3.
+    redis = _FakeRedis({snap_body_key(s3_key): _snap_body(ts, 5)})
+    svc, s3 = _svc_with_redis(redis, {s3_key: _snap_body(ts, 1)})
+    out = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
+    assert out is not None and len(out["stations"]) == 5  # from Redis body, not S3
+    assert s3.download_calls == []  # no body GET (a resolve LIST is still allowed)
+
+
+@pytest.mark.asyncio
+async def test_tileset_snapshot_miss_caches_body_under_snap_key():
+    from services.weather_stations_cache import snap_body_key
+
+    ts = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    s3_key = _snap_key(ts)
+    redis = _FakeRedis({})
+    svc, s3 = _svc_with_redis(redis, {s3_key: _snap_body(ts, 2)}, snapshot_ttl=3600)
+    out = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
+    assert out is not None and len(out["stations"]) == 2
+    assert s3.download_calls == [s3_key]
+    await _drain_background_tasks()
+    assert snap_body_key(s3_key) in redis.store
+    assert any(k == snap_body_key(s3_key) and ttl == 3600 for k, _, ttl in redis.sets)
+
+
+@pytest.mark.asyncio
+async def test_tileset_malformed_id_raises_even_with_cache():
+    redis = _FakeRedis({})
+    svc, _ = _svc_with_redis(redis, {})
+    with pytest.raises(TilesetIdFormatError):
+        await svc.get_snapshot_for_tileset("not-a-tileset", 0.0)
+
+
+def test_snap_body_key_shape():
+    from services.weather_stations_cache import snap_body_key
+
+    key = "weather-stations/snapshots/2026/05/17/14/20260517T140000Z.json"
+    assert snap_body_key(key) == f"cache:ws:snap:{key}"

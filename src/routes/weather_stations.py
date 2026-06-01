@@ -121,8 +121,8 @@ async def require_admin_password(
 # ---------------------------------------------------------------------- helpers
 
 
-def _response_with_cache_control() -> dict:
-    return {"Cache-Control": settings.weather_stations_cache_control_response}
+def _cache_control(value: str) -> dict:
+    return {"Cache-Control": value}
 
 
 def _raise_not_configured(exc: Exception) -> None:
@@ -168,7 +168,9 @@ async def get_latest(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Latest snapshot not yet available; check back after first scrape",
         )
-    response.headers.update(_response_with_cache_control())
+    response.headers.update(
+        _cache_control(settings.weather_stations_cache_control_latest)
+    )
     return WeatherStationsSnapshot.model_validate(payload)
 
 
@@ -197,7 +199,9 @@ async def list_tilesets(
         entries = await service.list_tilesets()
     except WeatherStationsNotConfiguredError as exc:
         _raise_not_configured(exc)
-    response.headers.update(_response_with_cache_control())
+    response.headers.update(
+        _cache_control(settings.weather_stations_cache_control_tilesets)
+    )
     return TilesetsResponse.model_validate({"tilesets": entries})
 
 
@@ -236,7 +240,9 @@ async def get_registry(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Stations registry not yet available; check back after first scrape",
         )
-    response.headers.update(_response_with_cache_control())
+    response.headers.update(
+        _cache_control(settings.weather_stations_cache_control_registry)
+    )
     return StationsRegistryResponse.model_validate(payload)
 
 
@@ -297,7 +303,9 @@ async def get_for_tileset(
                 f"with N={n}h tolerance"
             ),
         )
-    response.headers.update(_response_with_cache_control())
+    response.headers.update(
+        _cache_control(settings.weather_stations_cache_control_snapshot)
+    )
     return WeatherStationsSnapshot.model_validate(payload)
 
 

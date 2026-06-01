@@ -169,9 +169,9 @@ class Settings:
 
     # --- Weather stations subsystem (loaded from settings.json, env overrides) ---
     # Operational knobs only — secrets (SMN_*, WEATHER_STATIONS_ADMIN_PASSWORD)
-    # and the bucket name live above as env-only. This subsystem deliberately
-    # does NOT use Redis: reads resolve directly against S3 (LIST + GET) with a
-    # tiny in-process LRU on LIST results.
+    # and the bucket name live above as env-only. Reads are Redis-first (the
+    # scrape loop write-throughs the hot keys so the cache stays warm) with an
+    # S3 fallback + a tiny in-process LRU on LIST results for the cold path.
     weather_stations_sync_mode: str = "full"
     weather_stations_scrape_interval_seconds: int = 300
     weather_stations_scrape_lock_path: str = "/tmp/weather_stations_scrape.lock"
@@ -183,7 +183,33 @@ class Settings:
     weather_stations_s3_object_ttl_days: int = 2
     # In-process LRU TTL for cached S3 LIST results in the read service.
     weather_stations_list_cache_ttl_seconds: int = 30
-    weather_stations_cache_control_response: str = "public, max-age=60"
+    # Per-endpoint Cache-Control, matched to how fresh each response needs to be.
+    # latest/tilesets refresh every scrape (~5 min); the registry is near-static;
+    # a resolved historical snapshot gets a moderate TTL (safe for the current-hour
+    # bucket, which can still gain a newer best-match).
+    weather_stations_cache_control_latest: str = (
+        "public, max-age=60, stale-while-revalidate=120"
+    )
+    weather_stations_cache_control_tilesets: str = (
+        "public, max-age=60, stale-while-revalidate=120"
+    )
+    weather_stations_cache_control_registry: str = (
+        "public, max-age=3600, stale-while-revalidate=86400"
+    )
+    weather_stations_cache_control_snapshot: str = "public, max-age=300"
+    # Shared Redis cache in front of the read path. The scrape loop write-throughs
+    # latest/tilesets/registry each cycle so the cache stays warm; TTLs are
+    # safety-net backstops (the writer refreshes faster than they expire). The
+    # `?N` historical snapshot is pure read-through (the scraper can't pre-warm
+    # every N). Set `redis_cache_enabled=false` to fall back to S3-only.
+    weather_stations_redis_cache_enabled: bool = True
+    weather_stations_redis_latest_ttl_seconds: int = 600
+    weather_stations_redis_tilesets_ttl_seconds: int = 600
+    weather_stations_redis_snapshot_ttl_seconds: int = 3600
+    weather_stations_redis_registry_ttl_seconds: int = 3600
+    # How many of the latest hour-buckets the scraper pre-warms into Redis so the
+    # frontend's timeline animation (latest 24 frames) never reads them from S3.
+    weather_stations_redis_animation_warm_buckets: int = 24
     # When False, /weather-stations/* read endpoints are open (no X-API-Key).
     # Local-dev only; production must keep this True. Validator forbids
     # enabled=True without a non-empty admin password (otherwise admin endpoints
@@ -271,7 +297,16 @@ class Settings:
             "weather_stations_token_cache_ttl_seconds",
             "weather_stations_s3_object_ttl_days",
             "weather_stations_list_cache_ttl_seconds",
-            "weather_stations_cache_control_response",
+            "weather_stations_cache_control_latest",
+            "weather_stations_cache_control_tilesets",
+            "weather_stations_cache_control_registry",
+            "weather_stations_cache_control_snapshot",
+            "weather_stations_redis_cache_enabled",
+            "weather_stations_redis_latest_ttl_seconds",
+            "weather_stations_redis_tilesets_ttl_seconds",
+            "weather_stations_redis_snapshot_ttl_seconds",
+            "weather_stations_redis_registry_ttl_seconds",
+            "weather_stations_redis_animation_warm_buckets",
             "weather_stations_api_key_auth_enabled",
             "weather_stations_keystore_db_path",
         }
@@ -532,9 +567,45 @@ class Settings:
             "WEATHER_STATIONS_LIST_CACHE_TTL_SECONDS",
             self.weather_stations_list_cache_ttl_seconds,
         )
-        self.weather_stations_cache_control_response = os.getenv(
-            "WEATHER_STATIONS_CACHE_CONTROL_RESPONSE",
-            self.weather_stations_cache_control_response,
+        self.weather_stations_cache_control_latest = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_LATEST",
+            self.weather_stations_cache_control_latest,
+        )
+        self.weather_stations_cache_control_tilesets = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_TILESETS",
+            self.weather_stations_cache_control_tilesets,
+        )
+        self.weather_stations_cache_control_registry = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_REGISTRY",
+            self.weather_stations_cache_control_registry,
+        )
+        self.weather_stations_cache_control_snapshot = os.getenv(
+            "WEATHER_STATIONS_CACHE_CONTROL_SNAPSHOT",
+            self.weather_stations_cache_control_snapshot,
+        )
+        self.weather_stations_redis_cache_enabled = self._env_bool(
+            "WEATHER_STATIONS_REDIS_CACHE_ENABLED",
+            self.weather_stations_redis_cache_enabled,
+        )
+        self.weather_stations_redis_latest_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_REDIS_LATEST_TTL_SECONDS",
+            self.weather_stations_redis_latest_ttl_seconds,
+        )
+        self.weather_stations_redis_tilesets_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_REDIS_TILESETS_TTL_SECONDS",
+            self.weather_stations_redis_tilesets_ttl_seconds,
+        )
+        self.weather_stations_redis_snapshot_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_REDIS_SNAPSHOT_TTL_SECONDS",
+            self.weather_stations_redis_snapshot_ttl_seconds,
+        )
+        self.weather_stations_redis_registry_ttl_seconds = self._env_int(
+            "WEATHER_STATIONS_REDIS_REGISTRY_TTL_SECONDS",
+            self.weather_stations_redis_registry_ttl_seconds,
+        )
+        self.weather_stations_redis_animation_warm_buckets = self._env_int(
+            "WEATHER_STATIONS_REDIS_ANIMATION_WARM_BUCKETS",
+            self.weather_stations_redis_animation_warm_buckets,
         )
         self.weather_stations_api_key_auth_enabled = self._env_bool(
             "WEATHER_STATIONS_API_KEY_AUTH_ENABLED",

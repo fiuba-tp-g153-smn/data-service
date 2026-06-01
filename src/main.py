@@ -436,12 +436,19 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         s3_client=weather_s3,
         smn_client=smn_client,
         registry_client=registry_client,
+        redis_client=redis_client,
     )
     await scraper.start(logger)
 
     weather_stations_service.configure(
         s3_client=weather_s3,
         list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
+        redis_client=redis_client,
+        cache_enabled=settings.weather_stations_redis_cache_enabled,
+        latest_ttl=settings.weather_stations_redis_latest_ttl_seconds,
+        tilesets_ttl=settings.weather_stations_redis_tilesets_ttl_seconds,
+        snapshot_ttl=settings.weather_stations_redis_snapshot_ttl_seconds,
+        registry_ttl=settings.weather_stations_redis_registry_ttl_seconds,
     )
 
     return WeatherStationsRuntime(
@@ -492,12 +499,52 @@ async def shutdown_services():
         await sync_service.stop(logger)
 
 
+async def _wait_for_s3_reachable() -> None:
+    """Block startup until S3 answers, retrying without limit with capped backoff.
+
+    Keeps the process alive instead of crashing on a cold/slow S3. In dev the
+    `--reload` reloader does not respawn a child that died, so a hard crash here
+    would wedge the container until a file change; waiting lets it self-heal when
+    S3 comes up (prod already self-heals via uvicorn's worker respawn).
+    """
+    probe = S3Client(
+        endpoint=settings.s3_tiles_data_endpoint,
+        access_key=settings.s3_tiles_data_access_key,
+        secret_key=settings.s3_tiles_data_secret_key,
+        bucket=settings.s3_tiles_data_bucket_name,
+        secure=settings.s3_tiles_data_secure,
+        max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+    )
+    try:
+        await probe.connect()
+        backoff = 1.0
+        while not await probe.is_reachable():
+            logger.warning(
+                "S3 endpoint %s not reachable; retrying in %.0fs "
+                "(startup blocked until S3 is available)",
+                settings.s3_tiles_data_endpoint,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 30.0)
+    finally:
+        await probe.close()
+    logger.info("S3 endpoint reachable; continuing startup")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
     await redis_client.connect()
+
+    # S3 is a hard dependency. Block here until it answers (unlimited retry with
+    # capped backoff) instead of crashing — so dev (`--reload`, whose reloader
+    # won't respawn a dead child) recovers automatically when S3 returns, the
+    # same way prod's worker respawn already does.
+    if settings.is_s3_configured():
+        await _wait_for_s3_reachable()
 
     (
         sat_strategy,

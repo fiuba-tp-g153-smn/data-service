@@ -200,8 +200,7 @@ async def test_latest_returns_snapshot_with_cache_control(app_and_keystore):
     assert body["scraped_at"] == "2026-05-17T14:00:00Z"
     assert len(body["stations"]) == 2
     assert (
-        resp.headers["cache-control"]
-        == settings.weather_stations_cache_control_response
+        resp.headers["cache-control"] == settings.weather_stations_cache_control_latest
     )
 
 
@@ -218,6 +217,10 @@ async def test_tilesets_returns_buckets(app_and_keystore):
     assert len(body["tilesets"]) == 1
     assert body["tilesets"][0]["tileset_id"] == "20260517T1400Z"
     assert body["tilesets"][0]["station_count"] == 2
+    assert (
+        resp.headers["cache-control"]
+        == settings.weather_stations_cache_control_tilesets
+    )
 
 
 @pytest.mark.asyncio
@@ -233,6 +236,10 @@ async def test_tileset_lookup_hits_and_misses(app_and_keystore):
     )
     assert resp.status_code == 200
     assert resp.json()["scraped_at"] == "2026-05-17T14:00:00Z"
+    assert (
+        resp.headers["cache-control"]
+        == settings.weather_stations_cache_control_snapshot
+    )
 
     # Out-of-window -> 404.
     resp = client.get(
@@ -257,6 +264,10 @@ async def test_registry_returns_stations(app_and_keystore):
     assert resp.status_code == 200
     body = resp.json()
     assert body["stations"][0]["station_id"] == 0
+    assert (
+        resp.headers["cache-control"]
+        == settings.weather_stations_cache_control_registry
+    )
 
 
 # ---------------------------------------------------------------- admin happy
@@ -333,7 +344,9 @@ async def test_admin_add_custom_registers_custom_secret(app_and_keystore):
     assert body["secret"] == "hello-world-123"
 
     # Custom secret immediately works as an X-API-Key.
-    resp = client.get("/weather-stations/latest", headers={"X-API-Key": "hello-world-123"})
+    resp = client.get(
+        "/weather-stations/latest", headers={"X-API-Key": "hello-world-123"}
+    )
     assert resp.status_code == 200
 
 

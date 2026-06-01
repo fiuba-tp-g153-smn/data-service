@@ -1,47 +1,60 @@
-"""Read-side service for the weather-stations endpoints (S3 only, no Redis)."""
+"""Read-side service for the weather-stations endpoints.
+
+Redis-first with S3 fallback. The scrape loop write-throughs the hot keys
+(`cache:ws:latest` / `cache:ws:tilesets` / `cache:ws:registry`) so reads almost
+always hit Redis; on a cold boot (or for the parametrised `?N` historical query,
+which the scraper can't pre-warm) the read path falls back to S3 and writes the
+result back. S3 stays the source of truth — a Redis outage degrades to the
+previous S3-only behaviour (read errors treated as a miss; writes fire-and-forget).
+"""
 
 import asyncio
 import json
 import logging
-import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
 
+from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
+from services.weather_stations_cache import (
+    SNAPSHOT_META_SUFFIX,
+    TilesetIdFormatError,
+    compute_tilesets_entries,
+    day_prefixes_covering,
+    latest_key,
+    parse_json_or_none,
+    parse_snapshot_key,
+    parse_tileset_id,
+    registry_key,
+    snap_body_key,
+    tilesets_key,
+)
 
 logger = logging.getLogger(__name__)
 
-# Mirror the scraper's S3 layout. Kept in this module rather than imported from
-# the scraper so the read path doesn't depend on the scraper module loading.
+# S3 keys for the always-overwritten singletons (snapshot layout lives in
+# weather_stations_cache). Re-export TilesetIdFormatError so existing imports
+# from this module (routes, tests) keep working after the helper move.
 _S3_PREFIX = "weather-stations"
 _LATEST_KEY = f"{_S3_PREFIX}/latest.json"
 _REGISTRY_KEY = f"{_S3_PREFIX}/stations.json"
-_SNAPSHOTS_PREFIX = f"{_S3_PREFIX}/snapshots/"
-# `YYYYMMDDTHHMMSSZ` parsed back to a UTC datetime.
-_SNAPSHOT_KEY_RE = re.compile(
-    r".*/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z\.json$"
-)
-_SNAPSHOT_META_SUFFIX = ".meta.json"
-_TILESET_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})Z$")
+
+__all__ = [
+    "TilesetIdFormatError",
+    "WeatherStationsNotConfiguredError",
+    "WeatherStationsService",
+    "weather_stations_service",
+]
 
 
 class WeatherStationsNotConfiguredError(Exception):
     """Raised when read endpoints are called but no S3 client is attached."""
 
 
-class TilesetIdFormatError(Exception):
-    """Raised when a tilesetId path param doesn't match `YYYYMMDDTHHMMZ`."""
-
-
-class WeatherStationsService:
+class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
     """
     Read service backing the public /weather-stations/* endpoints.
-
-    Resolves every read directly against S3 (no Redis). A tiny TTL cache on
-    LIST results absorbs request bursts: at 2-day retention × 5-min cadence
-    the bucket has ~576 snapshot keys, so a single LIST is cheap, but cached
-    answers keep the endpoints sub-millisecond under load.
 
     Service is constructed at import time as a module-level singleton and
     populated via `configure(...)` from the lifespan, mirroring `BasemapService`.
@@ -49,25 +62,58 @@ class WeatherStationsService:
 
     def __init__(self) -> None:
         self._s3: Optional[S3Client] = None
+        self._redis: Optional[RedisClient] = None
+        self._cache_enabled: bool = False
+        self._latest_ttl: int = 600
+        self._tilesets_ttl: int = 600
+        self._snapshot_ttl: int = 3600
+        self._registry_ttl: int = 3600
         self._list_cache_ttl: float = 0.0
         # Per-prefix cached LIST result: prefix -> (expires_monotonic, keys).
         self._list_cache: Dict[str, Tuple[float, List[str]]] = {}
         self._list_cache_lock = asyncio.Lock()
 
-    def configure(self, s3_client: Optional[S3Client], list_cache_ttl: float) -> None:
-        """Attach runtime dependencies. Pass `None` for `s3_client` when disabled."""
+    def configure(  # pylint: disable=too-many-arguments
+        self,
+        s3_client: Optional[S3Client],
+        list_cache_ttl: float,
+        *,
+        redis_client: Optional[RedisClient] = None,
+        cache_enabled: bool = True,
+        latest_ttl: int = 600,
+        tilesets_ttl: int = 600,
+        snapshot_ttl: int = 3600,
+        registry_ttl: int = 3600,
+    ) -> None:
+        """Attach runtime dependencies. Pass `None` for `s3_client` when disabled.
+
+        Redis is optional: when `redis_client` is `None` (or `cache_enabled` is
+        `False`) the service resolves every read directly against S3.
+        """
         self._s3 = s3_client
         self._list_cache_ttl = list_cache_ttl
+        self._redis = redis_client
+        self._cache_enabled = cache_enabled and redis_client is not None
+        self._latest_ttl = latest_ttl
+        self._tilesets_ttl = tilesets_ttl
+        self._snapshot_ttl = snapshot_ttl
+        self._registry_ttl = registry_ttl
 
     # ------------------------------------------------------------------ /latest
 
     async def get_latest_snapshot(self) -> Optional[dict]:
         """Return the most recent snapshot (parsed JSON) or `None` if not yet scraped."""
-        s3 = self._require_s3()
-        body = await s3.download_tile(_LATEST_KEY)
-        if body is None:
-            return None
-        return _parse_json_or_none(body, _LATEST_KEY)
+        return await self._get_cached_object(
+            latest_key(), _LATEST_KEY, self._latest_ttl
+        )
+
+    # ----------------------------------------------------------------- /stations
+
+    async def get_stations_registry(self) -> Optional[dict]:
+        """Return the parsed station registry, or `None` if not yet populated."""
+        return await self._get_cached_object(
+            registry_key(), _REGISTRY_KEY, self._registry_ttl
+        )
 
     # ---------------------------------------------------------------- /tilesets
 
@@ -75,44 +121,27 @@ class WeatherStationsService:
         """
         Return the hour-bucketed list of available snapshots.
 
-        Walks the day prefixes covering the configured retention window and
-        groups snapshot keys into hour buckets (`YYYYMMDDTHH00Z`). For each
-        bucket, picks the most recent snapshot and returns its scraped_at +
-        station_count (the latter is taken from the cheap sibling `.meta.json`
-        when available, falling back to 0 if neither sibling nor body parse).
+        Redis-first; on a miss recompute from S3 (shared with the scraper's
+        write-through) and cache the assembled list. `scraped_at` is an ISO-8601
+        string so the route's `TilesetsResponse.model_validate` re-parses it.
         """
-        keys = await self._list_snapshot_keys_recent()
-        # Group by hour bucket; per bucket keep the latest snapshot key.
-        per_bucket: Dict[str, Tuple[datetime, str]] = {}
-        for key in keys:
-            if key.endswith(_SNAPSHOT_META_SUFFIX):
-                continue
-            ts = _parse_snapshot_key(key)
-            if ts is None:
-                continue
-            bucket = _tileset_id(ts)
-            existing = per_bucket.get(bucket)
-            if existing is None or ts > existing[0]:
-                per_bucket[bucket] = (ts, key)
+        cache_key = tilesets_key()
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            try:
+                entries = json.loads(cached)
+                if isinstance(entries, list):
+                    return entries
+            except json.JSONDecodeError:
+                pass  # corrupt cache → recompute
 
-        if not per_bucket:
-            return []
-
-        # Sort by scrape time first so we fetch the cheap meta GETs in the
-        # same order we'll emit them — otherwise zip pairs counts with the
-        # wrong tilesets.
-        items = sorted(per_bucket.items(), key=lambda kv: kv[1][0])
-        counts = await asyncio.gather(
-            *(self._read_station_count(key) for _, (_, key) in items)
+        entries = await compute_tilesets_entries(
+            self._require_s3(), list_keys=self._cached_list
         )
-        return [
-            {
-                "tileset_id": tileset_id,
-                "scraped_at": ts,
-                "station_count": count,
-            }
-            for (tileset_id, (ts, _key)), count in zip(items, counts)
-        ]
+        self._cache_set_bg(
+            cache_key, json.dumps(entries).encode("utf-8"), self._tilesets_ttl
+        )
+        return entries
 
     # -------------------------------------------------------- /{tilesetId}?N=...
 
@@ -123,23 +152,23 @@ class WeatherStationsService:
         Resolve a tilesetId + N-hour tolerance to a snapshot.
 
         Picks the latest snapshot whose scraped_at falls in
-        `[T - N*3600, T]` where T = tileset_id parsed as UTC. Returns the
-        parsed snapshot JSON, or `None` if no snapshot exists in the window.
-        Raises `TilesetIdFormatError` if `tileset_id` doesn't match the
-        `YYYYMMDDTHHMMZ` shape.
+        `[T - N*3600, T]` where T = tileset_id parsed as UTC. Resolves the
+        matching snapshot key via the (in-process cached) window LIST, then
+        serves its body from Redis (`cache:ws:snap:{key}`, N-independent) with an
+        S3 fallback + write-back. Raises `TilesetIdFormatError` on a malformed id.
         """
         if tolerance_hours < 0:
             raise ValueError("tolerance_hours must be >= 0")
-        target = _parse_tileset_id(tileset_id)
+        target = parse_tileset_id(tileset_id)
         window_start = target - timedelta(hours=tolerance_hours)
         keys = await self._list_snapshot_keys_for_window(window_start, target)
 
-        best_ts: Optional[datetime] = None
+        best_ts = None
         best_key: Optional[str] = None
         for key in keys:
-            if key.endswith(_SNAPSHOT_META_SUFFIX):
+            if key.endswith(SNAPSHOT_META_SUFFIX):
                 continue
-            ts = _parse_snapshot_key(key)
+            ts = parse_snapshot_key(key)
             if ts is None or ts < window_start or ts > target:
                 continue
             if best_ts is None or ts > best_ts:
@@ -149,23 +178,64 @@ class WeatherStationsService:
         if best_key is None:
             return None
 
-        s3 = self._require_s3()
-        body = await s3.download_tile(best_key)
+        # Body cache keyed by the resolved S3 object — shared across all tolerances
+        # (and pre-warmed by the scraper for the animation window).
+        cache_key = snap_body_key(best_key)
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            parsed = parse_json_or_none(cached, cache_key)
+            if parsed is not None:
+                return parsed
+
+        body = await self._require_s3().download_tile(best_key)
         if body is None:
             return None
-        return _parse_json_or_none(body, best_key)
-
-    # ----------------------------------------------------------------- /stations
-
-    async def get_stations_registry(self) -> Optional[dict]:
-        """Return the parsed station registry, or `None` if not yet populated."""
-        s3 = self._require_s3()
-        body = await s3.download_tile(_REGISTRY_KEY)
-        if body is None:
-            return None
-        return _parse_json_or_none(body, _REGISTRY_KEY)
+        self._cache_set_bg(cache_key, body, self._snapshot_ttl)
+        return parse_json_or_none(body, best_key)
 
     # --------------------------------------------------------------- internals
+
+    async def _get_cached_object(
+        self, cache_key: str, s3_key: str, ttl: int
+    ) -> Optional[dict]:
+        """Redis-first read of a single JSON object, with S3 fallback + write-back."""
+        cached = await self._cache_get(cache_key)
+        if cached is not None:
+            parsed = parse_json_or_none(cached, cache_key)
+            if parsed is not None:
+                return parsed
+
+        body = await self._require_s3().download_tile(s3_key)
+        if body is None:
+            return None
+        self._cache_set_bg(cache_key, body, ttl)
+        return parse_json_or_none(body, s3_key)
+
+    async def _cache_get(self, cache_key: str) -> Optional[bytes]:
+        """Read a cached value, treating any Redis error as a miss."""
+        if not self._cache_enabled or self._redis is None:
+            return None
+        try:
+            return await self._redis.get_cached_listing(cache_key)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Redis read failed for %s: %s (falling back to S3)", cache_key, exc
+            )
+            return None
+
+    def _cache_set_bg(self, cache_key: str, data: bytes, ttl: int) -> None:
+        """Fire-and-forget write-back; never blocks or fails the read path."""
+        if not self._cache_enabled or self._redis is None:
+            return
+        asyncio.create_task(self._cache_set(cache_key, data, ttl))
+
+    async def _cache_set(self, cache_key: str, data: bytes, ttl: int) -> None:
+        if self._redis is None:
+            return
+        try:
+            await self._redis.cache_listing(cache_key, data, ttl)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.warning("Redis write failed for %s: %s", cache_key, exc)
 
     def _require_s3(self) -> S3Client:
         if self._s3 is None:
@@ -174,27 +244,9 @@ class WeatherStationsService:
             )
         return self._s3
 
-    async def _read_station_count(self, snapshot_key: str) -> int:
-        meta_key = snapshot_key[: -len(".json")] + _SNAPSHOT_META_SUFFIX
-        s3 = self._require_s3()
-        body = await s3.download_tile(meta_key)
-        if body is None:
-            return 0
-        meta = _parse_json_or_none(body, meta_key)
-        if not isinstance(meta, dict):
-            return 0
-        count = meta.get("station_count")
-        return int(count) if isinstance(count, int) else 0
-
-    async def _list_snapshot_keys_recent(self) -> List[str]:
-        """LIST every snapshot key under the snapshots prefix (cached)."""
-        return await self._cached_list(_SNAPSHOTS_PREFIX)
-
-    async def _list_snapshot_keys_for_window(
-        self, window_start: datetime, target: datetime
-    ) -> List[str]:
+    async def _list_snapshot_keys_for_window(self, window_start, target) -> List[str]:
         """LIST every snapshot key covering the day prefixes the window touches."""
-        prefixes = _day_prefixes_covering(window_start, target)
+        prefixes = day_prefixes_covering(window_start, target)
         # Run per-day LISTs in parallel; concat the results.
         per_day = await asyncio.gather(*(self._cached_list(p) for p in prefixes))
         merged: List[str] = []
@@ -219,66 +271,6 @@ class WeatherStationsService:
                 keys,
             )
             return keys
-
-
-def _parse_snapshot_key(key: str) -> Optional[datetime]:
-    """Parse `YYYYMMDDTHHMMSSZ` out of a snapshot key into a UTC datetime."""
-    match = _SNAPSHOT_KEY_RE.match(key)
-    if not match:
-        return None
-    year, month, day, hour, minute, second = (int(p) for p in match.groups())
-    try:
-        return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
-def _parse_tileset_id(tileset_id: str) -> datetime:
-    match = _TILESET_RE.match(tileset_id)
-    if not match:
-        raise TilesetIdFormatError(
-            f"Invalid tilesetId {tileset_id!r}; expected YYYYMMDDTHHMMZ "
-            "(e.g. 20260517T1400Z)"
-        )
-    year, month, day, hour, minute = (int(p) for p in match.groups())
-    try:
-        return datetime(year, month, day, hour, minute, 0, tzinfo=timezone.utc)
-    except ValueError as exc:
-        raise TilesetIdFormatError(
-            f"Invalid tilesetId {tileset_id!r}: {exc}"
-        ) from exc
-
-
-def _tileset_id(ts: datetime) -> str:
-    """Round a snapshot timestamp down to its hour-bucket tilesetId."""
-    return ts.strftime("%Y%m%dT%H00Z")
-
-
-def _day_prefixes_covering(start: datetime, end: datetime) -> List[str]:
-    """Return `weather-stations/snapshots/YYYY/MM/DD/` prefixes covering [start, end]."""
-    if end < start:
-        start, end = end, start
-    prefixes: List[str] = []
-    day = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
-    end_day = datetime(end.year, end.month, end.day, tzinfo=timezone.utc)
-    while day <= end_day:
-        prefixes.append(
-            f"{_SNAPSHOTS_PREFIX}{day.strftime('%Y/%m/%d')}/"
-        )
-        day = day + timedelta(days=1)
-    return prefixes
-
-
-def _parse_json_or_none(body: bytes, key: str) -> Optional[dict]:
-    try:
-        parsed = json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        logger.warning("Could not parse S3 object %s: %s", key, exc)
-        return None
-    if not isinstance(parsed, dict):
-        logger.warning("S3 object %s is not a JSON object", key)
-        return None
-    return parsed
 
 
 # Module-level singleton (configured via `configure(...)` in the lifespan).
