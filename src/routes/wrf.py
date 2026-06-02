@@ -12,6 +12,7 @@ from dependencies import logger, settings
 from models.wrf import (
     WrfInitRunListResponse,
     WrfPointValueResponse,
+    WrfSecondaryPointValueResponse,
     WrfStepListResponse,
 )
 from routes.utils import create_tile_response, make_transparent_tile_response
@@ -124,6 +125,46 @@ async def get_point_value(
         product_id=product_id,
         init_tag=init_tag,
         fxxx=fxxx,
+        lat=lat,
+        lon=lon,
+        value=sample.value,
+        unit=sample.unit,
+    )
+
+
+@router.get(
+    "/{product_id}/{init_tag}/{fxxx}/secondary/{variable}/point",
+    status_code=status.HTTP_200_OK,
+    summary="Get WRF Secondary Variable Point Value",
+    response_model=WrfSecondaryPointValueResponse,
+)
+async def get_secondary_point_value(
+    product_id: str = PathParam(..., description="WRF product ID"),
+    init_tag: str = PathParam(..., description="Initialization timestamp"),
+    fxxx: str = PathParam(..., description="Forecast step (e.g. F001)"),
+    variable: str = PathParam(..., description="Secondary variable (e.g. wind, slp)"),
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
+):
+    """Sample nearest value from a WRF secondary-variable COG at a lat/lon point."""
+    try:
+        sample = await point_value_service.sample_wrf_secondary_point(
+            product_id, init_tag, fxxx, variable, lat, lon
+        )
+    except CogNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="cog_not_found"
+        ) from exc
+    except NoDataOrOutsideError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="nodata_or_outside"
+        ) from exc
+
+    return WrfSecondaryPointValueResponse(
+        product_id=product_id,
+        init_tag=init_tag,
+        fxxx=fxxx,
+        variable=variable,
         lat=lat,
         lon=lon,
         value=sample.value,

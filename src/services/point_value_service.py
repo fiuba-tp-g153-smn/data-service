@@ -69,6 +69,17 @@ class PointValueService(BaseProductService):
         "Granizo": "",
     }
 
+    # Units for WRF secondary point-query variables (keyed by variable name,
+    # matching the secondary COG suffix produced by tiles-processor).
+    WRF_SECONDARY_UNITS = {
+        "wind": "kt",
+        "slp": "hPa",
+        "shear_850_500": "kt",
+        "shear_850_700": "kt",
+        "brn": "",
+        "haildiammax": "mm",
+    }
+
     def set_strategy(self, strategy: PointValueStrategy) -> None:
         """Set point-value strategy (called during app startup)."""
         self._strategy = strategy
@@ -126,6 +137,22 @@ class PointValueService(BaseProductService):
         """Sample a WRF primary-field COG at a specific coordinate."""
         cog_key = f"cog/wrf/{product_id}/{init_tag}/{fxxx}.tif"
         unit = self.WRF_PRODUCT_UNITS.get(product_id, "")
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit=unit)
+
+    async def sample_wrf_secondary_point(
+        self,
+        product_id: str,
+        init_tag: str,
+        fxxx: str,
+        variable: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Sample a WRF secondary-variable COG (wind / contour) at a point."""
+        cog_key = f"cog/wrf/{product_id}/{init_tag}/{fxxx}.{variable}.tif"
+        unit = self.WRF_SECONDARY_UNITS.get(variable, "")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
 

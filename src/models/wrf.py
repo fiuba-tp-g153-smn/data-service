@@ -52,3 +52,16 @@ class WrfPointValueResponse(BaseModel):
     lon: float
     value: float
     unit: str
+
+
+class WrfSecondaryPointValueResponse(BaseModel):
+    """Response for a point-value query on a WRF secondary-variable COG."""
+
+    product_id: str
+    init_tag: str
+    fxxx: str
+    variable: str
+    lat: float
+    lon: float
+    value: float
+    unit: str
