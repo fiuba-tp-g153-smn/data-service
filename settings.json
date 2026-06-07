@@ -3,6 +3,7 @@
   "tile_ttl": 21600,
   "tileset_listing_ttl": 30,
   "sync_interval_seconds": 60,
+  "sync_min_sleep_seconds": 20,
   "s3_max_concurrent_downloads": 5,
   "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
   "cache_control_tile": "public, max-age=43200, immutable",
@@ -18,7 +19,8 @@
   },
   "wrf": {
     "tile_ttl": 2592000,
-    "geojson_ttl": 2592000
+    "geojson_ttl": 2592000,
+    "inits_to_keep": 3
   },
   "basemap": {
     "sync_mode": "no_cache",

@@ -463,6 +463,23 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
         return [m.decode() for m in members]
 
+    async def prune_wrf_inits(self, product_id: str, keep: List[str]) -> int:
+        """Remove init_tag members of the WRF index not present in `keep`.
+
+        idx:wrf:{product}:init_runs is a sorted set whose whole-key TTL is
+        refreshed on every new step, so old inits never expire on their own.
+        Reconcile it to the actively-synced inits; the per-init sub-keys
+        (:steps, :layers, :overlays_done) self-expire once no longer re-synced.
+        Returns the number of inits removed.
+        """
+        key = f"idx:wrf:{product_id}:init_runs"
+        keepset = {k.encode() for k in keep}
+        members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
+        stale = [m for m in members if m not in keepset]
+        if stale:
+            await self._conn.zrem(key, *stale)  # type: ignore[misc]
+        return len(stale)
+
     # ============== WRF GeoJSON / Layer Operations ==============
 
     async def store_wrf_geojson(
@@ -515,6 +532,25 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    @staticmethod
+    def _wrf_overlays_done_key(product_id: str, init_tag: str, fxxx: str) -> str:
+        return f"idx:wrf:{product_id}:{init_tag}:{fxxx}:overlays_done"
+
+    async def set_wrf_overlays_complete(
+        self, product_id: str, init_tag: str, fxxx: str, ttl: int
+    ) -> None:
+        """Mark a step's GeoJSON overlays as fully mirrored, so later cycles
+        skip the per-step S3 layer LIST. Self-expires with the overlay TTL."""
+        key = self._wrf_overlays_done_key(product_id, init_tag, fxxx)
+        await self._conn.set(key, b"1", ex=ttl)
+
+    async def is_wrf_overlays_complete(
+        self, product_id: str, init_tag: str, fxxx: str
+    ) -> bool:
+        """True if a step's overlays were already fully mirrored to Redis."""
+        key = self._wrf_overlays_done_key(product_id, init_tag, fxxx)
+        return bool(await self._conn.exists(key))
 
     async def prune_ecmwf_mslp_forecasts(self, keep: List[str]) -> int:
         """Reconcile the ECMWF-MSLP forecasts index to the active forecasts."""

@@ -64,6 +64,7 @@ class SyncService(BaseSyncService):
             settings=resolved_settings,
             sync_interval=resolved_settings.sync_interval_seconds,
             service_name="Sync service",
+            min_sleep=resolved_settings.sync_min_sleep_seconds,
         )
         self._client: Optional[S3Client] = None
         self._redis_client: Optional[RedisClient] = None
@@ -132,7 +133,9 @@ class SyncService(BaseSyncService):
         ecmwf_mslp_downloaded, ecmwf_mslp_errors = await self._sync_ecmwf_mslp()
         wrf_downloaded, wrf_errors = await self._sync_wrf()
 
-        errors = sat_errors + radar_errors + ecmwf_tp_errors + ecmwf_mslp_errors + wrf_errors
+        errors = (
+            sat_errors + radar_errors + ecmwf_tp_errors + ecmwf_mslp_errors + wrf_errors
+        )
         total_downloaded = (
             sat_downloaded
             + radar_downloaded
@@ -571,6 +574,17 @@ class SyncService(BaseSyncService):
 
         return total_downloaded, errors
 
+    def _select_active_inits(self, init_tag_prefixes: List[str]) -> List[tuple]:
+        """Pick the newest N init runs (newest-first) to sync this cycle.
+
+        init_tag is ``YYYYMMDD_HHmmss`` (fixed-width) so lexicographic order
+        equals chronological order. Bounds the per-cycle WRF walk as runs
+        accumulate in S3. Returns ``[(init_tag, prefix), ...]``.
+        """
+        pairs = [(p.rstrip("/").split("/")[-1], p) for p in init_tag_prefixes]
+        pairs.sort(key=lambda it: it[0], reverse=True)
+        return pairs[: self._settings.wrf_inits_to_keep]
+
     async def _sync_wrf(self) -> tuple:
         """Sync WRF tilesets from S3 to Redis. Returns (downloaded, errors)."""
         if self._client is None or self._redis_client is None:
@@ -590,10 +604,9 @@ class SyncService(BaseSyncService):
                 init_tag_prefixes = await self._client.get_subdirectories(
                     product_prefix
                 )
+                active_inits = self._select_active_inits(init_tag_prefixes)
 
-                for init_tag_prefix in init_tag_prefixes:
-                    init_tag = init_tag_prefix.rstrip("/").split("/")[-1]
-
+                for init_tag, init_tag_prefix in active_inits:
                     fxxx_prefixes = await self._client.get_subdirectories(
                         init_tag_prefix
                     )
@@ -645,6 +658,17 @@ class SyncService(BaseSyncService):
                         # date), so this is safe to call on every cycle.
                         await self._sync_wrf_overlays(product_id, init_tag, fxxx)
 
+                # Reconcile the per-product init index to the active set so it
+                # can't accumulate stale init runs over time. The init_runs
+                # sorted set has its whole-key TTL refreshed on every new step,
+                # so old members never expire on their own. Skip when the listing
+                # is empty so a transient S3 error (get_subdirectories returns []
+                # on failure) can't wipe the index — mirrors the ECMWF guard.
+                if active_inits:
+                    await self._redis_client.prune_wrf_inits(
+                        product_id, [it for it, _ in active_inits]
+                    )
+
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("WRF sync error: %s", e)
             errors += 1
@@ -662,20 +686,32 @@ class SyncService(BaseSyncService):
         """
         if self._client is None or self._redis_client is None:
             return
+        # Skip the per-step S3 layer LIST entirely once a previous cycle
+        # confirmed Redis mirrors every overlay for this step. The marker
+        # self-expires with the overlay TTL, so steps are eventually rechecked.
+        if await self._redis_client.is_wrf_overlays_complete(
+            product_id, init_tag, fxxx
+        ):
+            return
         try:
             s3_layers = await self._client.list_wrf_layers(product_id, init_tag, fxxx)
             if not s3_layers:
                 return
 
             # Idempotency guard: skip the per-layer S3 GET when Redis already
-            # mirrors every layer reported by S3. Without this, every sync
-            # cycle would re-download GeoJSONs that were already cached and
-            # only refresh their TTL — wasteful at ~10 products × N steps.
+            # mirrors every layer reported by S3, and latch the completion
+            # marker so later cycles skip the S3 LIST above too.
             redis_layers = set(
                 await self._redis_client.get_wrf_layers(product_id, init_tag, fxxx)
             )
             missing_layers = [l for l in s3_layers if l not in redis_layers]
             if not missing_layers:
+                await self._redis_client.set_wrf_overlays_complete(
+                    product_id,
+                    init_tag,
+                    fxxx,
+                    ttl=self._settings.wrf_geojson_ttl,
+                )
                 return
 
             await self._redis_client.add_wrf_layers(

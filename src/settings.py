@@ -74,6 +74,9 @@ class Settings:
     radar_tile_ttl: int
     tileset_listing_ttl: int
     sync_interval_seconds: int
+    # Floor on the inter-cycle sleep so the loop always yields, even when a
+    # cycle overruns sync_interval_seconds (otherwise it busy-loops at 0 sleep).
+    sync_min_sleep_seconds: int
     cache_control_config: str
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
@@ -89,6 +92,9 @@ class Settings:
     # WRF model (loaded from settings.json, env overrides)
     wrf_tile_ttl: int = 86400
     wrf_geojson_ttl: int = 86400
+    # Cap the WRF init runs walked per product each cycle (newest-first), so the
+    # sync scan stays bounded as runs accumulate in S3. Mirrors ecmwf_forecasts_to_keep.
+    wrf_inits_to_keep: int = 2
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -226,7 +232,14 @@ class Settings:
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
-    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar", "weather_stations", "wrf")
+    _JSON_NAMESPACES = (
+        "basemap",
+        "ecmwf",
+        "ecmwf_mslp",
+        "radar",
+        "weather_stations",
+        "wrf",
+    )
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -258,6 +271,7 @@ class Settings:
             "radar_tile_ttl",
             "tileset_listing_ttl",
             "sync_interval_seconds",
+            "sync_min_sleep_seconds",
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
@@ -266,6 +280,7 @@ class Settings:
             "ecmwf_mslp_geojson_ttl",
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
+            "wrf_inits_to_keep",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -396,6 +411,9 @@ class Settings:
         self.sync_interval_seconds = self._env_int(
             "SYNC_INTERVAL_SECONDS", self.sync_interval_seconds
         )
+        self.sync_min_sleep_seconds = self._env_int(
+            "SYNC_MIN_SLEEP_SECONDS", self.sync_min_sleep_seconds
+        )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
@@ -419,8 +437,9 @@ class Settings:
             "ECMWF_MSLP_GEOJSON_TTL", self.ecmwf_mslp_geojson_ttl
         )
         self.wrf_tile_ttl = self._env_int("WRF_TILE_TTL", self.wrf_tile_ttl)
-        self.wrf_geojson_ttl = self._env_int(
-            "WRF_GEOJSON_TTL", self.wrf_geojson_ttl
+        self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
+        self.wrf_inits_to_keep = self._env_int(
+            "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
         )
 
         # Basemap
