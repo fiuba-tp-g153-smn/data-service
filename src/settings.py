@@ -229,6 +229,23 @@ class Settings:
     # would be unreachable and no keys could ever be issued).
     weather_stations_api_key_auth_enabled: bool = True
 
+    # --- Metrics / observability dashboard (loaded from settings.json, env overrides) ---
+    # Backs the data-service status dashboard: per-domain sync-cycle history and
+    # periodic Redis memory-by-domain snapshots, persisted in SQLite (cold,
+    # survives restarts) alongside the basemap scraper state.
+    metrics_enabled: bool = True
+    metrics_db_path: str = "data/metrics.sqlite"
+    metrics_retention_days: int = 14
+    # File lock so only one uvicorn worker runs the Redis memory collector.
+    metrics_lock_path: str = "/tmp/redis_metrics.lock"
+    # Redis memory collector cadence. Each cycle SCANs the whole keyspace and runs
+    # MEMORY USAGE per key (pipelined) — accurate but O(N keys), so the default
+    # interval is generous. scan_count bounds the SCAN batch; memory_batch_size
+    # bounds the MEMORY USAGE pipeline depth.
+    redis_metrics_sample_interval_seconds: int = 900
+    redis_metrics_scan_count: int = 1000
+    redis_metrics_memory_batch_size: int = 500
+
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
@@ -335,6 +352,13 @@ class Settings:
             "weather_stations_series_hours",
             "weather_stations_api_key_auth_enabled",
             "weather_stations_keystore_db_path",
+            "metrics_enabled",
+            "metrics_db_path",
+            "metrics_retention_days",
+            "metrics_lock_path",
+            "redis_metrics_sample_interval_seconds",
+            "redis_metrics_scan_count",
+            "redis_metrics_memory_batch_size",
         }
 
         for key in json_keys:
@@ -655,6 +679,24 @@ class Settings:
         )
         self.s3_api_keys_bucket_name = os.getenv(
             "S3_API_KEYS_BUCKET_NAME", self.s3_api_keys_bucket_name
+        )
+
+        # Metrics / observability dashboard
+        self.metrics_enabled = self._env_bool("METRICS_ENABLED", self.metrics_enabled)
+        self.metrics_db_path = os.getenv("METRICS_DB_PATH", self.metrics_db_path)
+        self.metrics_retention_days = self._env_int(
+            "METRICS_RETENTION_DAYS", self.metrics_retention_days
+        )
+        self.metrics_lock_path = os.getenv("METRICS_LOCK_PATH", self.metrics_lock_path)
+        self.redis_metrics_sample_interval_seconds = self._env_int(
+            "REDIS_METRICS_SAMPLE_INTERVAL_SECONDS",
+            self.redis_metrics_sample_interval_seconds,
+        )
+        self.redis_metrics_scan_count = self._env_int(
+            "REDIS_METRICS_SCAN_COUNT", self.redis_metrics_scan_count
+        )
+        self.redis_metrics_memory_batch_size = self._env_int(
+            "REDIS_METRICS_MEMORY_BATCH_SIZE", self.redis_metrics_memory_batch_size
         )
 
     def _validate(self) -> None:

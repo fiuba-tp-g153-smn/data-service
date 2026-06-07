@@ -7,7 +7,7 @@ and provides a shared cache for radar tiles.
 """
 
 import logging
-from typing import Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
@@ -654,3 +654,37 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Get all sync status fields."""
         raw = await self._conn.hgetall("sync:status")  # type: ignore[misc]
         return {k.decode(): v.decode() for k, v in raw.items()}
+
+    # ============== Introspection / Metrics Operations ==============
+
+    async def scan_keys(
+        self, match: Optional[str] = None, count: int = 1000
+    ) -> AsyncIterator[bytes]:
+        """Yield every key (raw bytes) matching `match`, scanning in batches.
+
+        Cursor-based and non-blocking — safe to run against a live keyspace.
+        """
+        async for key in self._conn.scan_iter(match=match, count=count):
+            yield key
+
+    async def memory_usage_batch(self, keys: List[bytes]) -> List[Optional[int]]:
+        """Return `MEMORY USAGE` (bytes) for each key, pipelined in one round-trip.
+
+        An entry is `None` when the key vanished between SCAN and this call.
+        """
+        if not keys:
+            return []
+        pipe = self._conn.pipeline(transaction=False)
+        for key in keys:
+            pipe.memory_usage(key)
+        return await pipe.execute()
+
+    async def info(self, section: Optional[str] = None) -> Dict[str, Any]:
+        """Return parsed Redis `INFO` (optionally a single section)."""
+        if section:
+            return await self._conn.info(section)  # type: ignore[misc]
+        return await self._conn.info()  # type: ignore[misc]
+
+    async def dbsize(self) -> int:
+        """Return the number of keys in the current database."""
+        return await self._conn.dbsize()  # type: ignore[misc]

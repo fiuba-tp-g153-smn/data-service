@@ -20,6 +20,7 @@ from controller import general
 from dependencies import (
     basemap_service,
     logger,
+    metrics_store,
     redis_client,
     set_weather_stations_keystore,
     settings,
@@ -58,6 +59,7 @@ from services.radar_sync_strategy import (
     RadarOnDemandStrategy,
     RadarSyncStrategy,
 )
+from services.redis_metrics_service import RedisMetricsService
 from services.satellite_service import satellite_service
 from services.satellite_sync_strategy import (
     SatelliteFullSyncStrategy,
@@ -68,7 +70,11 @@ from services.sync_service import sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from services.weather_stations_service import weather_stations_service
 from services.wrf_service import wrf_service
-from services.wrf_sync_strategy import WrfFullSyncStrategy, WrfOnDemandStrategy, WrfSyncStrategy
+from services.wrf_sync_strategy import (
+    WrfFullSyncStrategy,
+    WrfOnDemandStrategy,
+    WrfSyncStrategy,
+)
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -538,6 +544,7 @@ async def lifespan(_app: FastAPI):
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
     await redis_client.connect()
+    await metrics_store.connect()
 
     # S3 is a hard dependency. Block here until it answers (unlimited retry with
     # capped backoff) instead of crashing — so dev (`--reload`, whose reloader
@@ -566,16 +573,28 @@ async def lifespan(_app: FastAPI):
     basemap_runtime = await configure_basemap(redis_client)
     weather_stations_runtime = await configure_weather_stations()
 
+    redis_metrics_service: Optional[RedisMetricsService] = None
+    if settings.metrics_enabled:
+        redis_metrics_service = RedisMetricsService(
+            settings=settings,
+            redis_client=redis_client,
+            metrics_store=metrics_store,
+        )
+        await redis_metrics_service.start(logger)
+
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
+    if redis_metrics_service is not None:
+        await redis_metrics_service.stop(logger)
     await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
     if s3_client:
         await s3_client.close()
+    await metrics_store.close()
     await redis_client.close()
 
 

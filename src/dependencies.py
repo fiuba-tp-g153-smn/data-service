@@ -3,6 +3,7 @@
 from logging import Logger
 from typing import Optional
 
+from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
 from initializers import init_logger
@@ -16,6 +17,7 @@ from settings import Settings
 settings: Settings = Settings.get_settings()
 logger: Logger = init_logger(settings)
 redis_client: RedisClient = RedisClient(settings.redis_url)
+metrics_store: MetricsStore = MetricsStore(settings.metrics_db_path)
 basemap_service: BasemapService = BasemapService()
 # Populated in the lifespan via `set_weather_stations_keystore`. Routes hold a
 # Depends() reference, so we can't construct the keystore until the SQLite file
@@ -26,6 +28,11 @@ _weather_stations_keystore: Optional[WeatherStationsKeystore] = None
 def get_redis_client() -> RedisClient:
     """FastAPI dependency provider for RedisClient."""
     return redis_client
+
+
+def get_metrics_store() -> MetricsStore:
+    """FastAPI dependency provider for MetricsStore."""
+    return metrics_store
 
 
 def get_basemap_service() -> BasemapService:
