@@ -35,10 +35,15 @@ class BaseSyncService:
         settings: Settings,
         sync_interval: int,
         service_name: str,
+        min_sleep: int = 0,
     ):
         self._settings = settings
         self._sync_interval = sync_interval
         self._service_name = service_name
+        # Floor on the inter-cycle sleep. Defaults to 0 so subclasses that
+        # supply their own pacing (e.g. the basemap scraper's _compute_next_sleep
+        # 60s floor) are unaffected unless they opt in.
+        self._min_sleep = min_sleep
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._lock_file_handle: Optional[IO[str]] = None
@@ -131,8 +136,20 @@ class BaseSyncService:
 
             if self._running:
                 elapsed = time.monotonic() - cycle_start
+                if elapsed > self._sync_interval:
+                    logger.warning(
+                        "%s cycle overran interval: %.1fs > %ss "
+                        "(flooring next sleep to %ss)",
+                        self._service_name,
+                        elapsed,
+                        self._sync_interval,
+                        self._min_sleep,
+                    )
                 default_sleep = max(0, self._sync_interval - elapsed)
                 sleep_time = await self._compute_next_sleep(default_sleep)
+                # Always yield at least _min_sleep so an overrunning cycle can't
+                # busy-loop the event loop at 0s sleep.
+                sleep_time = max(self._min_sleep, sleep_time)
                 await asyncio.sleep(sleep_time)
 
     async def _run_sync(self) -> None:

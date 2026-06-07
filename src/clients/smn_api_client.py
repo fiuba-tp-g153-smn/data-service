@@ -1,6 +1,7 @@
 """HTTP client for the SMN weather API with JWT token cache + refresh-on-401."""
 
 import asyncio
+import json
 import logging
 import time
 from typing import Any, List, Optional
@@ -8,6 +9,35 @@ from typing import Any, List, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+_REDACTED = "<redacted>"
+# Header names (lower-cased) and JSON body keys whose values must never reach
+# the logs when SMN request logging is enabled.
+_SENSITIVE_HEADERS = {"authorization"}
+_SENSITIVE_BODY_KEYS = {"username", "password", "token"}
+
+
+def _redact_headers(headers: httpx.Headers) -> dict:
+    """Return a plain dict of request headers with sensitive values masked."""
+    return {
+        key: (_REDACTED if key.lower() in _SENSITIVE_HEADERS else value)
+        for key, value in headers.items()
+    }
+
+
+def _redact_body(body: str) -> str:
+    """Mask sensitive keys in a JSON object body; pass anything else through."""
+    try:
+        parsed = json.loads(body)
+    except (ValueError, TypeError):
+        return body
+    if not isinstance(parsed, dict):
+        return body
+    masked = {
+        key: (_REDACTED if key.lower() in _SENSITIVE_BODY_KEYS else value)
+        for key, value in parsed.items()
+    }
+    return json.dumps(masked)
 
 
 class SmnApiError(Exception):
@@ -36,7 +66,6 @@ class SmnApiClient:
         max_retries: int,
         token_cache_ttl_seconds: int,
         token_settling_delay_seconds: float = 0.0,
-        user_agent: str = "curl/8.10.1",
         log_requests: bool = False,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -54,23 +83,20 @@ class SmnApiClient:
         # httpx treats the redirect as a final response and the request fails
         # with a non-2xx status.
         #
-        # Client-level headers mimic what `curl --silent` sends so any
-        # WAF/bot fingerprinting on User-Agent treats us like a real client.
-        # Per-request `headers=...` calls (e.g. `Accept: application/json` on
-        # /weather/station) merge with these and override only the keys they
-        # specify, so the UA is always preserved.
+        # Only `Accept` is set at the client level; the User-Agent is left as
+        # httpx's default. Per-request `headers=...` (e.g. `Accept:
+        # application/json` on /weather/station) merge with and override these.
         event_hooks: dict[str, list] = {}
         if log_requests:
             event_hooks["request"] = [self._log_outbound_request]
             logger.warning(
-                "SMN request logging is ON — full URL, headers (including "
-                "JWT), and request bodies (including auth POST with "
-                "username/password) will be written to logs. Disable in prod."
+                "SMN request logging is ON — outbound URL, headers and request "
+                "bodies will be written to logs (credentials redacted)."
             )
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             follow_redirects=True,
-            headers={"User-Agent": user_agent, "Accept": "*/*"},
+            headers={"Accept": "*/*"},
             event_hooks=event_hooks,
         )
         self._token: Optional[str] = None
@@ -85,23 +111,24 @@ class SmnApiClient:
 
     @staticmethod
     async def _log_outbound_request(request: httpx.Request) -> None:
-        """httpx event hook: dump the fully-prepared outgoing request.
+        """httpx event hook: dump the outgoing request with secrets redacted.
 
-        Intentionally NOT redacted — operators enable this exactly when they
-        need to compare what we're putting on the wire against a known-good
-        `curl` invocation. The startup banner warns about the sensitivity.
+        Enabled via SMN_API_LOG_REQUESTS so operators can compare what we put
+        on the wire against a known-good `curl` invocation. The Authorization
+        header and credential body fields are masked, so turning this on never
+        writes the JWT, username or password to the logs.
         """
         body = ""
         if request.content:
             try:
-                body = request.content.decode("utf-8")
+                body = _redact_body(request.content.decode("utf-8"))
             except UnicodeDecodeError:
                 body = f"<{len(request.content)} bytes, non-utf-8>"
         logger.info(
             "SMN outbound | %s %s\n  headers=%s\n  body=%s",
             request.method,
             request.url,
-            dict(request.headers),
+            _redact_headers(request.headers),
             body or "<empty>",
         )
 
@@ -199,7 +226,10 @@ class SmnApiClient:
 
     async def _get_token(self) -> str:
         """Return a cached token if still fresh, else mint a new one."""
-        if self._token and (time.monotonic() - self._token_minted_at) < self._token_cache_ttl:
+        if (
+            self._token
+            and (time.monotonic() - self._token_minted_at) < self._token_cache_ttl
+        ):
             return self._token
         return await self._refresh_token()
 

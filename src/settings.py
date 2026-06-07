@@ -44,10 +44,6 @@ class Settings:
     # Default 0.0 keeps the original behavior; set to e.g. 1.0 if SMN rejects
     # the freshly-minted JWT due to propagation lag in its validation tier.
     smn_api_token_settling_delay_seconds: float = 0.0
-    # Override the httpx default UA (`python-httpx/X.Y`) with a curl-like
-    # string so SMN's WAF/bot heuristics don't flag us. Configurable in case
-    # SMN ever WAFs on a specific curl version.
-    smn_api_user_agent: str = "curl/8.10.1"
     # Diagnostic: when True, every outbound SMN request is logged in full
     # (URL, every header including JWT, body including auth credentials).
     # Use only for short debugging sessions; never leave on in production.
@@ -74,6 +70,9 @@ class Settings:
     radar_tile_ttl: int
     tileset_listing_ttl: int
     sync_interval_seconds: int
+    # Floor on the inter-cycle sleep so the loop always yields, even when a
+    # cycle overruns sync_interval_seconds (otherwise it busy-loops at 0 sleep).
+    sync_min_sleep_seconds: int
     cache_control_config: str
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
@@ -89,6 +88,9 @@ class Settings:
     # WRF model (loaded from settings.json, env overrides)
     wrf_tile_ttl: int = 86400
     wrf_geojson_ttl: int = 86400
+    # Cap the WRF init runs walked per product each cycle (newest-first), so the
+    # sync scan stays bounded as runs accumulate in S3. Mirrors ecmwf_forecasts_to_keep.
+    wrf_inits_to_keep: int = 2
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -97,6 +99,10 @@ class Settings:
     basemap_scrape_interval_seconds: int = 604800
     basemap_scrape_concurrent: int = 20
     basemap_scrape_delay_ms: int = 30
+    # Max scrape tasks created at once per zoom (chunked fan-out). Bounds the
+    # event-loop/memory pressure of a zoom with tens of thousands of tiles; the
+    # HTTP semaphore still caps actual in-flight requests at scrape_concurrent.
+    basemap_scrape_fanout_window: int = 500
     basemap_cache_max_zoom: int = 11
     basemap_cache_concurrent: int = 10
     basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
@@ -226,7 +232,14 @@ class Settings:
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
-    _JSON_NAMESPACES = ("basemap", "ecmwf", "ecmwf_mslp", "radar", "weather_stations", "wrf")
+    _JSON_NAMESPACES = (
+        "basemap",
+        "ecmwf",
+        "ecmwf_mslp",
+        "radar",
+        "weather_stations",
+        "wrf",
+    )
 
     def __init__(self):
         settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
@@ -258,6 +271,7 @@ class Settings:
             "radar_tile_ttl",
             "tileset_listing_ttl",
             "sync_interval_seconds",
+            "sync_min_sleep_seconds",
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
@@ -266,10 +280,12 @@ class Settings:
             "ecmwf_mslp_geojson_ttl",
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
+            "wrf_inits_to_keep",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
             "basemap_scrape_delay_ms",
+            "basemap_scrape_fanout_window",
             "basemap_cache_max_zoom",
             "basemap_cache_concurrent",
             "basemap_providers",
@@ -396,6 +412,9 @@ class Settings:
         self.sync_interval_seconds = self._env_int(
             "SYNC_INTERVAL_SECONDS", self.sync_interval_seconds
         )
+        self.sync_min_sleep_seconds = self._env_int(
+            "SYNC_MIN_SLEEP_SECONDS", self.sync_min_sleep_seconds
+        )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
@@ -419,8 +438,9 @@ class Settings:
             "ECMWF_MSLP_GEOJSON_TTL", self.ecmwf_mslp_geojson_ttl
         )
         self.wrf_tile_ttl = self._env_int("WRF_TILE_TTL", self.wrf_tile_ttl)
-        self.wrf_geojson_ttl = self._env_int(
-            "WRF_GEOJSON_TTL", self.wrf_geojson_ttl
+        self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
+        self.wrf_inits_to_keep = self._env_int(
+            "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
         )
 
         # Basemap
@@ -433,6 +453,9 @@ class Settings:
         )
         self.basemap_scrape_concurrent = self._env_int(
             "BASEMAP_SCRAPE_CONCURRENT", self.basemap_scrape_concurrent
+        )
+        self.basemap_scrape_fanout_window = self._env_int(
+            "BASEMAP_SCRAPE_FANOUT_WINDOW", self.basemap_scrape_fanout_window
         )
         self.basemap_scrape_delay_ms = self._env_int(
             "BASEMAP_SCRAPE_DELAY_MS", self.basemap_scrape_delay_ms
@@ -532,9 +555,6 @@ class Settings:
         self.smn_api_token_settling_delay_seconds = self._env_float(
             "SMN_API_TOKEN_SETTLING_DELAY_SECONDS",
             self.smn_api_token_settling_delay_seconds,
-        )
-        self.smn_api_user_agent = os.getenv(
-            "SMN_API_USER_AGENT", self.smn_api_user_agent
         )
         self.smn_api_log_requests = self._env_bool(
             "SMN_API_LOG_REQUESTS", self.smn_api_log_requests

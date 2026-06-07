@@ -69,6 +69,29 @@ class _ProviderSweepState:
     storage_errors: int = 0
 
 
+@dataclass
+class _SweepProgress:
+    """Mutable accumulators threaded across the chunked fan-out of one zoom.
+
+    Carried by reference through `_sweep_chunk` / `_handle_completion` so the
+    watermark, counts and progress-logging cadence survive across chunks.
+    """
+
+    start: float
+    total: int
+    resume_index: int
+    watermark: int
+    last_flushed: int
+    last_flush_time: float
+    next_time: float
+    last_log: float
+    next_pct: int
+    ok: int = 0
+    failed: int = 0
+    processed: int = 0
+    done_above: Set[int] = field(default_factory=set)
+
+
 def _fmt_duration(seconds: float) -> str:
     """Format a duration as e.g. '0.9s', '42s', '3m22s', '1h04m'."""
     if seconds < 60:
@@ -138,6 +161,10 @@ class BasemapScraperService(BaseSyncService):
         self._cache_max_zoom = settings.basemap_cache_max_zoom
         self._checkpoint_every = settings.basemap_scrape_checkpoint_every
         self._checkpoint_seconds = settings.basemap_scrape_checkpoint_seconds
+        # Chunk size for the per-zoom fan-out: caps tasks created at once so a
+        # huge zoom can't flood the event loop (HTTP concurrency stays capped
+        # by the client semaphore regardless).
+        self._fanout_window = settings.basemap_scrape_fanout_window
         # Circuit-breaker knobs. Threshold = N consecutive UNAVAILABLE fetches
         # within one provider sweep before we trip the provider and move on.
         # Cooldown schedule is indexed by consecutive trip count (capped at
@@ -582,8 +609,14 @@ class BasemapScraperService(BaseSyncService):
         resume_index: int,
         sweep_state: _ProviderSweepState,
     ) -> tuple[int, int]:
-        """Fan out the main sweep with watermark-based cursor checkpointing."""
-        # pylint: disable=too-many-locals,too-many-arguments
+        """Fan out the main sweep in bounded chunks with watermark checkpointing.
+
+        Tiles are dispatched ``_fanout_window`` at a time instead of all at once
+        so a huge zoom can't flood the event loop with tasks. Each chunk drains
+        fully before the next starts, so the watermark advances contiguously and
+        resume stays correct.
+        """
+        # pylint: disable=too-many-arguments
         total = len(coords)
         if resume_index >= total:
             # Nothing left at this zoom; advance cursor to next zoom boundary.
@@ -591,106 +624,159 @@ class BasemapScraperService(BaseSyncService):
             return 0, 0
 
         start = time.monotonic()
-        ok = 0
-        failed = 0
-        processed = 0
-        next_pct = _PROGRESS_PCT_STEP
-        next_time = start + _PROGRESS_TIME_INTERVAL_S
-        last_log = start
-
-        watermark = resume_index
-        done_above: Set[int] = set()
-        last_flushed = watermark
-        last_flush_time = start
-
-        tasks = [
-            asyncio.create_task(self._download_indexed(provider, idx, z, x, y))
-            for idx, (z, x, y) in enumerate(coords)
-            if idx >= resume_index
-        ]
+        progress = _SweepProgress(
+            start=start,
+            total=total,
+            resume_index=resume_index,
+            watermark=resume_index,
+            last_flushed=resume_index,
+            last_flush_time=start,
+            next_time=start + _PROGRESS_TIME_INTERVAL_S,
+            last_log=start,
+            next_pct=_PROGRESS_PCT_STEP,
+        )
 
         try:
-            for fut in asyncio.as_completed(tasks):
-                idx, z_done, x_done, y_done, outcome = await fut
-                self._update_sweep_state(sweep_state, outcome, z_done, x_done, y_done)
-                if outcome is _TileOutcome.OK:
-                    ok += 1
-                else:
-                    failed += 1
-                    await self._state.add_failed(
-                        provider.provider_id, z_done, x_done, y_done
-                    )
-                processed += 1
-
-                watermark, flushed = await self._advance_watermark(
+            for chunk_start in range(resume_index, total, self._fanout_window):
+                chunk_end = min(chunk_start + self._fanout_window, total)
+                await self._sweep_chunk(
                     provider,
                     zoom,
-                    idx,
-                    watermark,
-                    done_above,
-                    last_flushed,
-                    last_flush_time,
+                    coords,
+                    chunk_start,
+                    chunk_end,
+                    sweep_state,
+                    progress,
                 )
-                if flushed:
-                    last_flushed = watermark
-                    last_flush_time = time.monotonic()
-
-                now = time.monotonic()
-                pct = (
-                    (processed * 100 // (total - resume_index))
-                    if total > resume_index
-                    else 100
-                )
-                pct_due = pct >= next_pct
-                time_due = now >= next_time
-                if (
-                    (pct_due or time_due)
-                    and processed < (total - resume_index)
-                    and now - last_log >= _PROGRESS_MIN_INTERVAL_S
-                ):
-                    self._log_zoom_progress(
-                        provider, zoom, resume_index + processed, total, now - start
-                    )
-                    while next_pct <= pct:
-                        next_pct += _PROGRESS_PCT_STEP
-                    next_time = now + _PROGRESS_TIME_INTERVAL_S
-                    last_log = now
-
                 if sweep_state.tripped:
-                    # Stop consuming completions the moment we trip; the
-                    # finally block cancels everything still in-flight so
-                    # we stop hitting the unhealthy upstream immediately.
                     break
         finally:
-            # Cancel any still-running tile tasks so a tripped breaker
-            # actually stops traffic instead of letting the fan-out drain.
-            pending = [t for t in tasks if not t.done()]
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
             # Cancellation-safe: checkpoint the current watermark before
             # propagating CancelledError. Also advances cursor to next zoom
             # on a clean finish (watermark == total).
-            next_cursor_zoom = zoom + 1 if watermark >= total else zoom
-            next_cursor_index = 0 if watermark >= total else watermark
+            next_cursor_zoom = zoom + 1 if progress.watermark >= total else zoom
+            next_cursor_index = 0 if progress.watermark >= total else progress.watermark
             await self._state.set_cursor(
                 provider.provider_id, next_cursor_zoom, next_cursor_index
             )
 
         elapsed = time.monotonic() - start
-        rate = processed / elapsed if elapsed > 0 else 0.0
+        rate = progress.processed / elapsed if elapsed > 0 else 0.0
         logger.info(
             "%s z=%d: swept %d (%d ok, %d failed, %s, %.1f tiles/s)",
             provider.provider_id,
             zoom,
-            processed,
-            ok,
-            failed,
+            progress.processed,
+            progress.ok,
+            progress.failed,
             _fmt_duration(elapsed),
             rate,
         )
-        return ok, failed
+        return progress.ok, progress.failed
+
+    async def _sweep_chunk(
+        self,
+        provider: BasemapProvider,
+        zoom: int,
+        coords: List[Tuple[int, int, int]],
+        chunk_start: int,
+        chunk_end: int,
+        sweep_state: _ProviderSweepState,
+        progress: _SweepProgress,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Dispatch and drain one chunk [chunk_start, chunk_end) of the sweep."""
+        tasks = [
+            asyncio.create_task(self._download_indexed(provider, idx, *coords[idx]))
+            for idx in range(chunk_start, chunk_end)
+        ]
+        try:
+            for fut in asyncio.as_completed(tasks):
+                idx, z_done, x_done, y_done, outcome = await fut
+                await self._handle_completion(
+                    provider,
+                    zoom,
+                    idx,
+                    (z_done, x_done, y_done),
+                    outcome,
+                    sweep_state,
+                    progress,
+                )
+                if sweep_state.tripped:
+                    # Stop consuming the moment we trip; the finally block
+                    # cancels everything still in-flight so we stop hitting
+                    # the unhealthy upstream immediately.
+                    break
+        finally:
+            # Cancel any still-running tile tasks in this chunk.
+            pending = [t for t in tasks if not t.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _handle_completion(
+        self,
+        provider: BasemapProvider,
+        zoom: int,
+        idx: int,
+        tile: Tuple[int, int, int],
+        outcome: "_TileOutcome",
+        sweep_state: _ProviderSweepState,
+        progress: _SweepProgress,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        """Fold one completed tile into the sweep progress + watermark."""
+        z, x, y = tile
+        self._update_sweep_state(sweep_state, outcome, z, x, y)
+        if outcome is _TileOutcome.OK:
+            progress.ok += 1
+        else:
+            progress.failed += 1
+            await self._state.add_failed(provider.provider_id, z, x, y)
+        progress.processed += 1
+
+        watermark, flushed = await self._advance_watermark(
+            provider,
+            zoom,
+            idx,
+            progress.watermark,
+            progress.done_above,
+            progress.last_flushed,
+            progress.last_flush_time,
+        )
+        progress.watermark = watermark
+        if flushed:
+            progress.last_flushed = watermark
+            progress.last_flush_time = time.monotonic()
+
+        self._maybe_log_progress(provider, zoom, progress)
+
+    def _maybe_log_progress(
+        self, provider: BasemapProvider, zoom: int, progress: _SweepProgress
+    ) -> None:
+        """Emit a throttled in-zoom progress line when due."""
+        now = time.monotonic()
+        denom = progress.total - progress.resume_index
+        pct = (progress.processed * 100 // denom) if denom > 0 else 100
+        due = pct >= progress.next_pct or now >= progress.next_time
+        if not (
+            due
+            and progress.processed < denom
+            and now - progress.last_log >= _PROGRESS_MIN_INTERVAL_S
+        ):
+            return
+        self._log_zoom_progress(
+            provider,
+            zoom,
+            progress.resume_index + progress.processed,
+            progress.total,
+            now - progress.start,
+        )
+        while progress.next_pct <= pct:
+            progress.next_pct += _PROGRESS_PCT_STEP
+        progress.next_time = now + _PROGRESS_TIME_INTERVAL_S
+        progress.last_log = now
 
     async def _advance_watermark(
         self,

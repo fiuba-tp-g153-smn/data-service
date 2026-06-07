@@ -83,6 +83,16 @@ def mock_redis_client():
     client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
     client.prune_ecmwf_mslp_forecasts = AsyncMock(return_value=0)
 
+    # WRF index / overlay operations
+    client.add_wrf_index = AsyncMock()
+    client.get_wrf_steps = AsyncMock(return_value=[])
+    client.get_wrf_layers = AsyncMock(return_value=[])
+    client.add_wrf_layers = AsyncMock()
+    client.store_wrf_geojson = AsyncMock()
+    client.prune_wrf_inits = AsyncMock(return_value=0)
+    client.is_wrf_overlays_complete = AsyncMock(return_value=False)
+    client.set_wrf_overlays_complete = AsyncMock()
+
     # Listing cache (shared across sources)
     client.get_cached_listing = AsyncMock(return_value=None)
     client.cache_listing = AsyncMock()

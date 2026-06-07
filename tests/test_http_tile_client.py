@@ -183,6 +183,35 @@ async def test_network_error_raises_provider_unavailable():
 
 
 @pytest.mark.asyncio
+async def test_retry_log_names_url_and_exception(caplog):
+    """A transient ConnectTimeout then success logs a WARNING naming the URL,
+    the exception type, and a <no detail> sentinel for the empty message
+    (replaces tenacity's opaque '<unknown> ... ConnectTimeout: .')."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=1, max_retries=3
+    )
+    calls = {"n": 0}
+
+    def _factory(url: str):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Empty message — exactly the case that produced "ConnectTimeout: ."
+            raise httpx.ConnectTimeout("", request=httpx.Request("GET", url))
+        return _FakeResponse(status_code=200, content=b"ok")
+
+    client._client = _ScriptedHttpxClient(_factory)  # type: ignore[assignment]
+    url = "https://idede.ign.gob.ar/4/7/10.png"
+    with caplog.at_level("WARNING", logger="clients.http_tile_client"):
+        result = await client.download_tile(url)
+
+    assert result == b"ok"
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(url in m and "ConnectTimeout" in m for m in msgs), msgs
+    assert any("<no detail>" in m for m in msgs), msgs
+    assert not any("<unknown>" in m for m in msgs), msgs
+
+
+@pytest.mark.asyncio
 async def test_success_still_returns_bytes():
     """Happy path unchanged: 200 → raw bytes."""
     client = HttpTileClient(

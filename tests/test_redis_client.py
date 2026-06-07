@@ -175,9 +175,7 @@ async def test_get_radar_tilesets_self_heals_legacy_wrongtype_key():
     tilesets = await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
 
     assert tilesets == []
-    client._redis.delete.assert_awaited_once_with(
-        "idx:radar:RMA1:VRAD:elev0:tilesets"
-    )
+    client._redis.delete.assert_awaited_once_with("idx:radar:RMA1:VRAD:elev0:tilesets")
 
 
 @pytest.mark.asyncio
@@ -278,3 +276,51 @@ async def test_sync_status_operations():
     status = await client.get_sync_status()
     assert status["is_running"] == "false"
     assert status["total_cycles"] == "5"
+
+
+@pytest.mark.asyncio
+async def test_prune_wrf_inits_removes_stale_members():
+    """prune_wrf_inits ZREMs init_tags not in the active set; keeps the rest."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(
+        return_value=[b"20260430_060000", b"20260430_000000", b"20260429_180000"]
+    )
+
+    removed = await client.prune_wrf_inits("precip", ["20260430_060000"])
+
+    assert removed == 2
+    client._redis.zrem.assert_awaited_once_with(
+        "idx:wrf:precip:init_runs", b"20260430_000000", b"20260429_180000"
+    )
+
+
+@pytest.mark.asyncio
+async def test_prune_wrf_inits_noop_when_all_active():
+    """No ZREM when every member is in the active set."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(return_value=[b"20260430_060000"])
+
+    removed = await client.prune_wrf_inits("precip", ["20260430_060000"])
+
+    assert removed == 0
+    client._redis.zrem.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_wrf_overlays_complete_marker_roundtrip():
+    """set_wrf_overlays_complete writes a TTL'd key; is_wrf_overlays_complete reads it."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.exists = AsyncMock(return_value=1)
+
+    await client.set_wrf_overlays_complete("precip", "20260430_060000", "F012", ttl=99)
+    client._redis.set.assert_awaited_once_with(
+        "idx:wrf:precip:20260430_060000:F012:overlays_done", b"1", ex=99
+    )
+
+    assert (
+        await client.is_wrf_overlays_complete("precip", "20260430_060000", "F012")
+        is True
+    )

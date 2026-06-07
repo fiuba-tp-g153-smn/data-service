@@ -7,7 +7,12 @@ from typing import List
 import httpx
 import pytest
 
-from clients.smn_api_client import SmnApiClient, SmnApiError
+from clients.smn_api_client import (
+    SmnApiClient,
+    SmnApiError,
+    _redact_body,
+    _redact_headers,
+)
 
 
 async def _build_client(
@@ -144,8 +149,9 @@ async def test_5xx_is_retried_then_raises_smn_api_error():
 
 
 @pytest.mark.asyncio
-async def test_user_agent_and_settling_delay_are_applied():
-    """Configured UA is sent on every request; settling delay fires after a mint."""
+async def test_default_user_agent_and_settling_delay_are_applied():
+    """The client sends httpx's default UA (no custom override); the settling
+    delay fires after a mint."""
     sent_user_agents: List[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -156,7 +162,6 @@ async def test_user_agent_and_settling_delay_are_applied():
 
     client = await _build_client(
         _make_transport(handler),
-        user_agent="curl/9.9.9",
         token_settling_delay_seconds=0.5,
     )
 
@@ -176,8 +181,11 @@ async def test_user_agent_and_settling_delay_are_applied():
         smn_module.asyncio.sleep = original  # type: ignore[assignment]
         await client.close()
 
-    # Both calls carried the curl UA (not python-httpx).
-    assert sent_user_agents == ["curl/9.9.9", "curl/9.9.9"]
+    # Both calls carried httpx's default UA — no curl override.
+    assert len(sent_user_agents) == 2
+    assert all(
+        ua.startswith("python-httpx/") for ua in sent_user_agents
+    ), sent_user_agents
     # The 0.5s settling delay was observed exactly once (one mint -> one wait).
     assert 0.5 in sleeps
 
@@ -287,3 +295,61 @@ def test_module_imports_cleanly():
     from clients import smn_api_client  # noqa: F401
 
     assert json.dumps({"token": "x"})  # silence flake about unused json
+
+
+# --------------------------------------------------------------------------- #
+# Request-log redaction (SMN_API_LOG_REQUESTS)
+# --------------------------------------------------------------------------- #
+
+
+def test_redact_headers_masks_only_authorization():
+    headers = httpx.Headers({"Authorization": "JWT abc", "Accept": "application/json"})
+    out = {k.lower(): v for k, v in _redact_headers(headers).items()}
+    assert out["authorization"] == "<redacted>"
+    assert out["accept"] == "application/json"
+
+
+def test_redact_body_masks_credentials_and_passes_through_non_json():
+    masked = json.loads(_redact_body('{"username": "u", "password": "p", "keep": "v"}'))
+    assert masked == {
+        "username": "<redacted>",
+        "password": "<redacted>",
+        "keep": "v",
+    }
+    # Non-JSON / non-object bodies are passed through untouched.
+    assert _redact_body("not json") == "not json"
+    assert _redact_body("[1, 2, 3]") == "[1, 2, 3]"
+
+
+@pytest.mark.asyncio
+async def test_request_log_redacts_credentials(caplog):
+    """The outbound-request hook never writes the JWT, username or password."""
+    request = httpx.Request(
+        "POST",
+        "https://api.test/v1/api-token/auth",
+        json={"username": "topsecretuser", "password": "topsecretpass"},
+        headers={"Authorization": "JWT topsecrettoken"},
+    )
+    with caplog.at_level("INFO", logger="clients.smn_api_client"):
+        await SmnApiClient._log_outbound_request(request)
+
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "topsecrettoken" not in blob
+    assert "topsecretuser" not in blob
+    assert "topsecretpass" not in blob
+    assert "<redacted>" in blob
+    assert "/api-token/auth" in blob  # URL stays visible for debugging
+
+
+def test_log_requests_registers_the_redacting_hook():
+    client = SmnApiClient(
+        base_url="https://api.test/v1",
+        username="u",
+        password="p",
+        timeout_seconds=5,
+        max_retries=1,
+        token_cache_ttl_seconds=60,
+        log_requests=True,
+    )
+    hooks = client._client.event_hooks.get("request", [])
+    assert SmnApiClient._log_outbound_request in hooks

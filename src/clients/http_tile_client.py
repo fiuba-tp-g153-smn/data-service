@@ -9,8 +9,8 @@ from urllib.parse import urlparse
 import httpx
 from tenacity import (
     AsyncRetrying,
+    RetryCallState,
     RetryError,
-    before_sleep_log,
     retry_if_exception_type,
     stop_after_attempt,
     stop_after_delay,
@@ -84,6 +84,15 @@ class HttpTileClient:
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout),
             follow_redirects=True,
+            # Align the pool to the concurrency ceiling and keep connections
+            # alive for reuse. The semaphore already caps in-flight requests at
+            # max_concurrent, so this never blocks on the pool — it just stops
+            # us re-establishing a fresh connection per request (the operation
+            # that surfaces as ConnectTimeout under load).
+            limits=httpx.Limits(
+                max_connections=self._max_concurrent,
+                max_keepalive_connections=self._max_concurrent,
+            ),
         )
         logger.info(
             "HTTP tile client connected (concurrency=%d, per_host=%s, "
@@ -111,6 +120,31 @@ class HttpTileClient:
             sem = asyncio.Semaphore(self._per_host_limit)
             self._host_semaphores[host] = sem
         return sem
+
+    @staticmethod
+    def _before_sleep_logger(url: str):
+        """Build a tenacity before_sleep callback that names what's failing.
+
+        tenacity's stock before_sleep_log logs the unnameable AsyncRetrying
+        block as ``<unknown>`` with the exception's (often empty) message — so
+        retries were opaque. This closes over ``url`` to log the host, full URL,
+        exception type and a non-empty detail.
+        """
+        host = urlparse(url).netloc
+
+        def _log(retry_state: RetryCallState) -> None:
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            detail = str(exc) if exc and str(exc) else "<no detail>"
+            logger.warning(
+                "Retry %d for %s tile %s failed: %s (%s)",
+                retry_state.attempt_number,
+                host or "?",
+                url,
+                type(exc).__name__ if exc else "unknown",
+                detail,
+            )
+
+        return _log
 
     def _overall_budget_seconds(self) -> float:
         """Cap on total time a single download_tile call may hold the semaphore."""
@@ -144,7 +178,7 @@ class HttpTileClient:
                     retry=retry_if_exception_type(
                         (httpx.HTTPError, asyncio.TimeoutError, _RetryableHttpStatus)
                     ),
-                    before_sleep=before_sleep_log(logger, logging.WARNING),
+                    before_sleep=self._before_sleep_logger(url),
                     reraise=True,
                 ):
                     with attempt:

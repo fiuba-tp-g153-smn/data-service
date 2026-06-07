@@ -125,17 +125,24 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
     assert tilesets == ["20260114T170328Z", "20260114T160328Z"]
 
 
-def _make_sync_service(mock_s3, mock_redis, ecmwf_forecasts_to_keep=2):
+def _make_sync_service(
+    mock_s3, mock_redis, ecmwf_forecasts_to_keep=2, wrf_inits_to_keep=2
+):
     """Build a SyncService wired to mock S3/Redis clients without touching env."""
     settings = Settings.__new__(Settings)
     settings.sync_interval_seconds = 60
+    settings.sync_min_sleep_seconds = 10
     settings.tile_ttl = 3600
     settings.ecmwf_tile_ttl = 86400
     settings.ecmwf_forecasts_to_keep = ecmwf_forecasts_to_keep
+    settings.wrf_tile_ttl = 86400
+    settings.wrf_geojson_ttl = 86400
+    settings.wrf_inits_to_keep = wrf_inits_to_keep
 
     service = SyncService.__new__(SyncService)
     service._settings = settings  # pylint: disable=protected-access
     service._sync_interval = 60  # pylint: disable=protected-access
+    service._min_sleep = 10  # pylint: disable=protected-access
     service._service_name = "Sync service"  # pylint: disable=protected-access
     service._sync_prefixes = []  # pylint: disable=protected-access
     service._client = mock_s3  # pylint: disable=protected-access
@@ -454,3 +461,121 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
     mock_redis_client.prune_ecmwf_mslp_forecasts.assert_awaited_once_with(
         ["20260330T1200Z", "20260330T0000Z"]
     )
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_respects_inits_to_keep(mock_redis_client):
+    """Only the newest N init runs per product are walked, and the index is
+    reconciled to that active set."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.WRF_TILES_PREFIX}/precip/"],  # products
+            [
+                f"{S3Client.WRF_TILES_PREFIX}/precip/20260430_000000/",
+                f"{S3Client.WRF_TILES_PREFIX}/precip/20260430_060000/",
+                f"{S3Client.WRF_TILES_PREFIX}/precip/20260429_180000/",
+            ],  # init runs (unsorted)
+            [],  # steps for the single newest init
+        ]
+    )
+
+    service = _make_sync_service(mock_s3, mock_redis_client, wrf_inits_to_keep=1)
+
+    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+
+    assert (downloaded, errors) == (0, 0)
+    # products + inits + steps(newest only) == 3 listing calls (not 5).
+    assert mock_s3.get_subdirectories.await_count == 3
+    mock_redis_client.prune_wrf_inits.assert_awaited_once_with(
+        "precip", ["20260430_060000"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_skips_prune_when_listing_empty(mock_redis_client):
+    """A product whose init listing comes back empty (e.g. transient S3 error)
+    must NOT prune, so the index isn't wiped."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.WRF_TILES_PREFIX}/precip/"],  # products
+            [],  # init runs empty
+        ]
+    )
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+
+    assert (downloaded, errors) == (0, 0)
+    mock_redis_client.prune_wrf_inits.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_overlays_skip_when_marker_present(mock_redis_client):
+    """A step marked overlays-complete costs zero S3 calls."""
+    mock_s3 = AsyncMock()
+    mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=True)
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    await service._sync_wrf_overlays(  # pylint: disable=protected-access
+        "precip", "20260430_060000", "F012"
+    )
+
+    mock_s3.list_wrf_layers.assert_not_awaited()
+    mock_redis_client.set_wrf_overlays_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_overlays_latches_marker_when_complete(mock_redis_client):
+    """When Redis already mirrors every S3 layer, latch the marker and do no GETs."""
+    mock_s3 = AsyncMock()
+    mock_s3.list_wrf_layers = AsyncMock(return_value=["barbs", "isobars"])
+    mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=False)
+    mock_redis_client.get_wrf_layers = AsyncMock(return_value=["barbs", "isobars"])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    await service._sync_wrf_overlays(  # pylint: disable=protected-access
+        "precip", "20260430_060000", "F012"
+    )
+
+    mock_redis_client.set_wrf_overlays_complete.assert_awaited_once()
+    mock_s3.sync_wrf_geojson_to_redis.assert_not_awaited()
+    mock_redis_client.add_wrf_layers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_overlays_downloads_missing_without_latching(mock_redis_client):
+    """A step missing layers downloads them and is NOT marked complete (it is
+    re-checked next cycle until S3 and Redis agree)."""
+    mock_s3 = AsyncMock()
+    mock_s3.list_wrf_layers = AsyncMock(return_value=["barbs", "isobars"])
+    mock_s3.sync_wrf_geojson_to_redis = AsyncMock(return_value=True)
+    mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=False)
+    mock_redis_client.get_wrf_layers = AsyncMock(return_value=["barbs"])
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    await service._sync_wrf_overlays(  # pylint: disable=protected-access
+        "precip", "20260430_060000", "F012"
+    )
+
+    # Only the missing layer is fetched.
+    assert mock_s3.sync_wrf_geojson_to_redis.await_count == 1
+    mock_redis_client.set_wrf_overlays_complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_error_isolation(mock_redis_client):
+    """A listing failure surfaces as one error, not an exception."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(side_effect=RuntimeError("boom"))
+
+    service = _make_sync_service(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+
+    assert (downloaded, errors) == (0, 1)
