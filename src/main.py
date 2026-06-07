@@ -22,6 +22,7 @@ from dependencies import (
     logger,
     metrics_store,
     redis_client,
+    set_basemap_state_store,
     set_weather_stations_keystore,
     settings,
 )
@@ -30,6 +31,7 @@ from routes import (
     basemap,
     ecmwf_mslp,
     ecmwf_tp,
+    metrics,
     radar,
     satellite,
     sync,
@@ -150,6 +152,7 @@ async def configure_strategies(
         wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
 
         sync_service.set_redis_client(client_redis)
+        sync_service.set_metrics_store(metrics_store)
         await sync_service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
@@ -331,8 +334,10 @@ async def configure_basemap(
             s3_object_ttl_days=settings.basemap_s3_object_ttl_days,
             redis_writes_enabled=scraper_writes_redis,
             parallelism_mode=settings.basemap_scrape_parallelism_mode,
+            metrics_store=metrics_store,
         )
         await scraper.start(logger)
+        set_basemap_state_store(state_store)
 
     basemap_service.configure(
         reader=reader,
@@ -442,6 +447,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         smn_client=smn_client,
         registry_client=registry_client,
         redis_client=redis_client,
+        metrics_store=metrics_store,
     )
     await scraper.start(logger)
 
@@ -642,5 +648,6 @@ app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(wrf.router)  # WRF model routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
+app.include_router(metrics.router)  # Status/performance dashboard metrics
 app.include_router(weather_stations.router)  # SMN weather-stations endpoints
 app.include_router(weather_stations.admin_router)  # Admin API-key management

@@ -7,9 +7,11 @@ Runs as a background task during application lifetime.
 
 import logging
 import time
+from datetime import datetime, timezone
 from logging import Logger
-from typing import List, Optional
+from typing import Awaitable, List, Optional, Tuple
 
+from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
@@ -68,12 +70,17 @@ class SyncService(BaseSyncService):
         )
         self._client: Optional[S3Client] = None
         self._redis_client: Optional[RedisClient] = None
+        self._metrics_store: Optional[MetricsStore] = None
         self._consecutive_failures = 0
         self._total_cycles = 0
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
         """Set the Redis client (called during app startup)."""
         self._redis_client = redis_client
+
+    def set_metrics_store(self, metrics_store: MetricsStore) -> None:
+        """Set the metrics store for per-domain cycle history (app startup)."""
+        self._metrics_store = metrics_store
 
     def _get_lock_path(self) -> str:
         """Return the S3 sync lock file path."""
@@ -102,6 +109,45 @@ class SyncService(BaseSyncService):
         """Track consecutive failures for sync status reporting."""
         self._consecutive_failures += 1
 
+    async def _timed_domain(
+        self, domain: str, coro: Awaitable[Tuple[int, int]]
+    ) -> Tuple[int, int]:
+        """Run one domain's sync, timing it and recording a metrics row."""
+        start = datetime.now(timezone.utc)
+        downloaded, errors = await coro
+        end = datetime.now(timezone.utc)
+        duration_ms = int((end - start).total_seconds() * 1000)
+        await self._record_cycle(
+            domain, start.isoformat(), end.isoformat(), duration_ms, downloaded, errors
+        )
+        return downloaded, errors
+
+    async def _record_cycle(  # pylint: disable=too-many-arguments
+        self,
+        domain: str,
+        started_at: str,
+        finished_at: str,
+        duration_ms: int,
+        downloaded: int,
+        errors: int,
+    ) -> None:
+        """Persist one per-domain cycle row. Never lets metrics break the sync."""
+        if self._metrics_store is None:
+            return
+        outcome = "error" if errors else "ok"
+        try:
+            await self._metrics_store.record_sync_cycle(
+                domain,
+                started_at,
+                finished_at,
+                duration_ms,
+                downloaded,
+                errors,
+                outcome,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Failed to record sync metrics for %s", domain)
+
     async def _run_sync(self) -> None:
         """Execute a single sync cycle for all prefixes."""
         if not self._settings.is_s3_configured():
@@ -127,11 +173,19 @@ class SyncService(BaseSyncService):
 
         logger.info("Sync cycle #%d starting", self._total_cycles + 1)
 
-        sat_downloaded, sat_errors = await self._sync_satellite_prefixes()
-        radar_downloaded, radar_errors = await self._sync_radar()
-        ecmwf_tp_downloaded, ecmwf_tp_errors = await self._sync_ecmwf_tp()
-        ecmwf_mslp_downloaded, ecmwf_mslp_errors = await self._sync_ecmwf_mslp()
-        wrf_downloaded, wrf_errors = await self._sync_wrf()
+        sat_downloaded, sat_errors = await self._timed_domain(
+            "satellite", self._sync_satellite_prefixes()
+        )
+        radar_downloaded, radar_errors = await self._timed_domain(
+            "radar", self._sync_radar()
+        )
+        ecmwf_tp_downloaded, ecmwf_tp_errors = await self._timed_domain(
+            "ecmwf_tp", self._sync_ecmwf_tp()
+        )
+        ecmwf_mslp_downloaded, ecmwf_mslp_errors = await self._timed_domain(
+            "ecmwf_mslp", self._sync_ecmwf_mslp()
+        )
+        wrf_downloaded, wrf_errors = await self._timed_domain("wrf", self._sync_wrf())
 
         errors = (
             sat_errors + radar_errors + ecmwf_tp_errors + ecmwf_mslp_errors + wrf_errors

@@ -3,6 +3,7 @@
 from logging import Logger
 from typing import Optional
 
+from clients.basemap_state_store import BasemapStateStore
 from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
@@ -23,6 +24,15 @@ basemap_service: BasemapService = BasemapService()
 # Depends() reference, so we can't construct the keystore until the SQLite file
 # is opened; the lifespan stamps it here once that's done.
 _weather_stations_keystore: Optional[WeatherStationsKeystore] = None
+# Populated in the lifespan via `set_basemap_state_store` only when the basemap
+# scraper runs. Stays None otherwise; the metrics route degrades to an empty
+# provider list rather than failing.
+_basemap_state_store: Optional[BasemapStateStore] = None
+
+
+def get_settings() -> Settings:
+    """FastAPI dependency provider for Settings."""
+    return settings
 
 
 def get_redis_client() -> RedisClient:
@@ -38,6 +48,17 @@ def get_metrics_store() -> MetricsStore:
 def get_basemap_service() -> BasemapService:
     """FastAPI dependency provider for BasemapService."""
     return basemap_service
+
+
+def set_basemap_state_store(state_store: BasemapStateStore) -> None:
+    """Lifespan hook: register the live basemap state store for metrics reads."""
+    global _basemap_state_store  # pylint: disable=global-statement
+    _basemap_state_store = state_store
+
+
+def get_basemap_state_store() -> Optional[BasemapStateStore]:
+    """FastAPI dependency provider for the basemap state store (None if scraper off)."""
+    return _basemap_state_store
 
 
 def get_weather_stations_service() -> WeatherStationsService:

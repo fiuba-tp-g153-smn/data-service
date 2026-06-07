@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from clients.smn_api_client import SmnApiClient, SmnApiError
@@ -71,6 +72,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         smn_client: SmnApiClient,
         registry_client: SmnRegistryClient,
         redis_client: Optional[RedisClient] = None,
+        metrics_store: Optional[MetricsStore] = None,
     ):
         super().__init__(
             settings=settings,
@@ -80,6 +82,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         self._s3 = s3_client
         self._smn = smn_client
         self._registry = registry_client
+        self._metrics_store = metrics_store
         self._source_url = f"{settings.smn_api_base_url.rstrip('/')}/weather/station"
         self._s3_object_ttl_days = settings.weather_stations_s3_object_ttl_days
         # Write-through cache. Optional: when absent, the read path still warms
@@ -110,6 +113,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
     async def _run_sync(self) -> None:
         """Execute one scrape cycle."""
         cycle_start = time.monotonic()
+        started_at = datetime.now(timezone.utc)
         await self._ensure_lifecycle_applied()
         await self._maybe_bootstrap_registry_hash()
 
@@ -123,6 +127,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             raw_observations = await self._smn.fetch_current_weather_stations()
         except SmnApiError as exc:
             logger.warning("Weather stations scrape skipped: SMN fetch failed: %s", exc)
+            await self._record_cycle(started_at, downloaded=0, errors=1)
             return
 
         scraped_at = datetime.now(timezone.utc).replace(microsecond=0)
@@ -135,14 +140,17 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Weather stations scrape: S3 upload failed: %s", exc)
+            await self._record_cycle(started_at, downloaded=0, errors=1)
             return
 
+        station_count = len(snapshot["stations"])
         elapsed = time.monotonic() - cycle_start
         logger.info(
             "Weather stations scrape complete: %d stations in %.1fs",
-            len(snapshot["stations"]),
+            station_count,
             elapsed,
         )
+        await self._record_cycle(started_at, downloaded=station_count, errors=0)
 
         # Write-through so the read path's shared cache stays warm (fail-soft;
         # runs after the timing log so it doesn't skew the scrape duration).
@@ -323,6 +331,28 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             await self._redis.cache_listing(key, data, ttl)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Redis write-through failed for %s: %s", key, exc)
+
+    async def _record_cycle(
+        self, started_at: datetime, downloaded: int, errors: int
+    ) -> None:
+        """Persist one cycle row for the dashboard. Never aborts the scrape."""
+        if self._metrics_store is None:
+            return
+        end = datetime.now(timezone.utc)
+        duration_ms = int((end - started_at).total_seconds() * 1000)
+        outcome = "error" if errors else "ok"
+        try:
+            await self._metrics_store.record_sync_cycle(
+                "weather_stations",
+                started_at.isoformat(),
+                end.isoformat(),
+                duration_ms,
+                downloaded,
+                errors,
+                outcome,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Failed to record weather_stations metrics")
 
     def _build_snapshot(
         self, scraped_at: datetime, raw: List[Dict[str, Any]]

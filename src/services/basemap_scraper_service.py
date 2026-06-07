@@ -5,9 +5,10 @@ import logging
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from logging import Logger
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +16,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from clients.basemap_state_store import BasemapStateStore
 from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
+from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.base_sync_service import BaseSyncService
@@ -141,6 +143,7 @@ class BasemapScraperService(BaseSyncService):
         s3_object_ttl_days: int,
         redis_writes_enabled: bool = True,
         parallelism_mode: str = "sequential",
+        metrics_store: Optional[MetricsStore] = None,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         super().__init__(
@@ -152,6 +155,7 @@ class BasemapScraperService(BaseSyncService):
         self._redis = redis_client
         self._http = http_client
         self._state = state_store
+        self._metrics_store = metrics_store
         self._providers = providers
         self._bbox = bbox
         self._tile_ttl = tile_ttl
@@ -278,6 +282,7 @@ class BasemapScraperService(BaseSyncService):
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
         start = time.monotonic()
+        started_at = datetime.now(timezone.utc)
         # Reset the transient storage-retry flag. Any provider that hits a
         # storage error during this cycle will set it back to True and the
         # next scheduled sleep will be floored to _STORAGE_RETRY_FLOOR_SECONDS.
@@ -306,6 +311,29 @@ class BasemapScraperService(BaseSyncService):
             total_failed,
             elapsed,
         )
+        await self._record_cycle(started_at, total_downloaded, total_failed)
+
+    async def _record_cycle(
+        self, started_at: datetime, downloaded: int, errors: int
+    ) -> None:
+        """Persist one cycle row for the dashboard. Never aborts the scrape."""
+        if self._metrics_store is None:
+            return
+        end = datetime.now(timezone.utc)
+        duration_ms = int((end - started_at).total_seconds() * 1000)
+        outcome = "error" if errors else "ok"
+        try:
+            await self._metrics_store.record_sync_cycle(
+                "basemap",
+                started_at.isoformat(),
+                end.isoformat(),
+                duration_ms,
+                downloaded,
+                errors,
+                outcome,
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            logger.exception("Failed to record basemap metrics")
 
     async def _ensure_lifecycle_applied(self) -> None:
         """Idempotently (re)try the S3 bucket lifecycle rule until it sticks."""
