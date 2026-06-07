@@ -60,6 +60,11 @@ def test_nested_wrf_inits_to_keep_flattens(tmp_path):
     assert s.wrf_inits_to_keep == 4
 
 
+def test_nested_basemap_scrape_fanout_window_flattens(tmp_path):
+    s = _load(tmp_path, {"basemap": {"scrape_fanout_window": 250}})
+    assert s.basemap_scrape_fanout_window == 250
+
+
 def test_nested_overrides_flat_when_both_present(tmp_path):
     s = _load(
         tmp_path,
@@ -122,8 +127,10 @@ def test_real_settings_json_round_trip():
     assert s.ecmwf_tile_ttl == 86400
     assert s.radar_tile_ttl == 2592000
     assert s.sync_mode == "full"
-    assert s.sync_min_sleep_seconds == 10
-    assert s.wrf_inits_to_keep == 2
+    assert s.sync_min_sleep_seconds == 20
+    assert s.wrf_inits_to_keep == 3
+    assert s.basemap_scrape_fanout_window == 500
+    assert s.basemap_scrape_per_host_concurrent == 8
     assert isinstance(s.basemap_providers, list) and s.basemap_providers
 
 

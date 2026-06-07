@@ -1,5 +1,6 @@
 """Unit tests for resumable-scrape wiring in `BasemapScraperService`."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 from typing import Dict, Iterable, Set, Tuple
@@ -40,6 +41,9 @@ def _make_settings(**overrides) -> SimpleNamespace:
         "basemap_scrape_lock_path": "/tmp/test_basemap_scrape.lock",
         "basemap_scrape_checkpoint_every": 1,
         "basemap_scrape_checkpoint_seconds": 0.001,
+        # Large so existing tests run as a single chunk (chunking is exercised
+        # explicitly by the dedicated fan-out tests below).
+        "basemap_scrape_fanout_window": 10_000,
         # Circuit breaker: threshold tuned low so tests can provoke trips
         # cheaply; schedule keeps first cooldown short enough to exercise.
         "basemap_provider_unhealthy_threshold": 5,
@@ -981,3 +985,83 @@ async def test_lifecycle_retries_until_it_sticks(store):
     # After latching, no further retries even if we trigger more cycles.
     await scraper._run_sync()  # pylint: disable=protected-access
     assert mock.await_count == 3
+
+
+# --------------------------------------------------------------------------- #
+# Bounded (chunked) fan-out — basemap_scrape_fanout_window
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chunked_sweep_processes_every_tile_exactly_once(store):
+    """A tiny fan-out window must still cover every tile once, no dupes/drops."""
+    provider = _make_provider(min_zoom=5, max_zoom=6)
+    bbox = _make_bbox()
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox, basemap_scrape_fanout_window=2)
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    expected = count_tiles(5, bbox) + count_tiles(6, bbox)
+    assert len(http.calls) == expected
+    assert len(set(http.calls)) == expected  # no tile fetched twice
+    assert await store.get_cursor(provider.provider_id) is None  # clean finish
+
+
+@pytest.mark.asyncio
+async def test_chunked_sweep_resume_across_chunk_boundary(store):
+    """Resume index is honoured even when it lands inside a chunk grid."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+
+    from services.basemap_config import iter_tiles
+
+    coords = list(iter_tiles(5, bbox))
+    assert len(coords) >= 3, "bbox too small for this test"
+    await store.set_cursor(provider.provider_id, 5, 2)
+
+    http = FakeHttp()
+    scraper = _make_scraper(store, http, provider, bbox, basemap_scrape_fanout_window=2)
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    assert len(http.calls) == len(coords) - 2
+    assert await store.get_cursor(provider.provider_id) is None
+
+
+class _CountingHttp:
+    """Records peak concurrent download_tile calls to prove the fan-out bound."""
+
+    def __init__(self):
+        self.calls: list[str] = []
+        self.in_flight = 0
+        self.peak = 0
+
+    async def download_tile(self, url: str):
+        self.calls.append(url)
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        await asyncio.sleep(0)  # let all tasks in the chunk overlap
+        self.in_flight -= 1
+        return b"fake-bytes"
+
+
+@pytest.mark.asyncio
+async def test_chunked_sweep_bounds_inflight_tasks(store):
+    """Concurrent in-flight fetches never exceed the fan-out window."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+
+    from services.basemap_config import iter_tiles
+
+    total = len(list(iter_tiles(5, bbox)))
+    window = 3
+    assert total > window, "need more tiles than the window to test the bound"
+
+    http = _CountingHttp()
+    scraper = _make_scraper(
+        store, http, provider, bbox, basemap_scrape_fanout_window=window
+    )
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    assert http.peak <= window, f"peak in-flight {http.peak} exceeded window {window}"
+    assert len(http.calls) == total

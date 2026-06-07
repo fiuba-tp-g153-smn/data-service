@@ -103,6 +103,10 @@ class Settings:
     basemap_scrape_interval_seconds: int = 604800
     basemap_scrape_concurrent: int = 20
     basemap_scrape_delay_ms: int = 30
+    # Max scrape tasks created at once per zoom (chunked fan-out). Bounds the
+    # event-loop/memory pressure of a zoom with tens of thousands of tiles; the
+    # HTTP semaphore still caps actual in-flight requests at scrape_concurrent.
+    basemap_scrape_fanout_window: int = 500
     basemap_cache_max_zoom: int = 11
     basemap_cache_concurrent: int = 10
     basemap_scrape_lock_path: str = "/tmp/basemap_scrape.lock"
@@ -285,6 +289,7 @@ class Settings:
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
             "basemap_scrape_delay_ms",
+            "basemap_scrape_fanout_window",
             "basemap_cache_max_zoom",
             "basemap_cache_concurrent",
             "basemap_providers",
@@ -452,6 +457,9 @@ class Settings:
         )
         self.basemap_scrape_concurrent = self._env_int(
             "BASEMAP_SCRAPE_CONCURRENT", self.basemap_scrape_concurrent
+        )
+        self.basemap_scrape_fanout_window = self._env_int(
+            "BASEMAP_SCRAPE_FANOUT_WINDOW", self.basemap_scrape_fanout_window
         )
         self.basemap_scrape_delay_ms = self._env_int(
             "BASEMAP_SCRAPE_DELAY_MS", self.basemap_scrape_delay_ms
