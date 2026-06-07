@@ -7,7 +7,12 @@ from typing import List
 import httpx
 import pytest
 
-from clients.smn_api_client import SmnApiClient, SmnApiError
+from clients.smn_api_client import (
+    SmnApiClient,
+    SmnApiError,
+    _redact_body,
+    _redact_headers,
+)
 
 
 async def _build_client(
@@ -290,3 +295,61 @@ def test_module_imports_cleanly():
     from clients import smn_api_client  # noqa: F401
 
     assert json.dumps({"token": "x"})  # silence flake about unused json
+
+
+# --------------------------------------------------------------------------- #
+# Request-log redaction (SMN_API_LOG_REQUESTS)
+# --------------------------------------------------------------------------- #
+
+
+def test_redact_headers_masks_only_authorization():
+    headers = httpx.Headers({"Authorization": "JWT abc", "Accept": "application/json"})
+    out = {k.lower(): v for k, v in _redact_headers(headers).items()}
+    assert out["authorization"] == "<redacted>"
+    assert out["accept"] == "application/json"
+
+
+def test_redact_body_masks_credentials_and_passes_through_non_json():
+    masked = json.loads(_redact_body('{"username": "u", "password": "p", "keep": "v"}'))
+    assert masked == {
+        "username": "<redacted>",
+        "password": "<redacted>",
+        "keep": "v",
+    }
+    # Non-JSON / non-object bodies are passed through untouched.
+    assert _redact_body("not json") == "not json"
+    assert _redact_body("[1, 2, 3]") == "[1, 2, 3]"
+
+
+@pytest.mark.asyncio
+async def test_request_log_redacts_credentials(caplog):
+    """The outbound-request hook never writes the JWT, username or password."""
+    request = httpx.Request(
+        "POST",
+        "https://api.test/v1/api-token/auth",
+        json={"username": "topsecretuser", "password": "topsecretpass"},
+        headers={"Authorization": "JWT topsecrettoken"},
+    )
+    with caplog.at_level("INFO", logger="clients.smn_api_client"):
+        await SmnApiClient._log_outbound_request(request)
+
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "topsecrettoken" not in blob
+    assert "topsecretuser" not in blob
+    assert "topsecretpass" not in blob
+    assert "<redacted>" in blob
+    assert "/api-token/auth" in blob  # URL stays visible for debugging
+
+
+def test_log_requests_registers_the_redacting_hook():
+    client = SmnApiClient(
+        base_url="https://api.test/v1",
+        username="u",
+        password="p",
+        timeout_seconds=5,
+        max_retries=1,
+        token_cache_ttl_seconds=60,
+        log_requests=True,
+    )
+    hooks = client._client.event_hooks.get("request", [])
+    assert SmnApiClient._log_outbound_request in hooks
