@@ -144,8 +144,9 @@ async def test_5xx_is_retried_then_raises_smn_api_error():
 
 
 @pytest.mark.asyncio
-async def test_user_agent_and_settling_delay_are_applied():
-    """Configured UA is sent on every request; settling delay fires after a mint."""
+async def test_default_user_agent_and_settling_delay_are_applied():
+    """The client sends httpx's default UA (no custom override); the settling
+    delay fires after a mint."""
     sent_user_agents: List[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -156,7 +157,6 @@ async def test_user_agent_and_settling_delay_are_applied():
 
     client = await _build_client(
         _make_transport(handler),
-        user_agent="curl/9.9.9",
         token_settling_delay_seconds=0.5,
     )
 
@@ -176,8 +176,11 @@ async def test_user_agent_and_settling_delay_are_applied():
         smn_module.asyncio.sleep = original  # type: ignore[assignment]
         await client.close()
 
-    # Both calls carried the curl UA (not python-httpx).
-    assert sent_user_agents == ["curl/9.9.9", "curl/9.9.9"]
+    # Both calls carried httpx's default UA — no curl override.
+    assert len(sent_user_agents) == 2
+    assert all(
+        ua.startswith("python-httpx/") for ua in sent_user_agents
+    ), sent_user_agents
     # The 0.5s settling delay was observed exactly once (one mint -> one wait).
     assert 0.5 in sleeps
 

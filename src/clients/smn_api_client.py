@@ -36,7 +36,6 @@ class SmnApiClient:
         max_retries: int,
         token_cache_ttl_seconds: int,
         token_settling_delay_seconds: float = 0.0,
-        user_agent: str = "curl/8.10.1",
         log_requests: bool = False,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -54,11 +53,9 @@ class SmnApiClient:
         # httpx treats the redirect as a final response and the request fails
         # with a non-2xx status.
         #
-        # Client-level headers mimic what `curl --silent` sends so any
-        # WAF/bot fingerprinting on User-Agent treats us like a real client.
-        # Per-request `headers=...` calls (e.g. `Accept: application/json` on
-        # /weather/station) merge with these and override only the keys they
-        # specify, so the UA is always preserved.
+        # Only `Accept` is set at the client level; the User-Agent is left as
+        # httpx's default. Per-request `headers=...` (e.g. `Accept:
+        # application/json` on /weather/station) merge with and override these.
         event_hooks: dict[str, list] = {}
         if log_requests:
             event_hooks["request"] = [self._log_outbound_request]
@@ -70,7 +67,7 @@ class SmnApiClient:
         self._client = httpx.AsyncClient(
             timeout=timeout_seconds,
             follow_redirects=True,
-            headers={"User-Agent": user_agent, "Accept": "*/*"},
+            headers={"Accept": "*/*"},
             event_hooks=event_hooks,
         )
         self._token: Optional[str] = None
@@ -199,7 +196,10 @@ class SmnApiClient:
 
     async def _get_token(self) -> str:
         """Return a cached token if still fresh, else mint a new one."""
-        if self._token and (time.monotonic() - self._token_minted_at) < self._token_cache_ttl:
+        if (
+            self._token
+            and (time.monotonic() - self._token_minted_at) < self._token_cache_ttl
+        ):
             return self._token
         return await self._refresh_token()
 

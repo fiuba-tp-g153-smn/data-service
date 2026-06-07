@@ -44,10 +44,6 @@ class Settings:
     # Default 0.0 keeps the original behavior; set to e.g. 1.0 if SMN rejects
     # the freshly-minted JWT due to propagation lag in its validation tier.
     smn_api_token_settling_delay_seconds: float = 0.0
-    # Override the httpx default UA (`python-httpx/X.Y`) with a curl-like
-    # string so SMN's WAF/bot heuristics don't flag us. Configurable in case
-    # SMN ever WAFs on a specific curl version.
-    smn_api_user_agent: str = "curl/8.10.1"
     # Diagnostic: when True, every outbound SMN request is logged in full
     # (URL, every header including JWT, body including auth credentials).
     # Use only for short debugging sessions; never leave on in production.
@@ -559,9 +555,6 @@ class Settings:
         self.smn_api_token_settling_delay_seconds = self._env_float(
             "SMN_API_TOKEN_SETTLING_DELAY_SECONDS",
             self.smn_api_token_settling_delay_seconds,
-        )
-        self.smn_api_user_agent = os.getenv(
-            "SMN_API_USER_AGENT", self.smn_api_user_agent
         )
         self.smn_api_log_requests = self._env_bool(
             "SMN_API_LOG_REQUESTS", self.smn_api_log_requests
