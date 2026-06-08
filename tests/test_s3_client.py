@@ -21,6 +21,70 @@ def _make_client() -> S3Client:
     )
 
 
+class _FakeClientCtx:
+    """Minimal async context manager standing in for an aioboto3 client."""
+
+    def __init__(self, client):
+        self._client = client
+
+    async def __aenter__(self):
+        return self._client
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+def _capture_session_client(client: S3Client) -> dict:
+    """Patch `client._session.client` to record its call args; return the record."""
+    captured: dict = {}
+
+    def _fake(service: str, **kwargs):
+        captured["service"] = service
+        captured["kwargs"] = kwargs
+        return _FakeClientCtx(AsyncMock())
+
+    client._session.client = _fake  # type: ignore[assignment]
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_connect_passes_botocore_config_with_timeouts():
+    """When timeouts/retries are configured, connect() must pass a botocore Config."""
+    client = S3Client(
+        endpoint="http://127.0.0.1:1",
+        access_key="k",
+        secret_key="s",
+        bucket="tiles-data",
+        secure=False,
+        max_concurrent_downloads=1,
+        connect_timeout=5,
+        read_timeout=30,
+        max_attempts=3,
+    )
+    captured = _capture_session_client(client)
+
+    await client.connect()
+    await client.close()
+
+    assert captured["service"] == "s3"
+    config = captured["kwargs"]["config"]
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 30
+    assert config.retries == {"max_attempts": 3, "mode": "standard"}
+
+
+@pytest.mark.asyncio
+async def test_connect_omits_config_when_no_timeouts_set():
+    """With no timeouts configured, no Config is passed (botocore keeps defaults)."""
+    client = _make_client()  # constructed without timeout args
+    captured = _capture_session_client(client)
+
+    await client.connect()
+    await client.close()
+
+    assert "config" not in captured["kwargs"]
+
+
 @pytest.mark.asyncio
 async def test_ensure_lifecycle_expiration_swallows_endpoint_connection_error(
     monkeypatch,

@@ -139,6 +139,9 @@ async def configure_strategies(
             bucket=settings.s3_tiles_data_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await s3_client.connect()
 
@@ -269,6 +272,9 @@ async def configure_basemap(
             bucket=settings.s3_basemap_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await basemap_s3.connect()
         # Lifecycle policy application is delegated to the scraper loop so
@@ -379,6 +385,9 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             bucket=settings.s3_api_keys_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await api_keys_s3.connect()
         # Bucket is dedicated to this subsystem and the only writer here is the
@@ -424,6 +433,9 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         bucket=settings.s3_weather_stations_bucket_name,
         secure=settings.s3_tiles_data_secure,
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        connect_timeout=settings.s3_connect_timeout_seconds,
+        read_timeout=settings.s3_read_timeout_seconds,
+        max_attempts=settings.s3_max_attempts,
     )
     await weather_s3.connect()
 
@@ -528,6 +540,9 @@ async def _wait_for_s3_reachable() -> None:
         bucket=settings.s3_tiles_data_bucket_name,
         secure=settings.s3_tiles_data_secure,
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        connect_timeout=settings.s3_connect_timeout_seconds,
+        read_timeout=settings.s3_read_timeout_seconds,
+        max_attempts=settings.s3_max_attempts,
     )
     try:
         await probe.connect()

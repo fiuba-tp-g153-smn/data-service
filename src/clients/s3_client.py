@@ -11,6 +11,7 @@ from contextlib import AsyncExitStack
 from typing import Any, AsyncIterator, List, Optional, cast
 
 import aioboto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
@@ -36,6 +37,9 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         bucket: str,
         max_concurrent_downloads: int,
         secure: bool = False,
+        connect_timeout: Optional[float] = None,
+        read_timeout: Optional[float] = None,
+        max_attempts: Optional[int] = None,
     ):
         # pylint: disable=too-many-arguments
         self._endpoint = endpoint
@@ -44,10 +48,36 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         self._bucket = bucket
         self._secure = secure
         self._max_concurrent_downloads = max_concurrent_downloads
+        # Timeouts/retries are applied per-operation via a botocore Config so a
+        # stalled endpoint fails fast (and retries a bounded number of times)
+        # instead of hanging a request — and the sync loop — indefinitely.
+        self._connect_timeout = connect_timeout
+        self._read_timeout = read_timeout
+        self._max_attempts = max_attempts
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
         self._session = aioboto3.Session()
         self._exit_stack: Optional[AsyncExitStack] = None
         self._client: Optional[S3ClientType] = None
+
+    def _build_config(self) -> Optional[Config]:
+        """Build a botocore Config from the configured timeouts/retries.
+
+        Returns None when nothing is configured so botocore keeps its defaults.
+        """
+        if (
+            self._connect_timeout is None
+            and self._read_timeout is None
+            and self._max_attempts is None
+        ):
+            return None
+        kwargs: dict = {}
+        if self._connect_timeout is not None:
+            kwargs["connect_timeout"] = self._connect_timeout
+        if self._read_timeout is not None:
+            kwargs["read_timeout"] = self._read_timeout
+        if self._max_attempts is not None:
+            kwargs["retries"] = {"max_attempts": self._max_attempts, "mode": "standard"}
+        return Config(**kwargs)
 
     def _get_endpoint_url(self) -> str:
         protocol = "https" if self._secure else "http"
@@ -58,12 +88,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments
         if self._client:
             return
         self._exit_stack = AsyncExitStack()
-        ctx = self._session.client(
-            "s3",
-            endpoint_url=self._get_endpoint_url(),
-            aws_access_key_id=self._access_key,
-            aws_secret_access_key=self._secret_key,
-        )
+        config = self._build_config()
+        client_kwargs: dict = {
+            "endpoint_url": self._get_endpoint_url(),
+            "aws_access_key_id": self._access_key,
+            "aws_secret_access_key": self._secret_key,
+        }
+        if config is not None:
+            client_kwargs["config"] = config
+        ctx = self._session.client("s3", **client_kwargs)
 
         self._client = await self._exit_stack.enter_async_context(ctx)
         logger.info("S3 client connected to %s", self._get_endpoint_url())

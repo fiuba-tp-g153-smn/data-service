@@ -95,6 +95,9 @@ class SyncService(BaseSyncService):
             bucket=self._settings.s3_tiles_data_bucket_name,
             max_concurrent_downloads=self._settings.s3_max_concurrent_downloads,
             secure=self._settings.s3_tiles_data_secure,
+            connect_timeout=self._settings.s3_connect_timeout_seconds,
+            read_timeout=self._settings.s3_read_timeout_seconds,
+            max_attempts=self._settings.s3_max_attempts,
         )
 
     def _log_started(self, app_logger: Logger) -> None:
