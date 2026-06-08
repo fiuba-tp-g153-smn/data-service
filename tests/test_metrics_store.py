@@ -102,6 +102,19 @@ async def test_get_sync_cycles_filters_since_domain_and_orders_desc(store):
 
 
 @pytest.mark.asyncio
+async def test_get_sync_cycles_before_window_and_unlimited(store):
+    await store.record_sync_cycle("satellite", T0900, T0900, 1, 1, 0, "ok")
+    await store.record_sync_cycle("satellite", T1000, T1000, 1, 1, 0, "ok")
+    await store.record_sync_cycle("satellite", T1100, T1100, 1, 1, 0, "ok")
+
+    # before excludes rows with finished_at >= T1100; limit=0 returns all in window.
+    rows = await store.get_sync_cycles(
+        "2000-01-01T00:00:00+00:00", before_iso=T1100, limit=0
+    )
+    assert [r.finished_at for r in rows] == [T1000, T0900]
+
+
+@pytest.mark.asyncio
 async def test_sync_history_hourly_buckets_and_sums(store):
     await store.record_sync_cycle("satellite", T1000, T1000, 100, 5, 1, "error")
     await store.record_sync_cycle("satellite", T1030, T1030, 300, 7, 0, "ok")

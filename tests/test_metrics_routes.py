@@ -230,6 +230,24 @@ def test_sync_history_rejects_bad_bucket():
         app.dependency_overrides.clear()
 
 
+def test_sync_cycles_passes_since_before_and_unlimited():
+    store = AsyncMock()
+    store.get_sync_cycles = AsyncMock(return_value=[])
+    app.dependency_overrides[get_metrics_store] = lambda: store
+    try:
+        TestClient(app).get(
+            "/metrics/sync/cycles"
+            "?since=2026-06-01T00:00:00%2B00:00&before=2026-06-02T00:00:00%2B00:00&limit=0"
+        )
+        store.get_sync_cycles.assert_awaited_once()
+        args, kwargs = store.get_sync_cycles.call_args
+        assert args[0] == "2026-06-01T00:00:00+00:00"  # since overrides hours
+        assert kwargs["before_iso"] == "2026-06-02T00:00:00+00:00"
+        assert kwargs["limit"] == 0
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_memory_history_maps_points():
     store = AsyncMock()
     store.get_memory_history = AsyncMock(

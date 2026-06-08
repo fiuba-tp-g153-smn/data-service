@@ -333,27 +333,44 @@ class MetricsStore:
         return [self._to_sync_row(r) for r in rows]
 
     async def get_sync_cycles(
-        self, since_iso: str, domain: Optional[str] = None, limit: int = 200
+        self,
+        since_iso: str,
+        domain: Optional[str] = None,
+        limit: int = 200,
+        before_iso: Optional[str] = None,
     ) -> List[SyncCycleRow]:
-        """Return recent raw cycle rows, newest first, optionally domain-filtered."""
+        """Return recent raw cycle rows, newest first, optionally domain-filtered.
+
+        `before_iso` bounds the window above (finished_at < before) for lazy
+        timeline chunks; `limit <= 0` returns every row in the window.
+        """
         async with self._access_lock:
             return await asyncio.to_thread(
-                self._get_sync_cycles_sync, since_iso, domain, limit
+                self._get_sync_cycles_sync, since_iso, domain, limit, before_iso
             )
 
     def _get_sync_cycles_sync(
-        self, since_iso: str, domain: Optional[str], limit: int
+        self,
+        since_iso: str,
+        domain: Optional[str],
+        limit: int,
+        before_iso: Optional[str],
     ) -> List[SyncCycleRow]:
         params: List[object] = [since_iso]
         sql = (
             "SELECT domain, started_at, finished_at, duration_ms, "
             "downloaded, errors, outcome FROM sync_cycles WHERE finished_at >= ?"
         )
+        if before_iso:
+            sql += " AND finished_at < ?"
+            params.append(before_iso)
         if domain:
             sql += " AND domain = ?"
             params.append(domain)
-        sql += " ORDER BY finished_at DESC LIMIT ?"
-        params.append(limit)
+        sql += " ORDER BY finished_at DESC"
+        if limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
         rows = self._require_conn().execute(sql, params).fetchall()
         return [self._to_sync_row(r) for r in rows]
 

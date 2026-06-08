@@ -179,12 +179,19 @@ async def get_sync_history(
 async def get_sync_cycles(
     hours: int = Query(24, ge=0),
     domain: Optional[str] = None,
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(200, ge=0, le=200000),
+    since: Optional[str] = None,
+    before: Optional[str] = None,
     metrics_store: MetricsStore = Depends(get_metrics_store),
 ) -> List[SyncCycle]:
-    """Raw recent cycle rows, newest first, for the cycles table."""
+    """Raw recent cycle rows, newest first.
+
+    Backs both the cycles table (`hours` + `limit`) and the timeline (explicit
+    `since`/`before` ISO window + `limit=0` for every row in that window).
+    """
+    since_iso = since if since else _since(hours)
     rows = await metrics_store.get_sync_cycles(
-        _since(hours), domain=domain, limit=limit
+        since_iso, domain=domain, limit=limit, before_iso=before
     )
     return [
         SyncCycle(
