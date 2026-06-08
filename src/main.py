@@ -17,6 +17,7 @@ from clients.smn_api_client import SmnApiClient
 from clients.smn_registry_client import SmnRegistryClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
 from controller import general
+from db.migrate import ensure_migrations
 from dependencies import (
     basemap_service,
     logger,
@@ -152,7 +153,8 @@ async def configure_strategies(
         wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
 
         sync_service.set_redis_client(client_redis)
-        sync_service.set_metrics_store(metrics_store)
+        if settings.metrics_enabled:
+            sync_service.set_metrics_store(metrics_store)
         await sync_service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
@@ -334,7 +336,7 @@ async def configure_basemap(
             s3_object_ttl_days=settings.basemap_s3_object_ttl_days,
             redis_writes_enabled=scraper_writes_redis,
             parallelism_mode=settings.basemap_scrape_parallelism_mode,
-            metrics_store=metrics_store,
+            metrics_store=metrics_store if settings.metrics_enabled else None,
         )
         await scraper.start(logger)
         set_basemap_state_store(state_store)
@@ -447,7 +449,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         smn_client=smn_client,
         registry_client=registry_client,
         redis_client=redis_client,
-        metrics_store=metrics_store,
+        metrics_store=metrics_store if settings.metrics_enabled else None,
     )
     await scraper.start(logger)
 
@@ -550,6 +552,11 @@ async def lifespan(_app: FastAPI):
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
     await redis_client.connect()
+    # Bring the metrics DB schema to head before opening it (offloaded so the
+    # flock + Alembic upgrade never block the event loop). Runs in every worker;
+    # the flock serializes them and the upgrade no-ops once stamped. Independent
+    # of metrics_enabled — the DB must exist for the /metrics routes regardless.
+    await asyncio.to_thread(ensure_migrations, settings)
     await metrics_store.connect()
 
     # S3 is a hard dependency. Block here until it answers (unlimited retry with

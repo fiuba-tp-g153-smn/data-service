@@ -28,6 +28,9 @@ pillow = "^12.1.1"
 types-aiobotocore-s3 = "^3.2.0"
 rasterio = "^1.4.3"
 tenacity = "^9.0.0"
+# Migration tooling for the metrics SQLite store (pulls SQLAlchemy). Used only
+# by db.migrate at startup + the migration scripts, not the runtime store.
+alembic = "^1.18.4"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^9.0.2"

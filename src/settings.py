@@ -245,6 +245,10 @@ class Settings:
     metrics_enabled: bool = True
     metrics_db_path: str = "data/metrics.sqlite"
     metrics_retention_days: int = 14
+    # Per-table row cap, a backstop behind time-based retention so the metrics
+    # DB can't grow unbounded if retention is misconfigured. Applied to each of
+    # the three tables independently every collector cycle. 0 disables the cap.
+    metrics_max_rows: int = 1_000_000
     # File lock so only one uvicorn worker runs the Redis memory collector.
     metrics_lock_path: str = "/tmp/redis_metrics.lock"
     # Redis memory collector cadence. Each cycle SCANs the whole keyspace and runs
@@ -366,6 +370,7 @@ class Settings:
             "metrics_enabled",
             "metrics_db_path",
             "metrics_retention_days",
+            "metrics_max_rows",
             "metrics_lock_path",
             "redis_metrics_sample_interval_seconds",
             "redis_metrics_scan_count",
@@ -706,6 +711,7 @@ class Settings:
         self.metrics_retention_days = self._env_int(
             "METRICS_RETENTION_DAYS", self.metrics_retention_days
         )
+        self.metrics_max_rows = self._env_int("METRICS_MAX_ROWS", self.metrics_max_rows)
         self.metrics_lock_path = os.getenv("METRICS_LOCK_PATH", self.metrics_lock_path)
         self.redis_metrics_sample_interval_seconds = self._env_int(
             "REDIS_METRICS_SAMPLE_INTERVAL_SECONDS",
@@ -828,6 +834,12 @@ class Settings:
                 "weather_stations_sync_mode='full' requires SMN_API_USERNAME "
                 "and SMN_API_PASSWORD to be set; the scraper needs them to "
                 "mint a JWT for the SMN API."
+            )
+        # Row cap is a non-negative backstop (0 disables it).
+        if self.metrics_max_rows < 0:
+            raise ValueError(
+                f"metrics_max_rows must be >= 0 (got {self.metrics_max_rows}); "
+                "use 0 to disable the per-table row cap."
             )
 
     def is_s3_configured(self) -> bool:

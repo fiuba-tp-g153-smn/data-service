@@ -109,6 +109,8 @@ class RedisMetricsService(BaseSyncService):
             - timedelta(days=self._settings.metrics_retention_days)
         ).isoformat()
         await self._metrics_store.prune(cutoff)
+        # Backstop behind time-based retention: cap each table's row count.
+        await self._metrics_store.prune_to_max_rows(self._settings.metrics_max_rows)
 
         logger.info(
             "Redis metrics sample: %d keys / %d bytes across %d domains",

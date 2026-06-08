@@ -308,3 +308,20 @@ def test_provider_cooldown_schedule_rejects_non_monotonic(tmp_path):
                 }
             },
         )
+
+
+def test_metrics_max_rows_loads_from_json(tmp_path):
+    s = _load(tmp_path, {"metrics_max_rows": 500})
+    assert s.metrics_max_rows == 500
+
+
+def test_metrics_max_rows_zero_disables_cap(tmp_path):
+    s = _built_settings(tmp_path, {"metrics_max_rows": 0})
+    assert s.metrics_max_rows == 0
+
+
+def test_metrics_max_rows_negative_rejected(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="metrics_max_rows"):
+        _built_settings(tmp_path, {"metrics_max_rows": -1})

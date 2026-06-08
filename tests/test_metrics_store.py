@@ -10,6 +10,7 @@ from clients.metrics_store import (
     MetricsStore,
     SyncCycleRow,
 )
+from db.migrate import run_migrations
 
 # Sortable ISO8601 UTC timestamps (isoformat-style with +00:00 offset).
 T0900 = "2026-06-07T09:00:00+00:00"
@@ -21,8 +22,14 @@ OLD = "2026-05-01T00:00:00+00:00"
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    """Fresh store backed by a tmp_path sqlite file; closed after each test."""
-    s = MetricsStore(str(tmp_path / "metrics.sqlite"))
+    """Fresh store backed by a tmp_path sqlite file; closed after each test.
+
+    The schema is owned by Alembic now (``connect`` no longer creates tables),
+    so migrate the DB first via the same helper the app's startup uses.
+    """
+    db_path = tmp_path / "metrics.sqlite"
+    run_migrations(db_path)
+    s = MetricsStore(str(db_path))
     await s.connect()
     try:
         yield s
@@ -255,3 +262,31 @@ async def test_prune_deletes_old_rows_across_tables(store):
 
     info_history = await store.get_info_history("2000-01-01T00:00:00+00:00")
     assert [h.used_memory for h in info_history] == [2]
+
+
+@pytest.mark.asyncio
+async def test_prune_to_max_rows_caps_each_table(store):
+    # Insert 5 rows into each of the three independently-capped tables.
+    for i in range(5):
+        ts = f"2026-06-07T10:0{i}:00+00:00"
+        await store.record_sync_cycle("satellite", ts, ts, i, i, 0, "ok")
+        await store.record_memory_sample(ts, [("satellite", i, i * 10)])
+        await store.record_info_sample(ts, {"used_memory": i})
+
+    # 0 disables the cap entirely.
+    assert await store.prune_to_max_rows(0) == 0
+
+    # Cap each table to its 2 newest rows (by id): 3 removed from each of 3 tables.
+    assert await store.prune_to_max_rows(2) == 9
+
+    cycles = await store.get_sync_cycles("2000-01-01T00:00:00+00:00", limit=100)
+    assert [c.duration_ms for c in cycles] == [4, 3]  # newest kept, oldest gone
+
+    mem = await store.get_memory_history("2000-01-01T00:00:00+00:00")
+    assert [m.memory_bytes for m in mem] == [30, 40]
+
+    info = await store.get_info_history("2000-01-01T00:00:00+00:00")
+    assert [h.used_memory for h in info] == [3, 4]
+
+    # Idempotent once at/under the cap.
+    assert await store.prune_to_max_rows(2) == 0

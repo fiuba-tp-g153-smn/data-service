@@ -10,8 +10,9 @@ Persists two independent streams so the dashboard can chart trends over time:
 
 Mirrors the cold-storage pattern of :class:`BasemapStateStore`: a single
 ``sqlite3.Connection`` in WAL mode, all access serialized by ``_access_lock`` and
-offloaded via ``asyncio.to_thread`` so the event loop never blocks. Schema is
-embedded (``CREATE TABLE IF NOT EXISTS``) — this service has no Alembic.
+offloaded via ``asyncio.to_thread`` so the event loop never blocks. The schema is
+owned by Alembic (see ``migrations/metrics``) and applied at startup by
+``db.migrate.ensure_migrations`` — this store only opens the migrated DB.
 """
 
 import asyncio
@@ -101,66 +102,9 @@ _INFO_FIELDS = (
 )
 
 
-_SCHEMA_SQL = (
-    """
-    CREATE TABLE IF NOT EXISTS sync_cycles (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        domain      TEXT    NOT NULL,
-        started_at  TEXT    NOT NULL,
-        finished_at TEXT    NOT NULL,
-        duration_ms INTEGER NOT NULL,
-        downloaded  INTEGER NOT NULL DEFAULT 0,
-        errors      INTEGER NOT NULL DEFAULT 0,
-        outcome     TEXT    NOT NULL
-    );
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_sync_cycles_domain_finished
-        ON sync_cycles(domain, finished_at);
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_sync_cycles_finished
-        ON sync_cycles(finished_at);
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS redis_memory_samples (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        sampled_at   TEXT    NOT NULL,
-        domain       TEXT    NOT NULL,
-        key_count    INTEGER NOT NULL,
-        memory_bytes INTEGER NOT NULL
-    );
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_memory_sampled
-        ON redis_memory_samples(sampled_at);
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_memory_domain_sampled
-        ON redis_memory_samples(domain, sampled_at);
-    """,
-    """
-    CREATE TABLE IF NOT EXISTS redis_info_samples (
-        id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-        sampled_at              TEXT    NOT NULL,
-        used_memory             INTEGER,
-        used_memory_rss         INTEGER,
-        used_memory_peak        INTEGER,
-        maxmemory               INTEGER,
-        mem_fragmentation_ratio REAL,
-        evicted_keys            INTEGER,
-        expired_keys            INTEGER,
-        keyspace_hits           INTEGER,
-        keyspace_misses         INTEGER,
-        connected_clients       INTEGER,
-        total_keys              INTEGER
-    );
-    """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_info_sampled
-        ON redis_info_samples(sampled_at);
-    """,
-)
+# Tables capped independently by ``prune_to_max_rows`` — each has an
+# autoincrement ``id`` PK, so the newest rows always have the highest ids.
+_CAPPED_TABLES = ("sync_cycles", "redis_memory_samples", "redis_info_samples")
 
 
 class MetricsStore:
@@ -179,7 +123,7 @@ class MetricsStore:
         self._access_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Open the SQLite connection and create tables if missing."""
+        """Open the SQLite connection (schema is owned by Alembic migrations)."""
         if self._conn is not None:
             return
 
@@ -188,7 +132,7 @@ class MetricsStore:
         logger.info("Metrics store opened at %s", self._db_path)
 
     def _open_and_init(self) -> None:
-        """Blocking: open connection, apply pragmas, create schema."""
+        """Blocking: open connection and apply pragmas (no DDL — see migrations)."""
         conn = sqlite3.connect(
             self._db_path,
             check_same_thread=False,
@@ -197,8 +141,6 @@ class MetricsStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
-        for ddl in _SCHEMA_SQL:
-            conn.execute(ddl)
         self._conn = conn
 
     async def close(self) -> None:
@@ -312,6 +254,39 @@ class MetricsStore:
         conn.execute(
             "DELETE FROM redis_info_samples WHERE sampled_at < ?", (before_iso,)
         )
+
+    async def prune_to_max_rows(self, max_rows: int) -> int:
+        """Cap each table to its most recent ``max_rows`` rows. Returns total deleted.
+
+        A backstop behind the time-based ``prune``: bounds unbounded growth even
+        if retention is misconfigured. ``max_rows <= 0`` disables the cap.
+        """
+        async with self._access_lock:
+            return await asyncio.to_thread(self._prune_to_max_rows_sync, max_rows)
+
+    def _prune_to_max_rows_sync(self, max_rows: int) -> int:
+        if max_rows <= 0:
+            return 0
+        conn = self._require_conn()
+        total = 0
+        for table in _CAPPED_TABLES:
+            # Each table has an autoincrement ``id`` PK, so the newest rows have
+            # the highest ids. Find the id of the ``max_rows``-th newest row and
+            # delete everything below it — a fast primary-key range delete.
+            row = conn.execute(
+                f"SELECT id FROM {table} ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (max_rows - 1,),
+            ).fetchone()
+            if row is None:
+                continue  # table holds <= max_rows rows — nothing to prune
+            total += conn.execute(
+                f"DELETE FROM {table} WHERE id < ?", (row["id"],)
+            ).rowcount
+        if total:
+            logger.info(
+                "Pruned %d metrics row(s); capped each table at %d", total, max_rows
+            )
+        return total
 
     # ============== Sync-cycle reads ==============
 

@@ -39,6 +39,11 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy the actual application code into /app
 COPY ./src /app
 COPY ./settings.json /settings.json
+# Alembic migration tooling for the metrics SQLite store. Since ./src is
+# flattened into /app, db/migrate.py resolves the repo root to "/", so these
+# must land at /alembic.ini + /migrations (mirrors settings.json at /).
+COPY ./alembic.ini /alembic.ini
+COPY ./migrations /migrations
 
 EXPOSE 8080
 

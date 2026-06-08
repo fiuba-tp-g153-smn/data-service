@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 
 from clients.metrics_store import MetricsStore
+from db.migrate import run_migrations
 from services.redis_metrics_service import RedisMetricsService, classify_key
 
 
@@ -36,6 +37,7 @@ def _settings(**overrides):
         redis_metrics_scan_count=1000,
         redis_metrics_memory_batch_size=2,  # small to exercise batch flushing
         metrics_retention_days=14,
+        metrics_max_rows=1_000_000,
         metrics_lock_path="/tmp/test_redis_metrics.lock",
     )
     base.update(overrides)
@@ -66,7 +68,9 @@ class _FakeRedis:
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    s = MetricsStore(str(tmp_path / "metrics.sqlite"))
+    db_path = tmp_path / "metrics.sqlite"
+    run_migrations(db_path)  # schema is Alembic-owned; connect no longer creates it
+    s = MetricsStore(str(db_path))
     await s.connect()
     try:
         yield s

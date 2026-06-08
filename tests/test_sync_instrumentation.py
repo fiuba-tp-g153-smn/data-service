@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 from clients.metrics_store import MetricsStore
+from db.migrate import run_migrations
 from services.sync_service import SyncService
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from settings import Settings
@@ -14,7 +15,9 @@ from settings import Settings
 
 @pytest_asyncio.fixture
 async def store(tmp_path):
-    s = MetricsStore(str(tmp_path / "metrics.sqlite"))
+    db_path = tmp_path / "metrics.sqlite"
+    run_migrations(db_path)  # schema is Alembic-owned; connect no longer creates it
+    s = MetricsStore(str(db_path))
     await s.connect()
     try:
         yield s
