@@ -18,6 +18,10 @@ class StationObservation(BaseModel):
     visibility: Optional[float] = None
     weather: Optional[dict] = None
     wind: Optional[dict] = None
+    # Set only by the `/{tileset_id}` endpoint: True when this station's
+    # `observed_at` is within `grace_period_hours` of the selected hour. Absent
+    # (None) on `/latest` and raw S3 bodies, which carry no freshness window.
+    is_current: Optional[bool] = None
 
     model_config = ConfigDict(
         json_schema_extra={

@@ -10,7 +10,9 @@ Redis keys (binary `decode_responses=False`, JSON payloads):
     cache:ws:tilesets                 assembled tilesets list (JSON)
     cache:ws:registry                 raw stations.json bytes
     cache:ws:snap:{s3_object_key}     a snapshot body, keyed by its S3 object so one
-                                      cached body serves every /{tileset_id}?N= tolerance
+                                      cached body backs every /{tileset_id} request
+                                      (the grace_period_hours flagging is applied
+                                      per-request, after the raw body is read)
 """
 
 import asyncio
@@ -64,9 +66,10 @@ def registry_key() -> str:
 def snap_body_key(s3_key: str) -> str:
     """Cache key for a snapshot body, keyed by its S3 object key.
 
-    `N`-independent: the `/{tileset_id}?N=` resolution picks an S3 object, and the
-    same body serves every tolerance that resolves to it — so one cached body
-    backs all of an animation's frames regardless of the chosen `N`.
+    Grace-independent: `/{tileset_id}` resolves a bucket to one S3 object and the
+    same raw body backs every request for it (the per-station `is_current`
+    flagging is applied after the read) — so one cached body backs all of an
+    animation's frames regardless of `grace_period_hours`.
     """
     return f"cache:ws:snap:{s3_key}"
 
@@ -229,7 +232,7 @@ async def recent_snapshot_keys(
 # ----------------------------------------------------- per-station series pivot
 
 
-def _parse_observed_at(value: object) -> Optional[datetime]:
+def parse_observed_at(value: object) -> Optional[datetime]:
     """Parse an ISO-8601 `observed_at` (with `Z` or offset) into a UTC datetime."""
     if not isinstance(value, str) or not value:
         return None
@@ -297,7 +300,7 @@ def _sorted_points(by_observed_at: Dict[str, dict]) -> List[dict]:
     parsed = [
         (ts, point)
         for raw, point in by_observed_at.items()
-        if (ts := _parse_observed_at(raw)) is not None
+        if (ts := parse_observed_at(raw)) is not None
     ]
     parsed.sort(key=lambda tp: tp[0])
     return [point for _ts, point in parsed]

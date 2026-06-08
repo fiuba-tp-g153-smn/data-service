@@ -230,21 +230,24 @@ async def test_tileset_lookup_hits_and_misses(app_and_keystore):
     created = await keystore.create("test")
     client = TestClient(app)
 
-    # Exact-hour hit.
+    # Bucket hit: the 14:00 representative, each station flagged is_current
+    # (both observed at 14:00, so current even at grace_period_hours=0).
     resp = client.get(
-        "/weather-stations/20260517T1400Z?N=0",
+        "/weather-stations/20260517T1400Z?grace_period_hours=0",
         headers={"X-API-Key": created.secret},
     )
     assert resp.status_code == 200
-    assert resp.json()["scraped_at"] == "2026-05-17T14:00:00Z"
+    body = resp.json()
+    assert body["scraped_at"] == "2026-05-17T14:00:00Z"
+    assert [s["is_current"] for s in body["stations"]] == [True, True]
     assert (
         resp.headers["cache-control"]
         == settings.weather_stations_cache_control_snapshot
     )
 
-    # Out-of-window -> 404.
+    # Empty bucket (no snapshot in [11:00, 12:00)) -> 404.
     resp = client.get(
-        "/weather-stations/20260517T1100Z?N=0",
+        "/weather-stations/20260517T1100Z?grace_period_hours=0",
         headers={"X-API-Key": created.secret},
     )
     assert resp.status_code == 404
