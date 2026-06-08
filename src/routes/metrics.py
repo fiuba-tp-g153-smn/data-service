@@ -294,10 +294,15 @@ async def get_basemap_providers(
         cursor = None
         last_completed = None
         health = None
+        stats = None
         if state_store is not None:
             cursor = await state_store.get_cursor(provider_id)
             last_completed = await state_store.get_last_completed(provider_id)
             health = await state_store.get_health(provider_id)
+            stats = await state_store.get_scrape_stats(provider_id)
+        error_rate = (
+            stats.failed / stats.attempted if stats and stats.attempted else None
+        )
         result.append(
             BasemapProviderStatus(
                 provider_id=provider_id,
@@ -312,6 +317,12 @@ async def get_basemap_providers(
                 consecutive_trips=health.consecutive_trips if health else 0,
                 cooldown_until=health.cooldown_until if health else None,
                 last_reason=health.last_reason if health else None,
+                attempted=stats.attempted if stats else 0,
+                ok=stats.ok if stats else 0,
+                failed=stats.failed if stats else 0,
+                error_rate=error_rate,
+                completed=stats.completed if stats else False,
+                last_swept=stats.swept_at if stats else None,
             )
         )
     return result

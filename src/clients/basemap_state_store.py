@@ -36,6 +36,23 @@ class ProviderHealth:
     last_reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class ScrapeStats:
+    """Outcome of a provider's most recent sweep, for the dashboard error rate.
+
+    ``attempted`` counts definitive fetch outcomes (``ok`` + ``failed``);
+    legitimately-missing tiles (404/403) and downstream storage errors are
+    excluded. ``completed`` is False when the sweep was cut short by the circuit
+    breaker. Overwritten each sweep, so it always reflects the latest run.
+    """
+
+    attempted: int
+    ok: int
+    failed: int
+    completed: bool
+    swept_at: int
+
+
 _SCHEMA_SQL = (
     """
     CREATE TABLE IF NOT EXISTS basemap_scrape_cursor (
@@ -72,6 +89,16 @@ _SCHEMA_SQL = (
         last_tripped_at   INTEGER NOT NULL,
         last_reason       TEXT    NOT NULL,
         updated_at        INTEGER NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS basemap_scrape_stats (
+        provider_id TEXT PRIMARY KEY,
+        attempted   INTEGER NOT NULL,
+        ok          INTEGER NOT NULL,
+        failed      INTEGER NOT NULL,
+        completed   INTEGER NOT NULL,
+        swept_at    INTEGER NOT NULL
     );
     """,
 )
@@ -367,4 +394,76 @@ class BasemapStateStore:
         self._require_conn().execute(
             "DELETE FROM basemap_provider_health WHERE provider_id = ?",
             (provider_id,),
+        )
+
+    async def set_scrape_stats(
+        self,
+        provider_id: str,
+        attempted: int,
+        ok: int,
+        failed: int,
+        completed: bool,
+    ) -> None:
+        """Upsert the last-sweep stats for a provider (stamps swept_at = now)."""
+        # pylint: disable=too-many-arguments
+        async with self._access_lock:
+            await asyncio.to_thread(
+                self._set_scrape_stats_sync,
+                provider_id,
+                attempted,
+                ok,
+                failed,
+                completed,
+            )
+
+    def _set_scrape_stats_sync(
+        self,
+        provider_id: str,
+        attempted: int,
+        ok: int,
+        failed: int,
+        completed: bool,
+    ) -> None:
+        # pylint: disable=too-many-arguments
+        self._require_conn().execute(
+            """
+            INSERT INTO basemap_scrape_stats
+                (provider_id, attempted, ok, failed, completed, swept_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id) DO UPDATE SET
+                attempted = excluded.attempted,
+                ok        = excluded.ok,
+                failed    = excluded.failed,
+                completed = excluded.completed,
+                swept_at  = excluded.swept_at
+            """,
+            (provider_id, attempted, ok, failed, int(completed), int(time.time())),
+        )
+
+    async def get_scrape_stats(self, provider_id: str) -> Optional[ScrapeStats]:
+        """Return the last-sweep stats for a provider, or None if never swept."""
+        async with self._access_lock:
+            return await asyncio.to_thread(self._get_scrape_stats_sync, provider_id)
+
+    def _get_scrape_stats_sync(self, provider_id: str) -> Optional[ScrapeStats]:
+        row = (
+            self._require_conn()
+            .execute(
+                """
+                SELECT attempted, ok, failed, completed, swept_at
+                FROM basemap_scrape_stats
+                WHERE provider_id = ?
+                """,
+                (provider_id,),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        return ScrapeStats(
+            attempted=int(row[0]),
+            ok=int(row[1]),
+            failed=int(row[2]),
+            completed=bool(row[3]),
+            swept_at=int(row[4]),
         )

@@ -5,7 +5,12 @@ import sqlite3
 import pytest
 import pytest_asyncio
 
-from clients.basemap_state_store import BasemapStateStore, Cursor, ProviderHealth
+from clients.basemap_state_store import (
+    BasemapStateStore,
+    Cursor,
+    ProviderHealth,
+    ScrapeStats,
+)
 
 
 @pytest_asyncio.fixture
@@ -256,6 +261,55 @@ async def test_close_circuit_on_missing_is_a_noop(store):
     """Closing a never-opened circuit is safe."""
     await store.close_circuit("never-tripped")
     assert await store.get_health("never-tripped") is None
+
+
+# --------------------------------------------------------------------------- #
+# Last-sweep scrape stats (dashboard error rate)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_scrape_stats_missing_returns_none(store):
+    assert await store.get_scrape_stats("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_set_scrape_stats_round_trip_and_upsert(store):
+    await store.set_scrape_stats("p", attempted=100, ok=97, failed=3, completed=True)
+    stats = await store.get_scrape_stats("p")
+    assert isinstance(stats, ScrapeStats)
+    assert (stats.attempted, stats.ok, stats.failed, stats.completed) == (
+        100,
+        97,
+        3,
+        True,
+    )
+    assert stats.swept_at > 0
+
+    # Second call overwrites in place (PK conflict → upsert), not a new row.
+    await store.set_scrape_stats("p", attempted=200, ok=200, failed=0, completed=False)
+    stats2 = await store.get_scrape_stats("p")
+    assert stats2 is not None
+    assert (stats2.attempted, stats2.failed, stats2.completed) == (200, 0, False)
+
+
+@pytest.mark.asyncio
+async def test_scrape_stats_survives_reopen(tmp_path):
+    db_path = tmp_path / "state.sqlite"
+    s1 = BasemapStateStore(str(db_path))
+    await s1.connect()
+    await s1.set_scrape_stats("argenmap", attempted=10, ok=9, failed=1, completed=True)
+    await s1.close()
+
+    s2 = BasemapStateStore(str(db_path))
+    await s2.connect()
+    try:
+        stats = await s2.get_scrape_stats("argenmap")
+        assert stats is not None
+        assert stats.failed == 1
+        assert stats.completed is True
+    finally:
+        await s2.close()
 
 
 @pytest.mark.asyncio

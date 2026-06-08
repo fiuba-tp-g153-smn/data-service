@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
 import routes.metrics as metrics_routes
-from clients.basemap_state_store import Cursor, ProviderHealth
+from clients.basemap_state_store import Cursor, ProviderHealth, ScrapeStats
 from clients.metrics_store import (
     InfoSample,
     MemoryDomainSample,
@@ -270,6 +270,11 @@ def test_basemap_providers_with_state(monkeypatch):
             last_reason="boom",
         )
     )
+    state.get_scrape_stats = AsyncMock(
+        return_value=ScrapeStats(
+            attempted=1000, ok=997, failed=3, completed=False, swept_at=1700000000
+        )
+    )
     app.dependency_overrides[get_settings] = lambda: SimpleNamespace(
         basemap_providers=[]
     )
@@ -284,6 +289,11 @@ def test_basemap_providers_with_state(monkeypatch):
         assert row["circuit_open"] is True
         assert row["consecutive_trips"] == 2
         assert row["last_reason"] == "boom"
+        assert row["attempted"] == 1000
+        assert row["failed"] == 3
+        assert row["error_rate"] == 3 / 1000
+        assert row["completed"] is False
+        assert row["last_swept"] == 1700000000
     finally:
         app.dependency_overrides.clear()
 
@@ -302,5 +312,8 @@ def test_basemap_providers_without_state_store(monkeypatch):
         assert data[0]["in_progress"] is False
         assert data[0]["circuit_open"] is False
         assert data[0]["consecutive_trips"] == 0
+        assert data[0]["attempted"] == 0
+        assert data[0]["failed"] == 0
+        assert data[0]["error_rate"] is None
     finally:
         app.dependency_overrides.clear()

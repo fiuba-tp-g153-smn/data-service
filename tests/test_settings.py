@@ -230,6 +230,41 @@ def test_provider_unhealthy_threshold_must_be_positive(tmp_path):
         )
 
 
+def test_provider_error_rate_round_trips(tmp_path):
+    s = _built_settings(
+        tmp_path,
+        {
+            "basemap": {
+                "sync_mode": "full",
+                "provider_error_rate_threshold": 0.1,
+                "provider_error_rate_min_samples": 25,
+            }
+        },
+    )
+    assert s.basemap_provider_error_rate_threshold == 0.1
+    assert s.basemap_provider_error_rate_min_samples == 25
+
+
+def test_provider_error_rate_threshold_out_of_range_rejected(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="basemap_provider_error_rate_threshold"):
+        _built_settings(
+            tmp_path,
+            {"basemap": {"sync_mode": "full", "provider_error_rate_threshold": 1.5}},
+        )
+
+
+def test_provider_error_rate_min_samples_must_be_positive(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="basemap_provider_error_rate_min_samples"):
+        _built_settings(
+            tmp_path,
+            {"basemap": {"sync_mode": "full", "provider_error_rate_min_samples": 0}},
+        )
+
+
 def test_provider_cooldown_schedule_rejects_empty(tmp_path):
     import pytest
 

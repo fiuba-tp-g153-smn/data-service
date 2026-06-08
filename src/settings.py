@@ -172,6 +172,15 @@ class Settings:
     # resets the counter and closes the circuit.
     basemap_provider_unhealthy_threshold: int = 5
     basemap_provider_cooldown_schedule: List[int] = [300, 900, 3600, 10800, 21600]
+    # Rate-based circuit breaker (supersedes the consecutive-failure trigger
+    # above). Within one sweep the scraper pushes through scattered failures and
+    # trips a provider only when its error rate (failed / attempted fetches)
+    # exceeds `error_rate_threshold`, but not before `error_rate_min_samples`
+    # fetches — so a fully-down provider still bails early instead of hammering
+    # the whole bbox. `basemap_provider_unhealthy_threshold` is kept for config
+    # compatibility but no longer drives tripping.
+    basemap_provider_error_rate_threshold: float = 0.05
+    basemap_provider_error_rate_min_samples: int = 50
 
     # --- Weather stations subsystem (loaded from settings.json, env overrides) ---
     # Operational knobs only — secrets (SMN_*, WEATHER_STATIONS_ADMIN_PASSWORD)
@@ -242,7 +251,7 @@ class Settings:
     # MEMORY USAGE per key (pipelined) — accurate but O(N keys), so the default
     # interval is generous. scan_count bounds the SCAN batch; memory_batch_size
     # bounds the MEMORY USAGE pipeline depth.
-    redis_metrics_sample_interval_seconds: int = 900
+    redis_metrics_sample_interval_seconds: int = 300
     redis_metrics_scan_count: int = 1000
     redis_metrics_memory_batch_size: int = 500
 
@@ -329,6 +338,8 @@ class Settings:
             "basemap_scrape_per_host_concurrent",
             "basemap_provider_unhealthy_threshold",
             "basemap_provider_cooldown_schedule",
+            "basemap_provider_error_rate_threshold",
+            "basemap_provider_error_rate_min_samples",
             "weather_stations_sync_mode",
             "weather_stations_scrape_interval_seconds",
             "weather_stations_scrape_lock_path",
@@ -568,6 +579,14 @@ class Settings:
             "BASEMAP_PROVIDER_COOLDOWN_SCHEDULE",
             self.basemap_provider_cooldown_schedule,
         )
+        self.basemap_provider_error_rate_threshold = self._env_float(
+            "BASEMAP_PROVIDER_ERROR_RATE_THRESHOLD",
+            self.basemap_provider_error_rate_threshold,
+        )
+        self.basemap_provider_error_rate_min_samples = self._env_int(
+            "BASEMAP_PROVIDER_ERROR_RATE_MIN_SAMPLES",
+            self.basemap_provider_error_rate_min_samples,
+        )
 
         # SMN API + weather-stations subsystem
         self.s3_weather_stations_bucket_name = os.getenv(
@@ -737,6 +756,16 @@ class Settings:
             raise ValueError(
                 "basemap_provider_unhealthy_threshold must be >= 1 "
                 f"(got {self.basemap_provider_unhealthy_threshold})"
+            )
+        if not 0 < self.basemap_provider_error_rate_threshold <= 1:
+            raise ValueError(
+                "basemap_provider_error_rate_threshold must be in (0, 1] "
+                f"(got {self.basemap_provider_error_rate_threshold})"
+            )
+        if self.basemap_provider_error_rate_min_samples < 1:
+            raise ValueError(
+                "basemap_provider_error_rate_min_samples must be >= 1 "
+                f"(got {self.basemap_provider_error_rate_min_samples})"
             )
         schedule = self.basemap_provider_cooldown_schedule
         if not schedule:

@@ -52,10 +52,12 @@ class _ProviderSweepState:
     """
     Mutable per-provider sweep state threaded through the scrape call chain.
 
-    Tracks consecutive unavailable fetches to drive the circuit breaker, and
-    carries the final "tripped" verdict back up to ``_scrape_provider``.
-    Scoped to one provider's sweep — concurrent providers (per_origin /
-    full parallelism modes) each own their own instance, so no cross-talk.
+    Accumulates ``attempted`` (OK + UNAVAILABLE fetches) and ``failed``
+    (UNAVAILABLE) to drive the rate-based circuit breaker, and carries the final
+    "tripped" verdict back up to ``_scrape_provider``. Scoped to one provider's
+    sweep — concurrent providers (per_origin / full parallelism modes) each own
+    their own instance, so no cross-talk. These same counts feed the per-provider
+    last-sweep error-rate stats shown on the dashboard.
 
     ``storage_errors`` counts tiles whose upstream fetch succeeded but whose
     persistence to S3/Redis failed. Non-zero at end-of-sweep = systemic
@@ -64,7 +66,8 @@ class _ProviderSweepState:
     instead of the configured scrape interval.
     """
 
-    consecutive_unavailable: int = 0
+    attempted: int = 0
+    failed: int = 0
     tripped: bool = False
     last_reason: str = ""
     failure_samples: List[str] = field(default_factory=list)
@@ -169,12 +172,14 @@ class BasemapScraperService(BaseSyncService):
         # huge zoom can't flood the event loop (HTTP concurrency stays capped
         # by the client semaphore regardless).
         self._fanout_window = settings.basemap_scrape_fanout_window
-        # Circuit-breaker knobs. Threshold = N consecutive UNAVAILABLE fetches
-        # within one provider sweep before we trip the provider and move on.
-        # Cooldown schedule is indexed by consecutive trip count (capped at
-        # the last element) so a repeatedly-flapping provider backs off
-        # exponentially.
-        self._unhealthy_threshold = settings.basemap_provider_unhealthy_threshold
+        # Rate-based circuit breaker. Within one sweep the scraper pushes through
+        # scattered failures and trips a provider only when its error rate
+        # (failed / attempted) exceeds `error_rate_threshold`, but not before
+        # `error_rate_min_samples` fetches (so a fully-down provider bails early).
+        # Cooldown schedule is indexed by consecutive trip count (capped at the
+        # last element) so a repeatedly-flapping provider backs off exponentially.
+        self._error_rate_threshold = settings.basemap_provider_error_rate_threshold
+        self._error_rate_min_samples = settings.basemap_provider_error_rate_min_samples
         self._cooldown_schedule = list(settings.basemap_provider_cooldown_schedule)
         # Lifecycle policy is applied lazily inside the scrape loop (instead of
         # once at startup) so a transient S3 outage at boot self-heals on the
@@ -455,6 +460,9 @@ class BasemapScraperService(BaseSyncService):
                 _fmt_duration(cooldown_seconds),
                 sweep_state.last_reason,
             )
+            await self._record_sweep_stats(
+                provider.provider_id, downloaded, failed, completed=False
+            )
             return downloaded, failed
 
         if sweep_state.storage_errors > 0:
@@ -476,6 +484,9 @@ class BasemapScraperService(BaseSyncService):
                 sweep_state.storage_errors,
                 int(_STORAGE_RETRY_FLOOR_SECONDS),
             )
+            await self._record_sweep_stats(
+                provider.provider_id, downloaded, failed, completed=False
+            )
             return downloaded, failed
 
         # Provider fully scraped — clear resume state, stamp completion, and
@@ -485,6 +496,9 @@ class BasemapScraperService(BaseSyncService):
         await self._state.clear_failed_for_provider(provider.provider_id)
         await self._state.set_last_completed(provider.provider_id, int(time.time()))
         await self._state.close_circuit(provider.provider_id)
+        await self._record_sweep_stats(
+            provider.provider_id, downloaded, failed, completed=True
+        )
 
         logger.info(
             "Provider %s: %d downloaded, %d failed",
@@ -500,6 +514,18 @@ class BasemapScraperService(BaseSyncService):
             return 300  # defensive; schedule validation should prevent this
         idx = min(consecutive_trips - 1, len(self._cooldown_schedule) - 1)
         return int(self._cooldown_schedule[max(idx, 0)])
+
+    async def _record_sweep_stats(
+        self, provider_id: str, downloaded: int, failed: int, completed: bool
+    ) -> None:
+        """Persist this sweep's outcome for the dashboard error rate."""
+        await self._state.set_scrape_stats(
+            provider_id,
+            attempted=downloaded + failed,
+            ok=downloaded,
+            failed=failed,
+            completed=completed,
+        )
 
     async def _scrape_zoom(
         self,
@@ -603,13 +629,15 @@ class BasemapScraperService(BaseSyncService):
         y: int,
     ) -> None:
         # pylint: disable=too-many-arguments
-        """Advance the sweep-local failure counter and flip ``tripped`` at threshold."""
-        if outcome is _TileOutcome.OK:
-            sweep_state.consecutive_unavailable = 0
-            return
+        """Accrue the sweep error rate and flip ``tripped`` once it's exceeded.
+
+        Trips only after `error_rate_min_samples` fetches AND when
+        `failed / attempted` exceeds `error_rate_threshold` — so scattered
+        failures ride through while a genuinely-broken provider still bails.
+        """
         if outcome is _TileOutcome.MISSING:
-            # Legitimately-missing tiles (404/403) don't count as upstream
-            # health signals — a sparse bbox would false-positive otherwise.
+            # Legitimately-missing tiles (404/403) aren't health signals — a
+            # sparse bbox would distort the rate otherwise. Excluded entirely.
             return
         if outcome is _TileOutcome.STORAGE_ERROR:
             # Downstream persistence issue (S3/Redis), not provider health.
@@ -618,15 +646,25 @@ class BasemapScraperService(BaseSyncService):
             # silently push the next sweep out by a full interval.
             sweep_state.storage_errors += 1
             return
-        sweep_state.consecutive_unavailable += 1
-        sample = f"z={z} x={x} y={y}"
-        if len(sweep_state.failure_samples) < 3:
-            sweep_state.failure_samples.append(sample)
-        if sweep_state.consecutive_unavailable >= self._unhealthy_threshold:
+
+        # OK and UNAVAILABLE are both definitive fetch attempts.
+        sweep_state.attempted += 1
+        if outcome is _TileOutcome.UNAVAILABLE:
+            sweep_state.failed += 1
+            if len(sweep_state.failure_samples) < 3:
+                sweep_state.failure_samples.append(f"z={z} x={x} y={y}")
+
+        if (
+            not sweep_state.tripped
+            and sweep_state.attempted >= self._error_rate_min_samples
+            and sweep_state.failed / sweep_state.attempted > self._error_rate_threshold
+        ):
             sweep_state.tripped = True
+            rate = sweep_state.failed / sweep_state.attempted
             sweep_state.last_reason = (
-                f"{sweep_state.consecutive_unavailable} consecutive unavailable "
-                f"tile fetches (samples: {', '.join(sweep_state.failure_samples)})"
+                f"tasa de error {rate:.1%} "
+                f"({sweep_state.failed}/{sweep_state.attempted} fetches; "
+                f"samples: {', '.join(sweep_state.failure_samples)})"
             )
 
     async def _run_indexed_sweep(

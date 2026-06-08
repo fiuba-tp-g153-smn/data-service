@@ -44,9 +44,12 @@ def _make_settings(**overrides) -> SimpleNamespace:
         # Large so existing tests run as a single chunk (chunking is exercised
         # explicitly by the dedicated fan-out tests below).
         "basemap_scrape_fanout_window": 10_000,
-        # Circuit breaker: threshold tuned low so tests can provoke trips
-        # cheaply; schedule keeps first cooldown short enough to exercise.
-        "basemap_provider_unhealthy_threshold": 5,
+        # Rate-based circuit breaker. Lenient defaults so ordinary tests never
+        # trip on a stray failure; breaker tests provoke trips with all-unavailable
+        # sweeps (z=5 yields 4 tiles, so min_samples=3 still trips). schedule keeps
+        # the first cooldown short enough to exercise.
+        "basemap_provider_error_rate_threshold": 0.95,
+        "basemap_provider_error_rate_min_samples": 3,
         "basemap_provider_cooldown_schedule": [300, 900, 3600, 10800, 21600],
     }
     base.update(overrides)
@@ -625,18 +628,12 @@ async def test_run_sync_end_to_end_across_modes(store, mode):
 
 
 @pytest.mark.asyncio
-async def test_circuit_opens_after_threshold_unavailables(store):
-    """5 consecutive UNAVAILABLE fetches trip the provider; state persisted."""
+async def test_circuit_opens_when_error_rate_exceeds_threshold(store):
+    """An all-unavailable sweep (100% error rate) trips the provider; state persisted."""
     provider = _make_provider(min_zoom=5, max_zoom=5)
     bbox = _make_bbox()
     http = FakeHttp(all_unavailable=True)
-    scraper = _make_scraper(
-        store,
-        http,
-        provider,
-        bbox,
-        basemap_provider_unhealthy_threshold=3,
-    )
+    scraper = _make_scraper(store, http, provider, bbox)
 
     await scraper._run_sync()  # pylint: disable=protected-access
 
@@ -644,7 +641,7 @@ async def test_circuit_opens_after_threshold_unavailables(store):
     assert health is not None
     assert health.consecutive_trips == 1
     assert health.cooldown_until > int(time.time())
-    assert "unavailable" in health.last_reason.lower()
+    assert "tasa de error" in health.last_reason.lower()
 
     # Cursor preserved so the next (post-cooldown) cycle resumes.
     assert await store.get_cursor(provider.provider_id) is not None
@@ -699,48 +696,69 @@ async def test_expired_cooldown_allows_retry_and_clean_finish(store):
     assert await store.get_last_completed(provider.provider_id) is not None
 
 
-def test_consecutive_counter_resets_on_success(store):
-    """Direct unit test of the counter mechanics: OK resets, MISSING is neutral."""
+def test_rate_breaker_trips_after_min_samples(store):
+    """Direct unit test: trips only past min_samples AND above the rate threshold."""
     # pylint: disable=protected-access
     from services.basemap_scraper_service import (  # local import to avoid clutter
         _ProviderSweepState,
         _TileOutcome,
     )
 
-    provider = _make_provider()
-    http = FakeHttp()
     scraper = _make_scraper(
         store,
-        http,
-        provider,
+        FakeHttp(),
+        _make_provider(),
         _make_bbox(),
-        basemap_provider_unhealthy_threshold=3,
+        basemap_provider_error_rate_threshold=0.5,
+        basemap_provider_error_rate_min_samples=4,
     )
     state = _ProviderSweepState()
 
-    # 2 UNAVAILABLE — counter at 2, no trip.
-    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 0, 0)
-    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 0, 1)
-    assert state.consecutive_unavailable == 2
+    # 3 UNAVAILABLE — 100% error rate but below min_samples (4): no trip yet.
+    for i in range(3):
+        scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 0, i)
+    assert state.attempted == 3
+    assert state.failed == 3
     assert not state.tripped
 
-    # OK resets to 0.
-    scraper._update_sweep_state(state, _TileOutcome.OK, 5, 0, 2)
-    assert state.consecutive_unavailable == 0
+    # MISSING is neutral — excluded from attempted and failed.
+    scraper._update_sweep_state(state, _TileOutcome.MISSING, 5, 0, 99)
+    assert state.attempted == 3
 
-    # 2 more UNAVAILABLE — again at 2, still no trip.
+    # A 4th fetch reaches min_samples; rate (3/4 = 75% > 50%) trips the circuit.
+    scraper._update_sweep_state(state, _TileOutcome.OK, 5, 0, 100)
+    assert state.attempted == 4
+    assert state.tripped
+    assert "tasa de error" in state.last_reason
+
+
+def test_low_error_rate_does_not_trip(store):
+    """A handful of failures among many OK fetches stays under the threshold."""
+    # pylint: disable=protected-access
+    from services.basemap_scraper_service import (
+        _ProviderSweepState,
+        _TileOutcome,
+    )
+
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        _make_provider(),
+        _make_bbox(),
+        basemap_provider_error_rate_threshold=0.05,
+        basemap_provider_error_rate_min_samples=10,
+    )
+    state = _ProviderSweepState()
+
+    # 198 OK + 2 UNAVAILABLE = 1% error rate, well under the 5% threshold.
+    for i in range(198):
+        scraper._update_sweep_state(state, _TileOutcome.OK, 5, 0, i)
     scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 0)
     scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 1)
+
+    assert state.attempted == 200
+    assert state.failed == 2
     assert not state.tripped
-
-    # MISSING is neutral — does not reset counter but also doesn't increment.
-    scraper._update_sweep_state(state, _TileOutcome.MISSING, 5, 1, 2)
-    assert state.consecutive_unavailable == 2
-
-    # One more UNAVAILABLE crosses the threshold.
-    scraper._update_sweep_state(state, _TileOutcome.UNAVAILABLE, 5, 1, 3)
-    assert state.tripped
-    assert "consecutive unavailable" in state.last_reason
 
 
 @pytest.mark.asyncio
@@ -753,13 +771,7 @@ async def test_missing_tiles_do_not_trip_circuit(store):
     coords = list(iter_tiles(5, bbox))
     # Make the first ten tiles miss as 404s (MISSING, not UNAVAILABLE).
     http = FakeHttp(fail_tiles=coords[:10])
-    scraper = _make_scraper(
-        store,
-        http,
-        provider,
-        bbox,
-        basemap_provider_unhealthy_threshold=3,
-    )
+    scraper = _make_scraper(store, http, provider, bbox)
 
     await scraper._run_sync()  # pylint: disable=protected-access
 
@@ -779,7 +791,6 @@ async def test_exponential_backoff_schedule_escalates(store):
         http,
         provider,
         bbox,
-        basemap_provider_unhealthy_threshold=2,
         basemap_provider_cooldown_schedule=[60, 600, 3600],
     )
 
@@ -827,7 +838,6 @@ async def test_tripped_provider_does_not_block_healthy_peers(store):
         bbox,
         parallelism_mode="per_origin",
         providers=providers,
-        basemap_provider_unhealthy_threshold=3,
     )
 
     await scraper._run_sync()  # pylint: disable=protected-access

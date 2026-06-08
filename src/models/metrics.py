@@ -95,7 +95,8 @@ class RedisInfo(BaseModel):
 
 
 class BasemapProviderStatus(BaseModel):
-    """Per-provider basemap scraper progress + circuit-breaker state."""
+    """Per-provider basemap scraper progress + circuit-breaker state + last-sweep
+    error rate."""
 
     provider_id: str
     name: str
@@ -109,6 +110,13 @@ class BasemapProviderStatus(BaseModel):
     consecutive_trips: int = 0
     cooldown_until: Optional[int] = None
     last_reason: Optional[str] = None
+    # Last-sweep error rate (attempted = ok + failed; error_rate = failed/attempted).
+    attempted: int = 0
+    ok: int = 0
+    failed: int = 0
+    error_rate: Optional[float] = None
+    completed: bool = False
+    last_swept: Optional[int] = None
 
 
 class MetricsSummary(BaseModel):
