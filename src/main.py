@@ -17,10 +17,13 @@ from clients.smn_api_client import SmnApiClient
 from clients.smn_registry_client import SmnRegistryClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
 from controller import general
+from db.migrate import ensure_migrations
 from dependencies import (
     basemap_service,
     logger,
+    metrics_store,
     redis_client,
+    set_basemap_state_store,
     set_weather_stations_keystore,
     settings,
 )
@@ -29,6 +32,7 @@ from routes import (
     basemap,
     ecmwf_mslp,
     ecmwf_tp,
+    metrics,
     radar,
     satellite,
     sync,
@@ -58,6 +62,7 @@ from services.radar_sync_strategy import (
     RadarOnDemandStrategy,
     RadarSyncStrategy,
 )
+from services.redis_metrics_service import RedisMetricsService
 from services.satellite_service import satellite_service
 from services.satellite_sync_strategy import (
     SatelliteFullSyncStrategy,
@@ -68,7 +73,11 @@ from services.sync_service import sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from services.weather_stations_service import weather_stations_service
 from services.wrf_service import wrf_service
-from services.wrf_sync_strategy import WrfFullSyncStrategy, WrfOnDemandStrategy, WrfSyncStrategy
+from services.wrf_sync_strategy import (
+    WrfFullSyncStrategy,
+    WrfOnDemandStrategy,
+    WrfSyncStrategy,
+)
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -144,6 +153,8 @@ async def configure_strategies(
         wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
 
         sync_service.set_redis_client(client_redis)
+        if settings.metrics_enabled:
+            sync_service.set_metrics_store(metrics_store)
         await sync_service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
@@ -325,8 +336,10 @@ async def configure_basemap(
             s3_object_ttl_days=settings.basemap_s3_object_ttl_days,
             redis_writes_enabled=scraper_writes_redis,
             parallelism_mode=settings.basemap_scrape_parallelism_mode,
+            metrics_store=metrics_store if settings.metrics_enabled else None,
         )
         await scraper.start(logger)
+        set_basemap_state_store(state_store)
 
     basemap_service.configure(
         reader=reader,
@@ -436,6 +449,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         smn_client=smn_client,
         registry_client=registry_client,
         redis_client=redis_client,
+        metrics_store=metrics_store if settings.metrics_enabled else None,
     )
     await scraper.start(logger)
 
@@ -538,6 +552,12 @@ async def lifespan(_app: FastAPI):
     logger.info("Starting data-service...")
     configure_gdal_vsi_s3()
     await redis_client.connect()
+    # Bring the metrics DB schema to head before opening it (offloaded so the
+    # flock + Alembic upgrade never block the event loop). Runs in every worker;
+    # the flock serializes them and the upgrade no-ops once stamped. Independent
+    # of metrics_enabled — the DB must exist for the /metrics routes regardless.
+    await asyncio.to_thread(ensure_migrations, settings)
+    await metrics_store.connect()
 
     # S3 is a hard dependency. Block here until it answers (unlimited retry with
     # capped backoff) instead of crashing — so dev (`--reload`, whose reloader
@@ -566,16 +586,28 @@ async def lifespan(_app: FastAPI):
     basemap_runtime = await configure_basemap(redis_client)
     weather_stations_runtime = await configure_weather_stations()
 
+    redis_metrics_service: Optional[RedisMetricsService] = None
+    if settings.metrics_enabled:
+        redis_metrics_service = RedisMetricsService(
+            settings=settings,
+            redis_client=redis_client,
+            metrics_store=metrics_store,
+        )
+        await redis_metrics_service.start(logger)
+
     yield
 
     # Shutdown
     logger.info("Shutting down data-service...")
+    if redis_metrics_service is not None:
+        await redis_metrics_service.stop(logger)
     await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
     if s3_client:
         await s3_client.close()
+    await metrics_store.close()
     await redis_client.close()
 
 
@@ -623,5 +655,6 @@ app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(wrf.router)  # WRF model routes
 app.include_router(satellite.router)  # Satellite routes
 app.include_router(sync.router)  # Sync observability
+app.include_router(metrics.router)  # Status/performance dashboard metrics
 app.include_router(weather_stations.router)  # SMN weather-stations endpoints
 app.include_router(weather_stations.admin_router)  # Admin API-key management

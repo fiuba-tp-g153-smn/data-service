@@ -50,6 +50,10 @@ services:
     volumes:
       - ./src:/app
       - ./settings.json:/settings.json:ro
+      # ./src is mounted at /app, so db/migrate.py resolves the repo root to "/";
+      # the metrics-DB migrations must be reachable at /alembic.ini + /migrations.
+      - ./alembic.ini:/alembic.ini:ro
+      - ./migrations:/migrations:ro
       - ./output_radar:/output_radar
       - ./data:/app/data
     environment:

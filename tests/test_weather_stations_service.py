@@ -141,7 +141,7 @@ async def test_tilesets_handles_missing_meta_with_zero_count():
     assert entry["station_count"] == 0
 
 
-# ------------------------------------------------ /{tilesetId}?N= window picking
+# ------------------------------------ /{tilesetId}?grace_period_hours= resolution
 
 
 def _seed_window(svc_factory):
@@ -157,29 +157,72 @@ def _seed_window(svc_factory):
     return svc_factory(objs), now, prev, old
 
 
+def _snap_body_obs(scraped_at, observed_ats):
+    """Snapshot body where station i has observed_at = observed_ats[i] (datetime | None)."""
+    return json.dumps(
+        {
+            "scraped_at": scraped_at.isoformat().replace("+00:00", "Z"),
+            "source_url": "x",
+            "stations": [
+                {
+                    "station_id": i,
+                    "observed_at": o.isoformat().replace("+00:00", "Z") if o else None,
+                }
+                for i, o in enumerate(observed_ats)
+            ],
+        }
+    ).encode()
+
+
 @pytest.mark.asyncio
-async def test_tileset_n_zero_picks_exact_hour_or_404():
-    svc, now, prev, old = _seed_window(_new_service)
+async def test_tileset_returns_bucket_representative():
+    # Fetching a bucket returns the LATEST snapshot scraped in [T, T+1h) — the same
+    # representative /tilesets advertises — independent of grace_period_hours.
+    svc, *_ = _seed_window(_new_service)
 
-    # N=0 at 14:00 picks the latest snapshot with ts <= 14:00 AND ts >= 14:00 -> exactly 14:00.
     snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
-    assert snap["scraped_at"] == "2026-05-17T14:00:00Z"
+    assert snap["scraped_at"] == "2026-05-17T14:05:00Z"  # 14:05, not 14:00
 
-    # N=0 at 13:00 -> nothing matches -> 404
+    snap = await svc.get_snapshot_for_tileset("20260517T1200Z", 0.0)
+    assert snap["scraped_at"] == "2026-05-17T12:00:00Z"
+
+    # An empty bucket (no snapshot in [13:00, 14:00)) -> None (404 at the route).
     assert await svc.get_snapshot_for_tileset("20260517T1300Z", 0.0) is None
 
 
 @pytest.mark.asyncio
-async def test_tileset_n_picks_latest_within_window():
+async def test_tileset_is_current_respects_grace_period():
+    # One 14:00-bucket snapshot (scraped 14:05) with stations observed at 14:00,
+    # 13:00, 12:00, and never. is_current = observed within grace hours of 14:00.
+    scraped = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    h14 = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    h13 = datetime(2026, 5, 17, 13, 0, 0, tzinfo=timezone.utc)
+    h12 = datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc)
+    svc = _new_service(
+        {_snap_key(scraped): _snap_body_obs(scraped, [h14, h13, h12, None])}
+    )
+
+    def flags(snap):
+        return [s["is_current"] for s in snap["stations"]]
+
+    # grace=0: only the exact selected hour (14:00) is current.
+    snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
+    assert flags(snap) == [True, False, False, False]
+
+    # grace=1: 14:00 and 13:00 current.
+    snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 1.0)
+    assert flags(snap) == [True, True, False, False]
+
+    # grace=2: 14:00, 13:00, 12:00 current; a station with no reading stays stale.
+    snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 2.0)
+    assert flags(snap) == [True, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_tileset_negative_grace_rejected():
     svc, *_ = _seed_window(_new_service)
-
-    # N=3 at 14:00 -> window [11:00, 14:00], latest within = 14:00.
-    snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 3.0)
-    assert snap["scraped_at"] == "2026-05-17T14:00:00Z"
-
-    # N=3 at 13:30 -> window [10:30, 13:30], latest within = 12:00.
-    snap = await svc.get_snapshot_for_tileset("20260517T1330Z", 3.0)
-    assert snap["scraped_at"] == "2026-05-17T12:00:00Z"
+    with pytest.raises(ValueError):
+        await svc.get_snapshot_for_tileset("20260517T1400Z", -1.0)
 
 
 @pytest.mark.asyncio

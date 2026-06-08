@@ -3,6 +3,8 @@
 from logging import Logger
 from typing import Optional
 
+from clients.basemap_state_store import BasemapStateStore
+from clients.metrics_store import MetricsStore
 from clients.redis_client import RedisClient
 from clients.weather_stations_keystore import WeatherStationsKeystore
 from initializers import init_logger
@@ -16,11 +18,21 @@ from settings import Settings
 settings: Settings = Settings.get_settings()
 logger: Logger = init_logger(settings)
 redis_client: RedisClient = RedisClient(settings.redis_url)
+metrics_store: MetricsStore = MetricsStore(settings.metrics_db_path)
 basemap_service: BasemapService = BasemapService()
 # Populated in the lifespan via `set_weather_stations_keystore`. Routes hold a
 # Depends() reference, so we can't construct the keystore until the SQLite file
 # is opened; the lifespan stamps it here once that's done.
 _weather_stations_keystore: Optional[WeatherStationsKeystore] = None
+# Populated in the lifespan via `set_basemap_state_store` only when the basemap
+# scraper runs. Stays None otherwise; the metrics route degrades to an empty
+# provider list rather than failing.
+_basemap_state_store: Optional[BasemapStateStore] = None
+
+
+def get_settings() -> Settings:
+    """FastAPI dependency provider for Settings."""
+    return settings
 
 
 def get_redis_client() -> RedisClient:
@@ -28,9 +40,25 @@ def get_redis_client() -> RedisClient:
     return redis_client
 
 
+def get_metrics_store() -> MetricsStore:
+    """FastAPI dependency provider for MetricsStore."""
+    return metrics_store
+
+
 def get_basemap_service() -> BasemapService:
     """FastAPI dependency provider for BasemapService."""
     return basemap_service
+
+
+def set_basemap_state_store(state_store: BasemapStateStore) -> None:
+    """Lifespan hook: register the live basemap state store for metrics reads."""
+    global _basemap_state_store  # pylint: disable=global-statement
+    _basemap_state_store = state_store
+
+
+def get_basemap_state_store() -> Optional[BasemapStateStore]:
+    """FastAPI dependency provider for the basemap state store (None if scraper off)."""
+    return _basemap_state_store
 
 
 def get_weather_stations_service() -> WeatherStationsService:

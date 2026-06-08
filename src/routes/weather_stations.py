@@ -305,16 +305,19 @@ async def get_station_series(
     response_model=WeatherStationsSnapshot,
     dependencies=[Depends(require_api_key)],
     description=(
-        "Return the latest snapshot whose `scraped_at` falls in "
-        "`[tileset_id - N hours, tileset_id]`. `N` defaults to 0 (exact "
-        "hour match required) and is capped at 48.\n\n"
+        "Return the snapshot for the selected hour-bucket (the latest scrape in "
+        "`[tileset_id, tileset_id + 1h)`), with each station flagged "
+        "`is_current=true` when its `observed_at` is within `grace_period_hours` "
+        "of the selected hour and `false` (stale) otherwise. `grace_period_hours` "
+        "defaults to 0 (only the exact selected hour is current) and is capped "
+        "at 48.\n\n"
         '**Example:** `curl -H "X-API-Key: $KEY" '
-        "'http://localhost:8080/weather-stations/20260517T1400Z?N=6'`"
+        "'http://localhost:8080/weather-stations/20260517T1400Z?grace_period_hours=2'`"
     ),
     responses={
         400: {"description": "Malformed tilesetId"},
         401: {"description": "Missing or invalid X-API-Key"},
-        404: {"description": "No snapshot found within the requested window"},
+        404: {"description": "No snapshot available for the selected hour-bucket"},
     },
 )
 async def get_for_tileset(
@@ -324,22 +327,23 @@ async def get_for_tileset(
         description="Hour-bucket id in `YYYYMMDDTHH00Z` UTC format.",
         examples=["20260517T1400Z"],
     ),
-    n: float = Query(
+    grace_period_hours: float = Query(
         0,
         ge=0,
         le=48,
-        alias="N",
         description=(
-            "Tolerance window in hours; the snapshot returned has "
-            "`scraped_at` in `[tileset_id - N hours, tileset_id]`."
+            "Freshness window in hours. A station is returned as current "
+            "(`is_current=true`) when its `observed_at` is within "
+            "`grace_period_hours` of the selected hour; older stations are stale. "
+            "Defaults to 0 (only the exact selected hour is current); capped at 48."
         ),
-        examples=[0, 6],
+        examples=[0, 1, 2],
     ),
     service: WeatherStationsService = Depends(get_weather_stations_service),
 ) -> WeatherStationsSnapshot:
-    """Pick the latest snapshot whose scrape time falls within the N-hour window."""
+    """Return the selected hour-bucket's snapshot with per-station freshness flags."""
     try:
-        payload = await service.get_snapshot_for_tileset(tileset_id, n)
+        payload = await service.get_snapshot_for_tileset(tileset_id, grace_period_hours)
     except TilesetIdFormatError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -350,10 +354,7 @@ async def get_for_tileset(
     if payload is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"No snapshot available for tilesetId={tileset_id} "
-                f"with N={n}h tolerance"
-            ),
+            detail=f"No snapshot available for tilesetId={tileset_id}",
         )
     response.headers.update(
         _cache_control(settings.weather_stations_cache_control_snapshot)

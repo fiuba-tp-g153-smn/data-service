@@ -172,6 +172,15 @@ class Settings:
     # resets the counter and closes the circuit.
     basemap_provider_unhealthy_threshold: int = 5
     basemap_provider_cooldown_schedule: List[int] = [300, 900, 3600, 10800, 21600]
+    # Rate-based circuit breaker (supersedes the consecutive-failure trigger
+    # above). Within one sweep the scraper pushes through scattered failures and
+    # trips a provider only when its error rate (failed / attempted fetches)
+    # exceeds `error_rate_threshold`, but not before `error_rate_min_samples`
+    # fetches — so a fully-down provider still bails early instead of hammering
+    # the whole bbox. `basemap_provider_unhealthy_threshold` is kept for config
+    # compatibility but no longer drives tripping.
+    basemap_provider_error_rate_threshold: float = 0.05
+    basemap_provider_error_rate_min_samples: int = 50
 
     # --- Weather stations subsystem (loaded from settings.json, env overrides) ---
     # Operational knobs only — secrets (SMN_*, WEATHER_STATIONS_ADMIN_PASSWORD)
@@ -228,6 +237,27 @@ class Settings:
     # enabled=True without a non-empty admin password (otherwise admin endpoints
     # would be unreachable and no keys could ever be issued).
     weather_stations_api_key_auth_enabled: bool = True
+
+    # --- Metrics / observability dashboard (loaded from settings.json, env overrides) ---
+    # Backs the data-service status dashboard: per-domain sync-cycle history and
+    # periodic Redis memory-by-domain snapshots, persisted in SQLite (cold,
+    # survives restarts) alongside the basemap scraper state.
+    metrics_enabled: bool = True
+    metrics_db_path: str = "data/metrics.sqlite"
+    metrics_retention_days: int = 14
+    # Per-table row cap, a backstop behind time-based retention so the metrics
+    # DB can't grow unbounded if retention is misconfigured. Applied to each of
+    # the three tables independently every collector cycle. 0 disables the cap.
+    metrics_max_rows: int = 1_000_000
+    # File lock so only one uvicorn worker runs the Redis memory collector.
+    metrics_lock_path: str = "/tmp/redis_metrics.lock"
+    # Redis memory collector cadence. Each cycle SCANs the whole keyspace and runs
+    # MEMORY USAGE per key (pipelined) — accurate but O(N keys), so the default
+    # interval is generous. scan_count bounds the SCAN batch; memory_batch_size
+    # bounds the MEMORY USAGE pipeline depth.
+    redis_metrics_sample_interval_seconds: int = 300
+    redis_metrics_scan_count: int = 1000
+    redis_metrics_memory_batch_size: int = 500
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
@@ -312,6 +342,8 @@ class Settings:
             "basemap_scrape_per_host_concurrent",
             "basemap_provider_unhealthy_threshold",
             "basemap_provider_cooldown_schedule",
+            "basemap_provider_error_rate_threshold",
+            "basemap_provider_error_rate_min_samples",
             "weather_stations_sync_mode",
             "weather_stations_scrape_interval_seconds",
             "weather_stations_scrape_lock_path",
@@ -335,6 +367,14 @@ class Settings:
             "weather_stations_series_hours",
             "weather_stations_api_key_auth_enabled",
             "weather_stations_keystore_db_path",
+            "metrics_enabled",
+            "metrics_db_path",
+            "metrics_retention_days",
+            "metrics_max_rows",
+            "metrics_lock_path",
+            "redis_metrics_sample_interval_seconds",
+            "redis_metrics_scan_count",
+            "redis_metrics_memory_batch_size",
         }
 
         for key in json_keys:
@@ -544,6 +584,14 @@ class Settings:
             "BASEMAP_PROVIDER_COOLDOWN_SCHEDULE",
             self.basemap_provider_cooldown_schedule,
         )
+        self.basemap_provider_error_rate_threshold = self._env_float(
+            "BASEMAP_PROVIDER_ERROR_RATE_THRESHOLD",
+            self.basemap_provider_error_rate_threshold,
+        )
+        self.basemap_provider_error_rate_min_samples = self._env_int(
+            "BASEMAP_PROVIDER_ERROR_RATE_MIN_SAMPLES",
+            self.basemap_provider_error_rate_min_samples,
+        )
 
         # SMN API + weather-stations subsystem
         self.s3_weather_stations_bucket_name = os.getenv(
@@ -657,6 +705,25 @@ class Settings:
             "S3_API_KEYS_BUCKET_NAME", self.s3_api_keys_bucket_name
         )
 
+        # Metrics / observability dashboard
+        self.metrics_enabled = self._env_bool("METRICS_ENABLED", self.metrics_enabled)
+        self.metrics_db_path = os.getenv("METRICS_DB_PATH", self.metrics_db_path)
+        self.metrics_retention_days = self._env_int(
+            "METRICS_RETENTION_DAYS", self.metrics_retention_days
+        )
+        self.metrics_max_rows = self._env_int("METRICS_MAX_ROWS", self.metrics_max_rows)
+        self.metrics_lock_path = os.getenv("METRICS_LOCK_PATH", self.metrics_lock_path)
+        self.redis_metrics_sample_interval_seconds = self._env_int(
+            "REDIS_METRICS_SAMPLE_INTERVAL_SECONDS",
+            self.redis_metrics_sample_interval_seconds,
+        )
+        self.redis_metrics_scan_count = self._env_int(
+            "REDIS_METRICS_SCAN_COUNT", self.redis_metrics_scan_count
+        )
+        self.redis_metrics_memory_batch_size = self._env_int(
+            "REDIS_METRICS_MEMORY_BATCH_SIZE", self.redis_metrics_memory_batch_size
+        )
+
     def _validate(self) -> None:
         """Fail-fast validation for values with a fixed domain."""
         if self.basemap_sync_mode not in self._BASEMAP_SYNC_MODES:
@@ -695,6 +762,16 @@ class Settings:
             raise ValueError(
                 "basemap_provider_unhealthy_threshold must be >= 1 "
                 f"(got {self.basemap_provider_unhealthy_threshold})"
+            )
+        if not 0 < self.basemap_provider_error_rate_threshold <= 1:
+            raise ValueError(
+                "basemap_provider_error_rate_threshold must be in (0, 1] "
+                f"(got {self.basemap_provider_error_rate_threshold})"
+            )
+        if self.basemap_provider_error_rate_min_samples < 1:
+            raise ValueError(
+                "basemap_provider_error_rate_min_samples must be >= 1 "
+                f"(got {self.basemap_provider_error_rate_min_samples})"
             )
         schedule = self.basemap_provider_cooldown_schedule
         if not schedule:
@@ -757,6 +834,12 @@ class Settings:
                 "weather_stations_sync_mode='full' requires SMN_API_USERNAME "
                 "and SMN_API_PASSWORD to be set; the scraper needs them to "
                 "mint a JWT for the SMN API."
+            )
+        # Row cap is a non-negative backstop (0 disables it).
+        if self.metrics_max_rows < 0:
+            raise ValueError(
+                f"metrics_max_rows must be >= 0 (got {self.metrics_max_rows}); "
+                "use 0 to disable the per-table row cap."
             )
 
     def is_s3_configured(self) -> bool:

@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from clients.redis_client import RedisClient
@@ -25,6 +25,7 @@ from services.weather_stations_cache import (
     extract_station_series,
     latest_key,
     parse_json_or_none,
+    parse_observed_at,
     parse_snapshot_key,
     parse_tileset_id,
     recent_snapshot_keys,
@@ -149,44 +150,77 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         )
         return entries
 
-    # -------------------------------------------------------- /{tilesetId}?N=...
+    # -------------------------------------------- /{tilesetId}?grace_period_hours=
 
     async def get_snapshot_for_tileset(
-        self, tileset_id: str, tolerance_hours: float
+        self, tileset_id: str, grace_period_hours: float
     ) -> Optional[dict]:
         """
-        Resolve a tilesetId + N-hour tolerance to a snapshot.
+        Resolve a tilesetId to its hour-bucket snapshot, flagging per-station freshness.
 
-        Picks the latest snapshot whose scraped_at falls in
-        `[T - N*3600, T]` where T = tileset_id parsed as UTC. Resolves the
-        matching snapshot key via the (in-process cached) window LIST, then
-        serves its body from Redis (`cache:ws:snap:{key}`, N-independent) with an
-        S3 fallback + write-back. Raises `TilesetIdFormatError` on a malformed id.
+        Returns the bucket's representative snapshot — the latest snapshot scraped
+        in `[T, T+1h)` where `T = tileset_id` parsed as UTC. This matches how
+        `/tilesets` buckets snapshots (rounding scrape time down to the hour), so a
+        fetch returns exactly what the listing advertised and hits the body the
+        scraper pre-warmed (`cache:ws:snap:{key}`, served from Redis with S3
+        fallback). Each station is annotated with `is_current`: True when its
+        `observed_at` is within `grace_period_hours` of the selected hour
+        (`observed_at >= T - grace_period_hours`), so the frontend can grey out
+        stale stations. Raises `TilesetIdFormatError` on a malformed id.
         """
-        if tolerance_hours < 0:
-            raise ValueError("tolerance_hours must be >= 0")
+        if grace_period_hours < 0:
+            raise ValueError("grace_period_hours must be >= 0")
         target = parse_tileset_id(tileset_id)
-        window_start = target - timedelta(hours=tolerance_hours)
-        keys = await self._list_snapshot_keys_for_window(window_start, target)
+        best_key = await self._resolve_bucket_snapshot_key(target)
+        if best_key is None:
+            return None
 
-        best_ts = None
+        body = await self._get_snapshot_body(best_key)
+        if body is None:
+            return None
+        return self._annotate_is_current(body, target, grace_period_hours)
+
+    async def _resolve_bucket_snapshot_key(self, target: datetime) -> Optional[str]:
+        """Latest snapshot key scraped in the bucket `[target, target + 1h)`.
+
+        Mirrors `_latest_snapshot_per_bucket` scoped to one hour bucket, so the
+        fetch returns the same representative `/tilesets` advertises. The bucket
+        stays within `target`'s day (even at 23:00), so a single day-prefix LIST
+        covers it.
+        """
+        bucket_end = target + timedelta(hours=1)
+        keys = await self._list_snapshot_keys_for_window(target, target)
+        best_ts: Optional[datetime] = None
         best_key: Optional[str] = None
         for key in keys:
             if key.endswith(SNAPSHOT_META_SUFFIX):
                 continue
             ts = parse_snapshot_key(key)
-            if ts is None or ts < window_start or ts > target:
+            if ts is None or ts < target or ts >= bucket_end:
                 continue
             if best_ts is None or ts > best_ts:
                 best_ts = ts
                 best_key = key
+        return best_key
 
-        if best_key is None:
-            return None
+    @staticmethod
+    def _annotate_is_current(
+        body: dict, target: datetime, grace_period_hours: float
+    ) -> dict:
+        """Flag each station current when observed within grace hours of the bucket.
 
-        # Body cache keyed by the resolved S3 object — shared across all tolerances
-        # (and pre-warmed by the scraper for the animation window).
-        return await self._get_snapshot_body(best_key)
+        Mutates `body` in place — safe because `_get_snapshot_body` re-parses fresh
+        JSON per call, so the shared body cache is never poisoned.
+        """
+        window_start = target - timedelta(hours=grace_period_hours)
+        stations = body.get("stations")
+        if isinstance(stations, list):
+            for obs in stations:
+                if not isinstance(obs, dict):
+                    continue
+                ts = parse_observed_at(obs.get("observed_at"))
+                obs["is_current"] = ts is not None and ts >= window_start
+        return body
 
     # ----------------------------------------------- /station/{id}/series?hours=
 
