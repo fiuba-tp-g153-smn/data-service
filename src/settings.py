@@ -73,12 +73,22 @@ class Settings:
     # Floor on the inter-cycle sleep so the loop always yields, even when a
     # cycle overruns sync_interval_seconds (otherwise it busy-loops at 0 sleep).
     sync_min_sleep_seconds: int
+    # Per-product watchdog: a sync cycle that exceeds this is cancelled, recorded
+    # as a "timeout", and retried next cycle. Must exceed one tileset/period's
+    # download time so the frontier always advances. WRF uses its own value.
+    sync_domain_timeout_seconds: int = 300
     cache_control_config: str
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
     radar_lock_path: str = "/tmp/radar_sync.lock"
+    # Each product syncs in its own loop under its own flock so they run
+    # independently (no product blocks another). Satellite reuses sync_lock_path,
+    # radar reuses radar_lock_path; the rest get their own below.
+    ecmwf_tp_sync_lock_path: str = "/tmp/ecmwf_tp_sync.lock"
+    ecmwf_mslp_sync_lock_path: str = "/tmp/ecmwf_mslp_sync.lock"
+    wrf_sync_lock_path: str = "/tmp/wrf_sync.lock"
     s3_max_concurrent_downloads: int = 5
     # S3 client timeouts + bounded retry. Without these botocore can hang a
     # request indefinitely on a stalled endpoint, wedging the whole sync loop
@@ -95,6 +105,10 @@ class Settings:
     # WRF model (loaded from settings.json, env overrides)
     wrf_tile_ttl: int = 86400
     wrf_geojson_ttl: int = 86400
+    # WRF is the heaviest product, so it runs on its own loop with a longer
+    # cadence and a generous watchdog (a big backfill pass must not be truncated).
+    wrf_sync_interval_seconds: int = 120
+    wrf_sync_timeout_seconds: int = 1200
     # Cap the WRF init runs walked per product each cycle (newest-first), so the
     # sync scan stays bounded as runs accumulate in S3. Mirrors ecmwf_forecasts_to_keep.
     wrf_inits_to_keep: int = 2
@@ -309,6 +323,7 @@ class Settings:
             "tileset_listing_ttl",
             "sync_interval_seconds",
             "sync_min_sleep_seconds",
+            "sync_domain_timeout_seconds",
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
@@ -321,6 +336,8 @@ class Settings:
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
             "wrf_inits_to_keep",
+            "wrf_sync_interval_seconds",
+            "wrf_sync_timeout_seconds",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -465,6 +482,9 @@ class Settings:
         self.sync_min_sleep_seconds = self._env_int(
             "SYNC_MIN_SLEEP_SECONDS", self.sync_min_sleep_seconds
         )
+        self.sync_domain_timeout_seconds = self._env_int(
+            "SYNC_DOMAIN_TIMEOUT_SECONDS", self.sync_domain_timeout_seconds
+        )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
@@ -498,6 +518,12 @@ class Settings:
         self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
         self.wrf_inits_to_keep = self._env_int(
             "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
+        )
+        self.wrf_sync_interval_seconds = self._env_int(
+            "WRF_SYNC_INTERVAL_SECONDS", self.wrf_sync_interval_seconds
+        )
+        self.wrf_sync_timeout_seconds = self._env_int(
+            "WRF_SYNC_TIMEOUT_SECONDS", self.wrf_sync_timeout_seconds
         )
 
         # Basemap

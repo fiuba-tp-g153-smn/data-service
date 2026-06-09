@@ -655,6 +655,25 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         raw = await self._conn.hgetall("sync:status")  # type: ignore[misc]
         return {k.decode(): v.decode() for k, v in raw.items()}
 
+    async def update_domain_sync_status(
+        self, domain: str, fields: Dict[str, str]
+    ) -> None:
+        """Update the live status hash for a single product's sync loop.
+
+        Each per-product loop owns its own ``sync:status:{domain}`` key, so the
+        five loops never clobber one another's status.
+        """
+        if fields:
+            encoded = {k.encode(): str(v).encode() for k, v in fields.items()}
+            await self._conn.hset(  # type: ignore[misc]
+                f"sync:status:{domain}", mapping=encoded
+            )
+
+    async def get_domain_sync_status(self, domain: str) -> Dict[str, str]:
+        """Get the live status hash for a single product's sync loop."""
+        raw = await self._conn.hgetall(f"sync:status:{domain}")  # type: ignore[misc]
+        return {k.decode(): v.decode() for k, v in raw.items()}
+
     # ============== Introspection / Metrics Operations ==============
 
     async def scan_keys(

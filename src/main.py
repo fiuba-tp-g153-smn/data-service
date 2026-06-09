@@ -69,7 +69,11 @@ from services.satellite_sync_strategy import (
     SatelliteOnDemandStrategy,
     SatelliteSyncStrategy,
 )
-from services.sync_service import sync_service
+from services.ecmwf_mslp_sync_service import ecmwf_mslp_sync_service
+from services.ecmwf_tp_sync_service import ecmwf_tp_sync_service
+from services.radar_sync_service import radar_sync_service
+from services.satellite_sync_service import satellite_sync_service
+from services.wrf_sync_service import wrf_sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from services.weather_stations_service import weather_stations_service
 from services.wrf_service import wrf_service
@@ -80,6 +84,15 @@ from services.wrf_sync_strategy import (
 )
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+# Per-product background sync loops, started/stopped together in `full` mode.
+_SYNC_SERVICES = (
+    satellite_sync_service,
+    radar_sync_service,
+    ecmwf_tp_sync_service,
+    ecmwf_mslp_sync_service,
+    wrf_sync_service,
+)
 
 
 @dataclass(slots=True)
@@ -180,10 +193,14 @@ async def configure_strategies(
             settings.tileset_listing_ttl,
         )
 
-        sync_service.set_redis_client(client_redis)
-        if settings.metrics_enabled:
-            sync_service.set_metrics_store(metrics_store)
-        await sync_service.start(logger)
+        # Each product syncs on its own independent loop (own flock + S3 client
+        # + watchdog) so no product can monopolize another's scheduling or S3
+        # budget. WRF (the heaviest) runs on its own longer cadence.
+        for service in _SYNC_SERVICES:
+            service.set_redis_client(client_redis)
+            if settings.metrics_enabled:
+                service.set_metrics_store(metrics_store)
+            await service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
@@ -545,9 +562,10 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
 
 
 async def shutdown_services():
-    """Stop background services if sync mode is full."""
+    """Stop the per-product background sync loops if sync mode is full."""
     if settings.sync_mode == "full":
-        await sync_service.stop(logger)
+        for service in _SYNC_SERVICES:
+            await service.stop(logger)
 
 
 async def _wait_for_s3_reachable() -> None:

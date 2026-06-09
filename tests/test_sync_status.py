@@ -5,9 +5,9 @@ from dependencies import get_redis_client
 
 
 def test_sync_status_empty():
-    """Verify sync status returns defaults when no data in Redis."""
+    """Every product reports defaults when no status is in Redis."""
     mock_redis = AsyncMock()
-    mock_redis.get_sync_status = AsyncMock(return_value={})
+    mock_redis.get_domain_sync_status = AsyncMock(return_value={})
 
     app.dependency_overrides[get_redis_client] = lambda: mock_redis
     try:
@@ -16,19 +16,26 @@ def test_sync_status_empty():
 
         assert response.status_code == 200
         data = response.json()
-        assert data["is_running"] is False
-        assert data["total_cycles"] == 0
-        assert data["satellite_tilesets_count"] == 0
-        assert data["radar_tilesets_count"] == 0
+        assert data["any_running"] is False
+        # One entry per product, all at defaults.
+        domains = {d["domain"]: d for d in data["domains"]}
+        assert set(domains) == {
+            "satellite",
+            "radar",
+            "ecmwf_tp",
+            "ecmwf_mslp",
+            "wrf",
+        }
+        assert domains["satellite"]["total_cycles"] == 0
+        assert domains["satellite"]["is_running"] is False
     finally:
         app.dependency_overrides.clear()
 
 
 def test_sync_status_with_data():
-    """Verify sync status returns data from Redis."""
-    mock_redis = AsyncMock()
-    mock_redis.get_sync_status = AsyncMock(
-        return_value={
+    """Per-product status hashes are surfaced per domain, with an any_running rollup."""
+    per_domain = {
+        "satellite": {
             "is_running": "false",
             "last_sync_start": "1706000000.0",
             "last_sync_end": "1706000005.0",
@@ -37,9 +44,13 @@ def test_sync_status_with_data():
             "last_sync_errors": "0",
             "consecutive_failures": "0",
             "total_cycles": "10",
-            "satellite_tilesets_count": "78",
-            "radar_tilesets_count": "12",
-        }
+        },
+        "wrf": {"is_running": "true", "total_cycles": "3"},
+    }
+
+    mock_redis = AsyncMock()
+    mock_redis.get_domain_sync_status = AsyncMock(
+        side_effect=lambda domain: per_domain.get(domain, {})
     )
 
     app.dependency_overrides[get_redis_client] = lambda: mock_redis
@@ -49,11 +60,14 @@ def test_sync_status_with_data():
 
         assert response.status_code == 200
         data = response.json()
-        assert data["is_running"] is False
-        assert data["total_cycles"] == 10
-        assert data["satellite_tilesets_count"] == 78
-        assert data["radar_tilesets_count"] == 12
-        assert data["last_sync_duration_ms"] == 5000
-        assert data["last_sync_downloaded"] == 150
+        # WRF is running -> rollup is true.
+        assert data["any_running"] is True
+        domains = {d["domain"]: d for d in data["domains"]}
+        assert domains["satellite"]["total_cycles"] == 10
+        assert domains["satellite"]["last_sync_duration_ms"] == 5000
+        assert domains["satellite"]["last_sync_downloaded"] == 150
+        assert domains["satellite"]["is_running"] is False
+        assert domains["wrf"]["is_running"] is True
+        assert domains["wrf"]["total_cycles"] == 3
     finally:
         app.dependency_overrides.clear()

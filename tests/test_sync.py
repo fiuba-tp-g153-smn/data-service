@@ -3,8 +3,12 @@ import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from clients.s3_client import S3Client
+from services.ecmwf_mslp_sync_service import EcmwfMslpSyncService
+from services.ecmwf_tp_sync_service import EcmwfTpSyncService
+from services.radar_sync_service import RadarSyncService
 from services.radar_sync_strategy import RadarOnDemandStrategy
-from services.sync_service import SyncService
+from services.satellite_sync_service import SatelliteSyncService
+from services.wrf_sync_service import WrfSyncService
 from settings import Settings
 
 
@@ -125,31 +129,87 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
     assert tilesets == ["20260114T170328Z", "20260114T160328Z"]
 
 
-def _make_sync_service(
-    mock_s3, mock_redis, ecmwf_forecasts_to_keep=2, wrf_inits_to_keep=2
-):
-    """Build a SyncService wired to mock S3/Redis clients without touching env."""
+# ── Per-product sync service builders ────────────────────────────────────────
+# Each product now syncs on its own DomainSyncService subclass. The builders
+# construct one via __new__() and wire mock S3/Redis clients without touching
+# env (mirrors the per-strategy tests). Test files are excluded from pylint.
+
+
+def _make_settings(ecmwf_forecasts_to_keep=2, wrf_inits_to_keep=2):
     settings = Settings.__new__(Settings)
     settings.sync_interval_seconds = 60
     settings.sync_min_sleep_seconds = 10
+    settings.sync_domain_timeout_seconds = 300
+    settings.wrf_sync_interval_seconds = 120
+    settings.wrf_sync_timeout_seconds = 1200
     settings.tile_ttl = 3600
     settings.ecmwf_tile_ttl = 86400
     settings.ecmwf_forecasts_to_keep = ecmwf_forecasts_to_keep
+    settings.ecmwf_mslp_geojson_ttl = 86400
     settings.wrf_tile_ttl = 86400
     settings.wrf_geojson_ttl = 86400
     settings.wrf_inits_to_keep = wrf_inits_to_keep
+    return settings
 
-    service = SyncService.__new__(SyncService)
-    service._settings = settings  # pylint: disable=protected-access
-    service._sync_interval = 60  # pylint: disable=protected-access
-    service._min_sleep = 10  # pylint: disable=protected-access
-    service._service_name = "Sync service"  # pylint: disable=protected-access
-    service._sync_prefixes = []  # pylint: disable=protected-access
-    service._client = mock_s3  # pylint: disable=protected-access
-    service._redis_client = mock_redis  # pylint: disable=protected-access
-    service._consecutive_failures = 0  # pylint: disable=protected-access
-    service._total_cycles = 0  # pylint: disable=protected-access
+
+def _wire(service, mock_s3, mock_redis, settings):
+    """Populate a DomainSyncService subclass built via __new__()."""
+    service._settings = settings
+    service._sync_interval = settings.sync_interval_seconds
+    service._min_sleep = settings.sync_min_sleep_seconds
+    service._service_name = "test sync"
+    service._domain = "test"
+    service._lock_path = "/tmp/test_sync.lock"
+    service._timeout = 300
+    service._s3_concurrency = 5
+    service._client = mock_s3
+    service._redis_client = mock_redis
+    service._metrics_store = None
+    service._consecutive_failures = 0
+    service._total_cycles = 0
     return service
+
+
+def _make_satellite(mock_s3, mock_redis, prefixes=None):
+    service = SatelliteSyncService.__new__(SatelliteSyncService)
+    service._sync_prefixes = prefixes if prefixes is not None else []
+    return _wire(service, mock_s3, mock_redis, _make_settings())
+
+
+def _make_radar(mock_s3, mock_redis):
+    return _wire(
+        RadarSyncService.__new__(RadarSyncService),
+        mock_s3,
+        mock_redis,
+        _make_settings(),
+    )
+
+
+def _make_ecmwf_tp(mock_s3, mock_redis, ecmwf_forecasts_to_keep=2):
+    return _wire(
+        EcmwfTpSyncService.__new__(EcmwfTpSyncService),
+        mock_s3,
+        mock_redis,
+        _make_settings(ecmwf_forecasts_to_keep=ecmwf_forecasts_to_keep),
+    )
+
+
+def _make_ecmwf_mslp(mock_s3, mock_redis):
+    return _wire(
+        EcmwfMslpSyncService.__new__(EcmwfMslpSyncService),
+        mock_s3,
+        mock_redis,
+        _make_settings(),
+    )
+
+
+def _make_wrf(mock_s3, mock_redis, wrf_inits_to_keep=2):
+    return _wire(
+        WrfSyncService.__new__(WrfSyncService),
+        mock_s3,
+        mock_redis,
+        _make_settings(wrf_inits_to_keep=wrf_inits_to_keep),
+    )
 
 
 @pytest.mark.asyncio
@@ -167,8 +227,7 @@ async def test_sync_satellite_trims_expired_each_cycle(mock_redis_client):
         return_value=["20260740300213", "20260740400213"]
     )
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
-    service._sync_prefixes = ["tiles/band_13"]  # pylint: disable=protected-access
+    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/band_13"])
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -197,8 +256,7 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
     mock_s3.sync_prefix_to_redis = AsyncMock(return_value=4)
     mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
-    service._sync_prefixes = ["tiles/band_13"]  # pylint: disable=protected-access
+    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/band_13"])
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -231,8 +289,7 @@ async def test_sync_satellite_skips_indexing_on_zero_download(mock_redis_client)
     mock_s3.sync_prefix_to_redis = AsyncMock(return_value=0)
     mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
-    service._sync_prefixes = ["tiles/glm_fed"]  # pylint: disable=protected-access
+    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/glm_fed"])
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -261,9 +318,9 @@ async def test_sync_radar_trims_expired_each_cycle(mock_redis_client):
     # The S3 tileset is already indexed -> zero new tilesets this cycle.
     mock_redis_client.get_radar_tilesets = AsyncMock(return_value=["ts1"])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_radar(mock_s3, mock_redis_client)
 
-    downloaded, errors = await service._sync_radar()  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_radar()
 
     assert errors == 0
     assert downloaded == 0
@@ -293,9 +350,9 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
     mock_s3.sync_radar_prefix_to_redis = AsyncMock(return_value=3)
     mock_redis_client.get_radar_tilesets = AsyncMock(return_value=[])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_radar(mock_s3, mock_redis_client)
 
-    downloaded, errors = await service._sync_radar()  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_radar()
 
     assert errors == 0
     assert downloaded == 3
@@ -311,7 +368,7 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
 
 @pytest.mark.asyncio
 async def test_sync_ecmwf_tp_downloads_new_periods_and_writes_index(mock_redis_client):
-    """SyncService._sync_ecmwf_tp lists forecasts/periods and only downloads new ones."""
+    """_sync_ecmwf_tp lists forecasts/periods and only downloads new ones."""
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
         side_effect=[
@@ -338,11 +395,9 @@ async def test_sync_ecmwf_tp_downloads_new_periods_and_writes_index(mock_redis_c
         side_effect=[["20260330T1500Z"], []]
     )
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
 
-    downloaded, errors = (
-        await service._sync_ecmwf_tp()
-    )  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_ecmwf_tp()
 
     assert errors == 0
     assert downloaded == 4 * 2  # one new period per forecast → two downloads
@@ -361,11 +416,9 @@ async def test_sync_ecmwf_tp_isolates_errors(mock_redis_client):
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(side_effect=RuntimeError("boom"))
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
 
-    downloaded, errors = (
-        await service._sync_ecmwf_tp()
-    )  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_ecmwf_tp()
 
     assert downloaded == 0
     assert errors == 1
@@ -387,9 +440,9 @@ async def test_sync_ecmwf_tp_respects_forecasts_to_keep(mock_redis_client):
     )
     mock_s3.sync_ecmwf_tp_period_to_redis = AsyncMock(return_value=0)
 
-    service = _make_sync_service(mock_s3, mock_redis_client, ecmwf_forecasts_to_keep=1)
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client, ecmwf_forecasts_to_keep=1)
 
-    await service._sync_ecmwf_tp()  # pylint: disable=protected-access
+    await service._sync_ecmwf_tp()
 
     # Only the most recent forecast queried for periods (1 top-level + 1 nested call).
     assert mock_s3.get_subdirectories.await_count == 2
@@ -413,11 +466,9 @@ async def test_sync_ecmwf_tp_filters_old_format_periods(mock_redis_client):
     mock_s3.sync_ecmwf_tp_period_to_redis = AsyncMock(return_value=1)
     mock_redis_client.get_ecmwf_tp_periods = AsyncMock(return_value=[])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
 
-    downloaded, errors = (
-        await service._sync_ecmwf_tp()
-    )  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_ecmwf_tp()
 
     assert errors == 0
     # Only the two centered periods are downloaded; the legacy one is skipped.
@@ -450,12 +501,9 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
     mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(return_value=1)
     mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
-    service._settings.ecmwf_mslp_geojson_ttl = 86400  # pylint: disable=protected-access
+    service = _make_ecmwf_mslp(mock_s3, mock_redis_client)
 
-    downloaded, errors = (
-        await service._sync_ecmwf_mslp()
-    )  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_ecmwf_mslp()
 
     assert errors == 0
     mock_redis_client.prune_ecmwf_mslp_forecasts.assert_awaited_once_with(
@@ -480,9 +528,9 @@ async def test_sync_wrf_respects_inits_to_keep(mock_redis_client):
         ]
     )
 
-    service = _make_sync_service(mock_s3, mock_redis_client, wrf_inits_to_keep=1)
+    service = _make_wrf(mock_s3, mock_redis_client, wrf_inits_to_keep=1)
 
-    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_wrf()
 
     assert (downloaded, errors) == (0, 0)
     # products + inits + steps(newest only) == 3 listing calls (not 5).
@@ -504,9 +552,9 @@ async def test_sync_wrf_skips_prune_when_listing_empty(mock_redis_client):
         ]
     )
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_wrf(mock_s3, mock_redis_client)
 
-    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_wrf()
 
     assert (downloaded, errors) == (0, 0)
     mock_redis_client.prune_wrf_inits.assert_not_awaited()
@@ -518,11 +566,9 @@ async def test_sync_wrf_overlays_skip_when_marker_present(mock_redis_client):
     mock_s3 = AsyncMock()
     mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=True)
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_wrf(mock_s3, mock_redis_client)
 
-    await service._sync_wrf_overlays(  # pylint: disable=protected-access
-        "precip", "20260430_060000", "F012"
-    )
+    await service._sync_wrf_overlays("precip", "20260430_060000", "F012")
 
     mock_s3.list_wrf_layers.assert_not_awaited()
     mock_redis_client.set_wrf_overlays_complete.assert_not_awaited()
@@ -536,11 +582,9 @@ async def test_sync_wrf_overlays_latches_marker_when_complete(mock_redis_client)
     mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=False)
     mock_redis_client.get_wrf_layers = AsyncMock(return_value=["barbs", "isobars"])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_wrf(mock_s3, mock_redis_client)
 
-    await service._sync_wrf_overlays(  # pylint: disable=protected-access
-        "precip", "20260430_060000", "F012"
-    )
+    await service._sync_wrf_overlays("precip", "20260430_060000", "F012")
 
     mock_redis_client.set_wrf_overlays_complete.assert_awaited_once()
     mock_s3.sync_wrf_geojson_to_redis.assert_not_awaited()
@@ -557,11 +601,9 @@ async def test_sync_wrf_overlays_downloads_missing_without_latching(mock_redis_c
     mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=False)
     mock_redis_client.get_wrf_layers = AsyncMock(return_value=["barbs"])
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_wrf(mock_s3, mock_redis_client)
 
-    await service._sync_wrf_overlays(  # pylint: disable=protected-access
-        "precip", "20260430_060000", "F012"
-    )
+    await service._sync_wrf_overlays("precip", "20260430_060000", "F012")
 
     # Only the missing layer is fetched.
     assert mock_s3.sync_wrf_geojson_to_redis.await_count == 1
@@ -574,8 +616,8 @@ async def test_sync_wrf_error_isolation(mock_redis_client):
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(side_effect=RuntimeError("boom"))
 
-    service = _make_sync_service(mock_s3, mock_redis_client)
+    service = _make_wrf(mock_s3, mock_redis_client)
 
-    downloaded, errors = await service._sync_wrf()  # pylint: disable=protected-access
+    downloaded, errors = await service._sync_wrf()
 
     assert (downloaded, errors) == (0, 1)
