@@ -4,9 +4,9 @@
 # The S3 instance is typically provided by tiles-processor running separately.
 #
 # Roles (same image, selected by APP_ROLE — checked at startup):
-#   - data-service        (APP_ROLE=web)    : serves HTTP only.
-#   - data-service-worker (APP_ROLE=worker) : runs the background sync/scrape/
-#                                             metrics loops only.
+#   - data-service-api  (APP_ROLE=web)    : serves HTTP only.
+#   - data-service-sync (APP_ROLE=worker) : runs the background sync/scrape/
+#                                           metrics loops only.
 # Splitting them keeps the heavy background sync from starving request serving.
 #
 # Configuration:
@@ -89,9 +89,9 @@ services:
 
   # Web role: serves HTTP only (no background sync), so request latency is never
   # starved by sync CPU.
-  data-service:
+  data-service-api:
     <<: *ds-common
-    container_name: data-service-container
+    container_name: data-service-api
     ports:
       - "${APP_HOST_PORT}:8080"
     environment:
@@ -102,9 +102,9 @@ services:
   # Worker role: runs all background jobs (tile sync + basemap/weather scrapers +
   # Redis-metrics collector). No public port. Raise WORKER_CONCURRENCY to spread
   # the loops across more cores if it falls behind.
-  data-service-worker:
+  data-service-sync:
     <<: *ds-common
-    container_name: data-service-worker-container
+    container_name: data-service-sync
     environment:
       <<: *ds-env
       APP_ROLE: worker

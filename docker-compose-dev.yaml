@@ -1,9 +1,9 @@
 # Data Service - Tile Serving via REST API (dev)
 #
 # Roles (same image, selected by APP_ROLE — checked at startup):
-#   - data-service        (APP_ROLE=web)    : serves HTTP only.
-#   - data-service-worker (APP_ROLE=worker) : runs the background sync/scrape/
-#                                             metrics loops only.
+#   - data-service-api  (APP_ROLE=web)    : serves HTTP only.
+#   - data-service-sync (APP_ROLE=worker) : runs the background sync/scrape/
+#                                           metrics loops only.
 # Running them as separate containers keeps the heavy background sync from
 # starving request serving (each container is its own process/event loop).
 #
@@ -13,7 +13,7 @@
 # Usage with tiles-processor S3:
 #   1. Start tiles-processor: cd ../tiles-processor && docker compose up -d
 #   2. Set S3_TILES_DATA_ENDPOINT=host.docker.internal:9000 in .env
-#   3. Start data-service: make up   (brings up redis + web + worker)
+#   3. Start data-service: make up   (brings up redis + api + sync)
 
 # Shared environment for both roles. WEB_CONCURRENCY + APP_ROLE are set per role.
 x-ds-dev-env: &ds-dev-env
@@ -99,9 +99,9 @@ services:
       start_interval: 1s
 
   # Web role: serves HTTP only (no background sync).
-  data-service:
+  data-service-api:
     <<: *ds-dev-common
-    container_name: data-service-dev-container
+    container_name: data-service-api-dev
     ports:
       - "${APP_HOST_PORT:-6006}:8080"
     environment:
@@ -111,9 +111,9 @@ services:
 
   # Worker role: runs all background jobs (tile sync + basemap/weather scrapers +
   # Redis-metrics collector). No public port.
-  data-service-worker:
+  data-service-sync:
     <<: *ds-dev-common
-    container_name: data-service-worker-dev-container
+    container_name: data-service-sync-dev
     environment:
       <<: *ds-dev-env
       APP_ROLE: worker
