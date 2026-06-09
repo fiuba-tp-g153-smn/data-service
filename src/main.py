@@ -148,12 +148,37 @@ async def configure_strategies(
     point_value_strategy = S3CogPointValueStrategy(s3_client)
 
     if settings.sync_mode == "full":
-        # Background sync mode (default)
-        sat_strategy = SatelliteFullSyncStrategy(client_redis)
-        radar_strategy = RadarFullSyncStrategy(client_redis)
-        ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(client_redis)
-        ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(client_redis)
-        wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
+        # Background sync mode (default). Reads are still Redis-first, but each
+        # strategy is given the S3 client + TTLs so a tile miss / evicted index
+        # falls back to S3 (and re-warms Redis) instead of returning empty.
+        sat_strategy = SatelliteFullSyncStrategy(
+            client_redis, s3_client, settings.tile_ttl, settings.tileset_listing_ttl
+        )
+        radar_strategy = RadarFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.radar_tile_ttl,
+            settings.tileset_listing_ttl,
+        )
+        ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_tile_ttl,
+            settings.tileset_listing_ttl,
+        )
+        ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_mslp_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
+        wrf_strategy = WrfFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.wrf_tile_ttl,
+            settings.wrf_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
 
         sync_service.set_redis_client(client_redis)
         if settings.metrics_enabled:

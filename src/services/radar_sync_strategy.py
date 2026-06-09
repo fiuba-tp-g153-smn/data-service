@@ -44,10 +44,26 @@ class RadarSyncStrategy(Protocol):
 
 
 class RadarFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it)."""
+    """Redis-first reads (background sync pre-warms), with an S3 fallback.
 
-    def __init__(self, redis_client: RedisClient):
+    Tiles and listings fall back to S3 when Redis misses / its index is empty
+    (evicted or cold), delegating the S3 miss-path to ``RadarOnDemandStrategy``.
+    Without an S3 client the behaviour is Redis-only (unchanged).
+    """
+
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        s3_client: Optional[S3Client] = None,
+        tile_ttl: int = 0,
+        listing_ttl: int = 0,
+    ):
         self._redis = redis_client
+        self._fallback = (
+            RadarOnDemandStrategy(redis_client, s3_client, tile_ttl, listing_ttl)
+            if s3_client is not None
+            else None
+        )
 
     async def get_tile(
         self,
@@ -59,28 +75,59 @@ class RadarFullSyncStrategy:
         x: int,
         y: int,
     ) -> Optional[bytes]:
-        """Get radar tile from Redis."""
-        return await self._redis.get_radar_tile(
+        """Get radar tile from Redis; on miss fall back to S3."""
+        data = await self._redis.get_radar_tile(
             radar_id, variable_id, tileset_id, elevation_id, z, x, y
         )
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_tile(
+                radar_id, variable_id, elevation_id, tileset_id, z, x, y
+            )
+        return None
 
     async def list_radars(self) -> List[str]:
-        """List radars from Redis index."""
-        return await self._redis.get_radar_radars()
+        """List radars from the Redis index; on empty fall back to S3."""
+        radars = await self._redis.get_radar_radars()
+        if radars:
+            return radars
+        if self._fallback is not None:
+            return await self._fallback.list_radars()
+        return []
 
     async def list_variables(self, radar_id: str) -> List[str]:
-        """List variables from Redis index."""
-        return await self._redis.get_radar_variables(radar_id)
+        """List variables from the Redis index; on empty fall back to S3."""
+        variables = await self._redis.get_radar_variables(radar_id)
+        if variables:
+            return variables
+        if self._fallback is not None:
+            return await self._fallback.list_variables(radar_id)
+        return []
 
     async def list_elevations(self, radar_id: str, variable_id: str) -> List[str]:
-        """List elevations from Redis index."""
-        return await self._redis.get_radar_elevations(radar_id, variable_id)
+        """List elevations from the Redis index; on empty fall back to S3."""
+        elevations = await self._redis.get_radar_elevations(radar_id, variable_id)
+        if elevations:
+            return elevations
+        if self._fallback is not None:
+            return await self._fallback.list_elevations(radar_id, variable_id)
+        return []
 
     async def list_tilesets(
         self, radar_id: str, variable_id: str, elevation_id: str
     ) -> List[str]:
-        """List tilesets from Redis index."""
-        return await self._redis.get_radar_tilesets(radar_id, variable_id, elevation_id)
+        """List tilesets from the Redis index; on empty fall back to S3."""
+        tilesets = await self._redis.get_radar_tilesets(
+            radar_id, variable_id, elevation_id
+        )
+        if tilesets:
+            return tilesets
+        if self._fallback is not None:
+            return await self._fallback.list_tilesets(
+                radar_id, variable_id, elevation_id
+            )
+        return []
 
 
 class RadarOnDemandStrategy:

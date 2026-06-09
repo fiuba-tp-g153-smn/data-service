@@ -32,24 +32,55 @@ class EcmwfTpSyncStrategy(Protocol):
 
 
 class EcmwfTpFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it)."""
+    """Redis-first reads (background sync pre-warms), with an S3 fallback.
 
-    def __init__(self, redis_client: RedisClient):
+    Tiles and listings fall back to S3 when Redis misses / its index is empty
+    (evicted or cold), delegating the S3 miss-path to ``EcmwfTpOnDemandStrategy``.
+    Without an S3 client the behaviour is Redis-only (unchanged).
+    """
+
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        s3_client: Optional[S3Client] = None,
+        tile_ttl: int = 0,
+        listing_ttl: int = 0,
+    ):
         self._redis = redis_client
+        self._fallback = (
+            EcmwfTpOnDemandStrategy(redis_client, s3_client, tile_ttl, listing_ttl)
+            if s3_client is not None
+            else None
+        )
 
     async def get_tile(
         self, forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Get tile data from Redis (pre-populated by background sync)."""
-        return await self._redis.get_ecmwf_tp_tile(forecast_ts, period_ts, z, x, y)
+        """Get tile from Redis; on miss fall back to S3."""
+        data = await self._redis.get_ecmwf_tp_tile(forecast_ts, period_ts, z, x, y)
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_tile(forecast_ts, period_ts, z, x, y)
+        return None
 
     async def list_forecasts(self) -> List[str]:
-        """List forecast timestamps from the Redis index, sorted descending."""
-        return await self._redis.get_ecmwf_tp_forecasts()
+        """List forecasts from the Redis index; on empty fall back to S3."""
+        forecasts = await self._redis.get_ecmwf_tp_forecasts()
+        if forecasts:
+            return forecasts
+        if self._fallback is not None:
+            return await self._fallback.list_forecasts()
+        return []
 
     async def list_periods(self, forecast_ts: str) -> List[str]:
-        """List period timestamps for a forecast from Redis, sorted ascending."""
-        return await self._redis.get_ecmwf_tp_periods(forecast_ts)
+        """List periods from the Redis index; on empty fall back to S3."""
+        periods = await self._redis.get_ecmwf_tp_periods(forecast_ts)
+        if periods:
+            return periods
+        if self._fallback is not None:
+            return await self._fallback.list_periods(forecast_ts)
+        return []
 
 
 class EcmwfTpOnDemandStrategy:

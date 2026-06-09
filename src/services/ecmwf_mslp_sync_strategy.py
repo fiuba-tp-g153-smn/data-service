@@ -23,22 +23,53 @@ class EcmwfMslpSyncStrategy(Protocol):
 
 
 class EcmwfMslpFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it)."""
+    """Redis-first reads (background sync pre-warms), with an S3 fallback.
 
-    def __init__(self, redis_client: RedisClient):
+    GeoJSON and listings fall back to S3 when Redis misses / its index is empty
+    (evicted or cold), delegating the S3 miss-path to ``EcmwfMslpOnDemandStrategy``.
+    Without an S3 client the behaviour is Redis-only (unchanged).
+    """
+
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        s3_client: Optional[S3Client] = None,
+        geojson_ttl: int = 0,
+        listing_ttl: int = 0,
+    ):
         self._redis = redis_client
+        self._fallback = (
+            EcmwfMslpOnDemandStrategy(redis_client, s3_client, geojson_ttl, listing_ttl)
+            if s3_client is not None
+            else None
+        )
 
     async def get_geojson(self, forecast_ts: str, timestamp_ts: str) -> Optional[bytes]:
-        """Get isobars GeoJSON from Redis (pre-populated by background sync)."""
-        return await self._redis.get_ecmwf_mslp_geojson(forecast_ts, timestamp_ts)
+        """Get isobars GeoJSON from Redis; on miss fall back to S3."""
+        data = await self._redis.get_ecmwf_mslp_geojson(forecast_ts, timestamp_ts)
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_geojson(forecast_ts, timestamp_ts)
+        return None
 
     async def list_forecasts(self) -> List[str]:
-        """List forecast timestamps from the Redis index, sorted descending."""
-        return await self._redis.get_ecmwf_mslp_forecasts()
+        """List forecasts from the Redis index; on empty fall back to S3."""
+        forecasts = await self._redis.get_ecmwf_mslp_forecasts()
+        if forecasts:
+            return forecasts
+        if self._fallback is not None:
+            return await self._fallback.list_forecasts()
+        return []
 
     async def list_timestamps(self, forecast_ts: str) -> List[str]:
-        """List MSLP timestamps for a forecast from Redis, sorted ascending."""
-        return await self._redis.get_ecmwf_mslp_timestamps(forecast_ts)
+        """List timestamps from the Redis index; on empty fall back to S3."""
+        timestamps = await self._redis.get_ecmwf_mslp_timestamps(forecast_ts)
+        if timestamps:
+            return timestamps
+        if self._fallback is not None:
+            return await self._fallback.list_timestamps(forecast_ts)
+        return []
 
 
 class EcmwfMslpOnDemandStrategy:
