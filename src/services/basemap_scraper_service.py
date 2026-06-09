@@ -222,11 +222,9 @@ class BasemapScraperService(BaseSyncService):
                     soonest_remaining = 0.0
                     continue
                 last = await self._state.get_last_completed(pid)
-                remaining = (
-                    float(interval)
-                    if last is None
-                    else max(0.0, (last + interval) - now)
-                )
+                # A never-scraped provider (last is None) is due NOW — otherwise
+                # the summary misreports a fresh provider as "waiting ~interval".
+                remaining = 0.0 if last is None else max(0.0, (last + interval) - now)
                 if remaining <= 0:
                     due += 1
                 else:
@@ -273,9 +271,8 @@ class BasemapScraperService(BaseSyncService):
                 any_ready = True
                 continue
             last = await self._state.get_last_completed(pid)
-            remaining = (
-                float(interval) if last is None else max(0.0, (last + interval) - now)
-            )
+            # last is None => never scraped => due now (don't defer a full interval).
+            remaining = 0.0 if last is None else max(0.0, (last + interval) - now)
             if remaining <= 0:
                 any_ready = True
                 continue
@@ -287,7 +284,6 @@ class BasemapScraperService(BaseSyncService):
     async def _run_sync(self) -> None:
         """Execute a single scrape cycle across all providers."""
         start = time.monotonic()
-        started_at = datetime.now(timezone.utc)
         # Reset the transient storage-retry flag. Any provider that hits a
         # storage error during this cycle will set it back to True and the
         # next scheduled sleep will be floored to _STORAGE_RETRY_FLOOR_SECONDS.
@@ -316,7 +312,10 @@ class BasemapScraperService(BaseSyncService):
             total_failed,
             elapsed,
         )
-        await self._record_cycle(started_at, total_downloaded, total_failed)
+        # Per-provider dashboard cycles are recorded in _scrape_group so basemap
+        # progress is visible *during* a sweep instead of only on full-sweep
+        # completion (which can take hours and may never complete if a provider
+        # like googleSatellite keeps failing).
 
     async def _record_cycle(
         self, started_at: datetime, downloaded: int, errors: int
@@ -364,11 +363,20 @@ class BasemapScraperService(BaseSyncService):
         return [providers]
 
     async def _scrape_group(self, group: List[BasemapProvider]) -> Tuple[int, int]:
-        """Run a group of providers serially and aggregate their counts."""
+        """Run a group of providers serially and aggregate their counts.
+
+        Records a per-provider dashboard cycle so basemap progress shows up as
+        each provider is scraped, rather than only when the whole sweep finishes.
+        """
         ok = 0
         failed = 0
         for provider in group:
+            started_at = datetime.now(timezone.utc)
             downloaded, group_failed = await self._scrape_provider(provider)
+            # Skip the ones that did no work (circuit-open / not-due return (0, 0))
+            # so the dashboard reflects real scraping, not idle checks.
+            if downloaded or group_failed:
+                await self._record_cycle(started_at, downloaded, group_failed)
             ok += downloaded
             failed += group_failed
         return ok, failed
