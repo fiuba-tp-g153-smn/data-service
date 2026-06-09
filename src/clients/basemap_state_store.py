@@ -142,6 +142,10 @@ class BasemapStateStore:
         )
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
+        # The web (reader) and worker (writer) roles open this same file from
+        # separate processes; wait out a momentary lock (first-boot DDL race or
+        # an in-flight write) instead of failing with "database is locked".
+        conn.execute("PRAGMA busy_timeout=5000;")
         for ddl in _SCHEMA_SQL:
             conn.execute(ddl)
         self._conn = conn

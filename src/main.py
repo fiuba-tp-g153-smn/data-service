@@ -364,6 +364,16 @@ async def configure_basemap(
     scraper_http_client: Optional[HttpTileClient] = None
     state_store: Optional[BasemapStateStore] = None
     scraper: Optional[BasemapScraperService] = None
+
+    # Open the scrape-state SQLite whenever the mode involves scraping,
+    # regardless of this process's role. The worker writes it; the web role
+    # only reads it to serve /metrics/basemap/providers. WAL mode lets the web
+    # reader and the worker writer share the file across processes/containers.
+    if s3_cache_enabled:  # mode in (full, on_demand, no_cache) — not relay_only
+        state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
+        await state_store.connect()
+        set_basemap_state_store(state_store)
+
     if run_scraper:
         scraper_http_client = HttpTileClient(
             max_concurrent=settings.basemap_scrape_concurrent,
@@ -381,12 +391,9 @@ async def configure_basemap(
             lon_max=settings.basemap_bbox_lon_max,
         )
 
-        state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
-        await state_store.connect()
-
         # run_scraper implies s3_cache_enabled by construction, so basemap_s3
-        # is guaranteed non-None here. Assert for the benefit of mypy.
-        assert basemap_s3 is not None
+        # and state_store are guaranteed non-None here. Assert for mypy.
+        assert basemap_s3 is not None and state_store is not None
         scraper = BasemapScraperService(
             settings=settings,
             s3_client=basemap_s3,
@@ -402,7 +409,6 @@ async def configure_basemap(
             metrics_store=metrics_store if settings.metrics_enabled else None,
         )
         await scraper.start(logger)
-        set_basemap_state_store(state_store)
 
     basemap_service.configure(
         reader=reader,
