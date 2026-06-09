@@ -30,6 +30,7 @@ FastAPI microservice (Python 3.13) serving satellite/radar/ECMWF tiles (cached f
 ### Entrypoint & Lifecycle
 
 - `src/main.py` — FastAPI app, CORS middleware, `lifespan` context manager for all background services (satellite sync, radar sync, ECMWF sync, basemap scraper) + `uvloop` event loop.
+- **`APP_ROLE` (web/worker/all)** — one image, role chosen at startup. `web` serves HTTP only; `worker` runs the background sync/scrape/metrics loops only; `all` (default) does both. The lifespan always builds the read-side config; `main._runs_background_jobs()` gates only the `.start()` of the background loops. Deploy a `web` container + a `worker` container (same image, only env differs — see `docker-compose*.yaml`) so the heavy background sync can't CPU-starve request serving. They communicate only via Redis / S3 / the shared `/app/data` metrics SQLite.
 - `src/dependencies.py` — Module-level singletons (`settings`, `logger`, `redis_client`, `basemap_service`).
 - `src/settings.py` — Plain class reading env vars via `os.getenv` + `python-dotenv`, merged with `settings.json`. Fail-fast `_validate()` runs after load.
 
@@ -99,6 +100,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 | `BASEMAP_{PROVIDER}_URL` | Per-provider URL template (URLs only — names/zooms/TMS defaults in `basemap_config.py`) |
 | `WEB_CONCURRENCY` | Uvicorn worker count |
 | `APP_ENV` | `development` = human logs; `production` = NewRelic formatter |
+| `APP_ROLE` | `web` (serve only) / `worker` (background jobs only) / `all` (both, default) |
 
 **Runtime tuning** — `settings.json` is merged with env vars (env wins). `src/settings.py` is the source of truth for defaults. Every key has a matching `UPPERCASE` env override. Per-domain JSON keys are grouped under a namespace object (`basemap`, `ecmwf`, `radar`); the loader flattens one level back to `<namespace>_<key>` so Python attrs and env vars stay flat (`basemap.tile_ttl` → `settings.basemap_tile_ttl` / `BASEMAP_TILE_TTL`). Groups:
 

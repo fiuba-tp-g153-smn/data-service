@@ -95,6 +95,15 @@ _SYNC_SERVICES = (
 )
 
 
+def _runs_background_jobs() -> bool:
+    """Whether this process starts the background sync/scrape/metrics loops.
+
+    The "web" role serves HTTP only; "worker" runs the background jobs; "all"
+    (default) does both. Read-side configuration always runs regardless of role.
+    """
+    return settings.app_role in ("worker", "all")
+
+
 @dataclass(slots=True)
 class WeatherStationsRuntime:
     """Lifecycle holder for weather-stations resources owned by the app lifespan."""
@@ -195,12 +204,16 @@ async def configure_strategies(
 
         # Each product syncs on its own independent loop (own flock + S3 client
         # + watchdog) so no product can monopolize another's scheduling or S3
-        # budget. WRF (the heaviest) runs on its own longer cadence.
-        for service in _SYNC_SERVICES:
-            service.set_redis_client(client_redis)
-            if settings.metrics_enabled:
-                service.set_metrics_store(metrics_store)
-            await service.start(logger)
+        # budget. WRF (the heaviest) runs on its own longer cadence. Only the
+        # worker role starts them — the web role builds the (Full) read
+        # strategies above but never runs the loops, so sync CPU can't starve
+        # request serving.
+        if _runs_background_jobs():
+            for service in _SYNC_SERVICES:
+                service.set_redis_client(client_redis)
+                if settings.metrics_enabled:
+                    service.set_metrics_store(metrics_store)
+                await service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
@@ -280,7 +293,9 @@ async def configure_basemap(
         return None
 
     mode = settings.basemap_sync_mode
-    run_scraper = mode in ("full", "on_demand", "no_cache")
+    # The reader (serving) is always built below; the scraper only runs in a
+    # background-job role so the web role doesn't scrape.
+    run_scraper = mode in ("full", "on_demand", "no_cache") and _runs_background_jobs()
     scraper_writes_redis = mode == "full"
     redis_cache_enabled = mode in ("full", "on_demand")
     s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
@@ -481,31 +496,37 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     )
     await weather_s3.connect()
 
-    smn_client = SmnApiClient(
-        base_url=settings.smn_api_base_url,
-        username=settings.smn_api_username,
-        password=settings.smn_api_password,
-        timeout_seconds=settings.weather_stations_http_timeout_seconds,
-        max_retries=settings.weather_stations_http_max_retries,
-        token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
-        token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
-        log_requests=settings.smn_api_log_requests,
-    )
-    registry_client = SmnRegistryClient(
-        url=settings.smn_stations_registry_url,
-        timeout_seconds=settings.weather_stations_http_timeout_seconds,
-        max_retries=settings.weather_stations_http_max_retries,
-    )
-
-    scraper = WeatherStationsScraperService(
-        settings=settings,
-        s3_client=weather_s3,
-        smn_client=smn_client,
-        registry_client=registry_client,
-        redis_client=redis_client,
-        metrics_store=metrics_store if settings.metrics_enabled else None,
-    )
-    await scraper.start(logger)
+    # SMN/registry clients + the scraper only run in a background-job role. The
+    # web role still builds weather_s3 + configures the read service below so it
+    # serves snapshots (Redis cache the worker fills, with S3 fallback).
+    smn_client: Optional[SmnApiClient] = None
+    registry_client: Optional[SmnRegistryClient] = None
+    scraper: Optional[WeatherStationsScraperService] = None
+    if _runs_background_jobs():
+        smn_client = SmnApiClient(
+            base_url=settings.smn_api_base_url,
+            username=settings.smn_api_username,
+            password=settings.smn_api_password,
+            timeout_seconds=settings.weather_stations_http_timeout_seconds,
+            max_retries=settings.weather_stations_http_max_retries,
+            token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
+            token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
+            log_requests=settings.smn_api_log_requests,
+        )
+        registry_client = SmnRegistryClient(
+            url=settings.smn_stations_registry_url,
+            timeout_seconds=settings.weather_stations_http_timeout_seconds,
+            max_retries=settings.weather_stations_http_max_retries,
+        )
+        scraper = WeatherStationsScraperService(
+            settings=settings,
+            s3_client=weather_s3,
+            smn_client=smn_client,
+            registry_client=registry_client,
+            redis_client=redis_client,
+            metrics_store=metrics_store if settings.metrics_enabled else None,
+        )
+        await scraper.start(logger)
 
     weather_stations_service.configure(
         s3_client=weather_s3,
@@ -607,7 +628,11 @@ async def _wait_for_s3_reachable() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
-    logger.info("Starting data-service...")
+    logger.info(
+        "Starting data-service (role=%s, background jobs=%s)...",
+        settings.app_role,
+        _runs_background_jobs(),
+    )
     configure_gdal_vsi_s3()
     await redis_client.connect()
     # Bring the metrics DB schema to head before opening it (offloaded so the
@@ -645,7 +670,7 @@ async def lifespan(_app: FastAPI):
     weather_stations_runtime = await configure_weather_stations()
 
     redis_metrics_service: Optional[RedisMetricsService] = None
-    if settings.metrics_enabled:
+    if settings.metrics_enabled and _runs_background_jobs():
         redis_metrics_service = RedisMetricsService(
             settings=settings,
             redis_client=redis_client,

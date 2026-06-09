@@ -23,6 +23,12 @@ class Settings:
     # --- Env-only: secrets & infrastructure ---
     log_level: str = ""
     app_env: str = ""
+    # Deployment role (env-only, like app_env): "web" serves HTTP only, "worker"
+    # runs the background sync/scrape/metrics loops only, "all" does both (the
+    # backward-compatible single-container default). Lets the same image run as
+    # a serving container and a dedicated worker so background CPU can't starve
+    # request handlers.
+    app_role: str = "all"
     s3_tiles_data_endpoint: str = ""
     s3_tiles_data_access_key: str = ""
     s3_tiles_data_secret_key: str = ""
@@ -283,6 +289,7 @@ class Settings:
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
+    _APP_ROLES = ("web", "worker", "all")
     _JSON_NAMESPACES = (
         "basemap",
         "ecmwf",
@@ -441,6 +448,7 @@ class Settings:
         """Load from environment variables (overrides JSON values)."""
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
         self.app_env = os.getenv("APP_ENV", self.app_env)
+        self.app_role = os.getenv("APP_ROLE", self.app_role) or self.app_role
 
         # S3
         self.s3_tiles_data_endpoint = os.getenv(
@@ -768,6 +776,7 @@ class Settings:
         )
 
     def _validate(self) -> None:
+        # pylint: disable=too-many-branches
         """Fail-fast validation for values with a fixed domain."""
         if self.basemap_sync_mode not in self._BASEMAP_SYNC_MODES:
             raise ValueError(
@@ -837,6 +846,11 @@ class Settings:
                 f"Invalid weather_stations_sync_mode="
                 f"{self.weather_stations_sync_mode!r}; "
                 f"expected one of {self._WEATHER_STATIONS_SYNC_MODES}"
+            )
+        if self.app_role not in self._APP_ROLES:
+            raise ValueError(
+                f"Invalid app_role={self.app_role!r}; "
+                f"expected one of {self._APP_ROLES}"
             )
         if self.weather_stations_scrape_interval_seconds < 60:
             raise ValueError(
