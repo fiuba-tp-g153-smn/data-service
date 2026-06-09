@@ -1,5 +1,6 @@
 """Tests that sync/scrape services record per-domain cycle rows into the store."""
 
+import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,8 @@ import pytest_asyncio
 
 from clients.metrics_store import MetricsStore
 from db.migrate import run_migrations
-from services.sync_service import SyncService
+from services.radar_sync_service import RadarSyncService
+from services.satellite_sync_service import SatelliteSyncService
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from settings import Settings
 
@@ -27,15 +29,13 @@ async def store(tmp_path):
 
 @pytest.mark.asyncio
 async def test_timed_domain_records_ok_cycle(store):
-    svc = SyncService()
+    svc = SatelliteSyncService()  # _domain == "satellite"
     svc.set_metrics_store(store)
 
     async def domain_cycle():
         return (7, 0)
 
-    downloaded, errors = await svc._timed_domain(  # pylint: disable=protected-access
-        "satellite", domain_cycle()
-    )
+    downloaded, errors = await svc._timed_domain(domain_cycle())
 
     assert (downloaded, errors) == (7, 0)
     rows = await store.get_latest_sync_per_domain()
@@ -48,13 +48,13 @@ async def test_timed_domain_records_ok_cycle(store):
 
 @pytest.mark.asyncio
 async def test_timed_domain_marks_error_outcome_when_errors(store):
-    svc = SyncService()
+    svc = RadarSyncService()  # _domain == "radar"
     svc.set_metrics_store(store)
 
     async def domain_cycle():
         return (2, 3)
 
-    await svc._timed_domain("radar", domain_cycle())  # pylint: disable=protected-access
+    await svc._timed_domain(domain_cycle())
 
     rows = {r.domain: r for r in await store.get_latest_sync_per_domain()}
     assert rows["radar"].errors == 3
@@ -62,12 +62,28 @@ async def test_timed_domain_marks_error_outcome_when_errors(store):
 
 
 @pytest.mark.asyncio
+async def test_timed_domain_records_timeout_outcome(store):
+    """A cycle that overruns the watchdog is recorded as a timeout, not raised."""
+    svc = SatelliteSyncService()
+    svc.set_metrics_store(store)
+    svc._timeout = 0.01  # force the watchdog to fire
+
+    async def slow_cycle():
+        await asyncio.sleep(5)
+        return (1, 0)
+
+    downloaded, errors = await svc._timed_domain(slow_cycle())
+
+    assert (downloaded, errors) == (0, 1)  # timeout counts as one error
+    rows = {r.domain: r for r in await store.get_latest_sync_per_domain()}
+    assert rows["satellite"].outcome == "timeout"
+
+
+@pytest.mark.asyncio
 async def test_record_cycle_is_noop_without_store():
-    svc = SyncService()  # no metrics store configured
+    svc = SatelliteSyncService()  # no metrics store configured
     # Must not raise when the store is absent.
-    await svc._record_cycle(  # pylint: disable=protected-access
-        "satellite", "a", "b", 1, 1, 0
-    )
+    await svc._record_cycle("a", "b", 1, 1, 0)
 
 
 @pytest.mark.asyncio
@@ -81,9 +97,7 @@ async def test_weather_scraper_records_cycle(store):
         metrics_store=store,
     )
 
-    await svc._record_cycle(  # pylint: disable=protected-access
-        datetime.now(timezone.utc), downloaded=410, errors=0
-    )
+    await svc._record_cycle(datetime.now(timezone.utc), downloaded=410, errors=0)
 
     rows = {r.domain: r for r in await store.get_latest_sync_per_domain()}
     assert rows["weather_stations"].downloaded == 410

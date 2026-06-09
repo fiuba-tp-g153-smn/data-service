@@ -4,7 +4,11 @@
   "tileset_listing_ttl": 30,
   "sync_interval_seconds": 60,
   "sync_min_sleep_seconds": 20,
+  "sync_domain_timeout_seconds": 300,
   "s3_max_concurrent_downloads": 5,
+  "s3_connect_timeout_seconds": 5,
+  "s3_read_timeout_seconds": 30,
+  "s3_max_attempts": 3,
   "cache_control_config": "public, max-age=60, stale-while-revalidate=120",
   "cache_control_tile": "public, max-age=43200, immutable",
   "radar": {
@@ -20,7 +24,9 @@
   "wrf": {
     "tile_ttl": 2592000,
     "geojson_ttl": 2592000,
-    "inits_to_keep": 3
+    "inits_to_keep": 3,
+    "sync_interval_seconds": 120,
+    "sync_timeout_seconds": 1200
   },
   "basemap": {
     "sync_mode": "no_cache",

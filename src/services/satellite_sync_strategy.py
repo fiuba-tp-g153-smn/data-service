@@ -23,20 +23,47 @@ class SatelliteSyncStrategy(Protocol):
 
 
 class SatelliteFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it)."""
+    """Redis-first reads (background sync pre-warms), with an S3 fallback.
 
-    def __init__(self, redis_client: RedisClient):
+    A tile miss or an empty (evicted/cold) listing index falls back to S3 — so
+    Redis eviction only makes a read slower, never unservable. The S3 miss-path
+    is delegated to ``SatelliteOnDemandStrategy`` so the fallback logic lives in
+    one place. Without an S3 client the behaviour is Redis-only (unchanged).
+    """
+
+    def __init__(
+        self,
+        redis_client: RedisClient,
+        s3_client: Optional[S3Client] = None,
+        tile_ttl: int = 0,
+        listing_ttl: int = 0,
+    ):
         self._redis = redis_client
+        self._fallback = (
+            SatelliteOnDemandStrategy(redis_client, s3_client, tile_ttl, listing_ttl)
+            if s3_client is not None
+            else None
+        )
 
     async def get_tile(
         self, channel_dir: str, tileset_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Get tile data from Redis."""
-        return await self._redis.get_satellite_tile(channel_dir, tileset_id, z, x, y)
+        """Get tile from Redis; on miss fall back to S3 (when configured)."""
+        data = await self._redis.get_satellite_tile(channel_dir, tileset_id, z, x, y)
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_tile(channel_dir, tileset_id, z, x, y)
+        return None
 
     async def get_tilesets(self, channel_dir: str) -> List[str]:
-        """Get tileset IDs from Redis index."""
-        return await self._redis.get_satellite_tilesets(channel_dir)
+        """Get tileset IDs from the live Redis index; on empty fall back to S3."""
+        tilesets = await self._redis.get_satellite_tilesets(channel_dir)
+        if tilesets:
+            return tilesets
+        if self._fallback is not None:
+            return await self._fallback.get_tilesets(channel_dir)
+        return []
 
 
 class SatelliteOnDemandStrategy:

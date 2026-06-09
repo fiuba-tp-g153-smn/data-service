@@ -1075,3 +1075,40 @@ async def test_chunked_sweep_bounds_inflight_tasks(store):
 
     assert http.peak <= window, f"peak in-flight {http.peak} exceeded window {window}"
     assert len(http.calls) == total
+
+
+@pytest.mark.asyncio
+async def test_scrape_records_per_provider_dashboard_cycle(store):
+    """Each scraped provider records a 'basemap' metrics cycle, so the dashboard
+    shows progress during a sweep instead of only on full-sweep completion."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    http = FakeHttp()  # all tiles OK -> the provider downloads > 0
+    scraper = _make_scraper(store, http, provider, bbox)
+
+    metrics = MagicMock()
+    metrics.record_sync_cycle = AsyncMock()
+    scraper._metrics_store = metrics  # pylint: disable=protected-access
+
+    await scraper._run_sync()  # pylint: disable=protected-access
+
+    # One cycle for the single provider that actually scraped.
+    assert metrics.record_sync_cycle.await_count == 1
+    args = metrics.record_sync_cycle.await_args.args
+    assert args[0] == "basemap"  # domain
+    assert args[4] == len(http.calls) > 0  # downloaded count
+
+
+@pytest.mark.asyncio
+async def test_never_scraped_provider_is_due_now(store):
+    """A provider with no cursor and no last_completed is due immediately:
+    _compute_next_sleep must return 0, not defer a full scrape interval."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    scraper = _make_scraper(store, FakeHttp(), provider, bbox)
+
+    assert await store.get_cursor(provider.provider_id) is None
+    assert await store.get_last_completed(provider.provider_id) is None
+
+    sleep = await scraper._compute_next_sleep(999.0)  # pylint: disable=protected-access
+    assert sleep == 0.0

@@ -29,9 +29,15 @@ down:
 	docker compose -f docker-compose-dev.yaml down --remove-orphans
 
 clean:
-	docker volume rm data-service_redis_dev_data || true
-	docker volume rm data-service_redis_data || true
-	docker volume rm data-service_data_service_data
+	# Stop both stacks and drop their named volumes (redis + dataservice_data).
+	docker compose -f docker-compose-dev.yaml down -v --remove-orphans || true
+	docker compose down -v --remove-orphans || true
+	# Drop the orphaned pre-rename data volume too (old "data" volume), best-effort.
+	docker volume rm data-service_data data-service_dataservice_data data-service_redis_dev_data data-service_redis_data 2>/dev/null || true
+	# Dev /app/data is a host BIND mount (./data), not a volume — `docker volume rm`
+	# never touches it. Wipe its contents (metrics + basemap scrape state +
+	# keystore SQLite) via a throwaway container so root-owned files are removed.
+	docker run --rm -v "$$(pwd)/data:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null' || true
 
 precommit:
 	pre-commit run --all-files

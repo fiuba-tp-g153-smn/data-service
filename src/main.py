@@ -69,7 +69,11 @@ from services.satellite_sync_strategy import (
     SatelliteOnDemandStrategy,
     SatelliteSyncStrategy,
 )
-from services.sync_service import sync_service
+from services.ecmwf_mslp_sync_service import ecmwf_mslp_sync_service
+from services.ecmwf_tp_sync_service import ecmwf_tp_sync_service
+from services.radar_sync_service import radar_sync_service
+from services.satellite_sync_service import satellite_sync_service
+from services.wrf_sync_service import wrf_sync_service
 from services.weather_stations_scraper_service import WeatherStationsScraperService
 from services.weather_stations_service import weather_stations_service
 from services.wrf_service import wrf_service
@@ -80,6 +84,24 @@ from services.wrf_sync_strategy import (
 )
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+
+# Per-product background sync loops, started/stopped together in `full` mode.
+_SYNC_SERVICES = (
+    satellite_sync_service,
+    radar_sync_service,
+    ecmwf_tp_sync_service,
+    ecmwf_mslp_sync_service,
+    wrf_sync_service,
+)
+
+
+def _runs_background_jobs() -> bool:
+    """Whether this process starts the background sync/scrape/metrics loops.
+
+    The "web" role serves HTTP only; "worker" runs the background jobs; "all"
+    (default) does both. Read-side configuration always runs regardless of role.
+    """
+    return settings.app_role in ("worker", "all")
 
 
 @dataclass(slots=True)
@@ -139,23 +161,59 @@ async def configure_strategies(
             bucket=settings.s3_tiles_data_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await s3_client.connect()
 
     point_value_strategy = S3CogPointValueStrategy(s3_client)
 
     if settings.sync_mode == "full":
-        # Background sync mode (default)
-        sat_strategy = SatelliteFullSyncStrategy(client_redis)
-        radar_strategy = RadarFullSyncStrategy(client_redis)
-        ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(client_redis)
-        ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(client_redis)
-        wrf_strategy = WrfFullSyncStrategy(client_redis, s3_client)
+        # Background sync mode (default). Reads are still Redis-first, but each
+        # strategy is given the S3 client + TTLs so a tile miss / evicted index
+        # falls back to S3 (and re-warms Redis) instead of returning empty.
+        sat_strategy = SatelliteFullSyncStrategy(
+            client_redis, s3_client, settings.tile_ttl, settings.tileset_listing_ttl
+        )
+        radar_strategy = RadarFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.radar_tile_ttl,
+            settings.tileset_listing_ttl,
+        )
+        ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_tile_ttl,
+            settings.tileset_listing_ttl,
+        )
+        ecmwf_mslp_strategy = EcmwfMslpFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.ecmwf_mslp_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
+        wrf_strategy = WrfFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.wrf_tile_ttl,
+            settings.wrf_geojson_ttl,
+            settings.tileset_listing_ttl,
+        )
 
-        sync_service.set_redis_client(client_redis)
-        if settings.metrics_enabled:
-            sync_service.set_metrics_store(metrics_store)
-        await sync_service.start(logger)
+        # Each product syncs on its own independent loop (own flock + S3 client
+        # + watchdog) so no product can monopolize another's scheduling or S3
+        # budget. WRF (the heaviest) runs on its own longer cadence. Only the
+        # worker role starts them — the web role builds the (Full) read
+        # strategies above but never runs the loops, so sync CPU can't starve
+        # request serving.
+        if _runs_background_jobs():
+            for service in _SYNC_SERVICES:
+                service.set_redis_client(client_redis)
+                if settings.metrics_enabled:
+                    service.set_metrics_store(metrics_store)
+                await service.start(logger)
     else:
         # On-demand mode: lazy fetch + cache
         logger.info("Starting in on-demand sync mode")
@@ -235,7 +293,9 @@ async def configure_basemap(
         return None
 
     mode = settings.basemap_sync_mode
-    run_scraper = mode in ("full", "on_demand", "no_cache")
+    # The reader (serving) is always built below; the scraper only runs in a
+    # background-job role so the web role doesn't scrape.
+    run_scraper = mode in ("full", "on_demand", "no_cache") and _runs_background_jobs()
     scraper_writes_redis = mode == "full"
     redis_cache_enabled = mode in ("full", "on_demand")
     s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
@@ -269,6 +329,9 @@ async def configure_basemap(
             bucket=settings.s3_basemap_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await basemap_s3.connect()
         # Lifecycle policy application is delegated to the scraper loop so
@@ -301,6 +364,16 @@ async def configure_basemap(
     scraper_http_client: Optional[HttpTileClient] = None
     state_store: Optional[BasemapStateStore] = None
     scraper: Optional[BasemapScraperService] = None
+
+    # Open the scrape-state SQLite whenever the mode involves scraping,
+    # regardless of this process's role. The worker writes it; the web role
+    # only reads it to serve /metrics/basemap/providers. WAL mode lets the web
+    # reader and the worker writer share the file across processes/containers.
+    if s3_cache_enabled:  # mode in (full, on_demand, no_cache) — not relay_only
+        state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
+        await state_store.connect()
+        set_basemap_state_store(state_store)
+
     if run_scraper:
         scraper_http_client = HttpTileClient(
             max_concurrent=settings.basemap_scrape_concurrent,
@@ -318,12 +391,9 @@ async def configure_basemap(
             lon_max=settings.basemap_bbox_lon_max,
         )
 
-        state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
-        await state_store.connect()
-
         # run_scraper implies s3_cache_enabled by construction, so basemap_s3
-        # is guaranteed non-None here. Assert for the benefit of mypy.
-        assert basemap_s3 is not None
+        # and state_store are guaranteed non-None here. Assert for mypy.
+        assert basemap_s3 is not None and state_store is not None
         scraper = BasemapScraperService(
             settings=settings,
             s3_client=basemap_s3,
@@ -339,7 +409,6 @@ async def configure_basemap(
             metrics_store=metrics_store if settings.metrics_enabled else None,
         )
         await scraper.start(logger)
-        set_basemap_state_store(state_store)
 
     basemap_service.configure(
         reader=reader,
@@ -379,6 +448,9 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             bucket=settings.s3_api_keys_bucket_name,
             secure=settings.s3_tiles_data_secure,
             max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+            connect_timeout=settings.s3_connect_timeout_seconds,
+            read_timeout=settings.s3_read_timeout_seconds,
+            max_attempts=settings.s3_max_attempts,
         )
         await api_keys_s3.connect()
         # Bucket is dedicated to this subsystem and the only writer here is the
@@ -424,34 +496,43 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
         bucket=settings.s3_weather_stations_bucket_name,
         secure=settings.s3_tiles_data_secure,
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        connect_timeout=settings.s3_connect_timeout_seconds,
+        read_timeout=settings.s3_read_timeout_seconds,
+        max_attempts=settings.s3_max_attempts,
     )
     await weather_s3.connect()
 
-    smn_client = SmnApiClient(
-        base_url=settings.smn_api_base_url,
-        username=settings.smn_api_username,
-        password=settings.smn_api_password,
-        timeout_seconds=settings.weather_stations_http_timeout_seconds,
-        max_retries=settings.weather_stations_http_max_retries,
-        token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
-        token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
-        log_requests=settings.smn_api_log_requests,
-    )
-    registry_client = SmnRegistryClient(
-        url=settings.smn_stations_registry_url,
-        timeout_seconds=settings.weather_stations_http_timeout_seconds,
-        max_retries=settings.weather_stations_http_max_retries,
-    )
-
-    scraper = WeatherStationsScraperService(
-        settings=settings,
-        s3_client=weather_s3,
-        smn_client=smn_client,
-        registry_client=registry_client,
-        redis_client=redis_client,
-        metrics_store=metrics_store if settings.metrics_enabled else None,
-    )
-    await scraper.start(logger)
+    # SMN/registry clients + the scraper only run in a background-job role. The
+    # web role still builds weather_s3 + configures the read service below so it
+    # serves snapshots (Redis cache the worker fills, with S3 fallback).
+    smn_client: Optional[SmnApiClient] = None
+    registry_client: Optional[SmnRegistryClient] = None
+    scraper: Optional[WeatherStationsScraperService] = None
+    if _runs_background_jobs():
+        smn_client = SmnApiClient(
+            base_url=settings.smn_api_base_url,
+            username=settings.smn_api_username,
+            password=settings.smn_api_password,
+            timeout_seconds=settings.weather_stations_http_timeout_seconds,
+            max_retries=settings.weather_stations_http_max_retries,
+            token_cache_ttl_seconds=settings.weather_stations_token_cache_ttl_seconds,
+            token_settling_delay_seconds=settings.smn_api_token_settling_delay_seconds,
+            log_requests=settings.smn_api_log_requests,
+        )
+        registry_client = SmnRegistryClient(
+            url=settings.smn_stations_registry_url,
+            timeout_seconds=settings.weather_stations_http_timeout_seconds,
+            max_retries=settings.weather_stations_http_max_retries,
+        )
+        scraper = WeatherStationsScraperService(
+            settings=settings,
+            s3_client=weather_s3,
+            smn_client=smn_client,
+            registry_client=registry_client,
+            redis_client=redis_client,
+            metrics_store=metrics_store if settings.metrics_enabled else None,
+        )
+        await scraper.start(logger)
 
     weather_stations_service.configure(
         s3_client=weather_s3,
@@ -508,9 +589,10 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
 
 
 async def shutdown_services():
-    """Stop background services if sync mode is full."""
+    """Stop the per-product background sync loops if sync mode is full."""
     if settings.sync_mode == "full":
-        await sync_service.stop(logger)
+        for service in _SYNC_SERVICES:
+            await service.stop(logger)
 
 
 async def _wait_for_s3_reachable() -> None:
@@ -528,6 +610,9 @@ async def _wait_for_s3_reachable() -> None:
         bucket=settings.s3_tiles_data_bucket_name,
         secure=settings.s3_tiles_data_secure,
         max_concurrent_downloads=settings.s3_max_concurrent_downloads,
+        connect_timeout=settings.s3_connect_timeout_seconds,
+        read_timeout=settings.s3_read_timeout_seconds,
+        max_attempts=settings.s3_max_attempts,
     )
     try:
         await probe.connect()
@@ -549,7 +634,11 @@ async def _wait_for_s3_reachable() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Manage application lifecycle events."""
-    logger.info("Starting data-service...")
+    logger.info(
+        "Starting data-service (role=%s, background jobs=%s)...",
+        settings.app_role,
+        _runs_background_jobs(),
+    )
     configure_gdal_vsi_s3()
     await redis_client.connect()
     # Bring the metrics DB schema to head before opening it (offloaded so the
@@ -587,7 +676,7 @@ async def lifespan(_app: FastAPI):
     weather_stations_runtime = await configure_weather_stations()
 
     redis_metrics_service: Optional[RedisMetricsService] = None
-    if settings.metrics_enabled:
+    if settings.metrics_enabled and _runs_background_jobs():
         redis_metrics_service = RedisMetricsService(
             settings=settings,
             redis_client=redis_client,

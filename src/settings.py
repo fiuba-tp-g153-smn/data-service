@@ -23,6 +23,12 @@ class Settings:
     # --- Env-only: secrets & infrastructure ---
     log_level: str = ""
     app_env: str = ""
+    # Deployment role (env-only, like app_env): "web" serves HTTP only, "worker"
+    # runs the background sync/scrape/metrics loops only, "all" does both (the
+    # backward-compatible single-container default). Lets the same image run as
+    # a serving container and a dedicated worker so background CPU can't starve
+    # request handlers.
+    app_role: str = "all"
     s3_tiles_data_endpoint: str = ""
     s3_tiles_data_access_key: str = ""
     s3_tiles_data_secret_key: str = ""
@@ -73,13 +79,30 @@ class Settings:
     # Floor on the inter-cycle sleep so the loop always yields, even when a
     # cycle overruns sync_interval_seconds (otherwise it busy-loops at 0 sleep).
     sync_min_sleep_seconds: int
+    # Per-product watchdog: a sync cycle that exceeds this is cancelled, recorded
+    # as a "timeout", and retried next cycle. Must exceed one tileset/period's
+    # download time so the frontier always advances. WRF uses its own value.
+    sync_domain_timeout_seconds: int = 300
     cache_control_config: str
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
     # runs the background sync task (fcntl exclusive lock).
     sync_lock_path: str = "/tmp/sync.lock"
     radar_lock_path: str = "/tmp/radar_sync.lock"
+    # Each product syncs in its own loop under its own flock so they run
+    # independently (no product blocks another). Satellite reuses sync_lock_path,
+    # radar reuses radar_lock_path; the rest get their own below.
+    ecmwf_tp_sync_lock_path: str = "/tmp/ecmwf_tp_sync.lock"
+    ecmwf_mslp_sync_lock_path: str = "/tmp/ecmwf_mslp_sync.lock"
+    wrf_sync_lock_path: str = "/tmp/wrf_sync.lock"
     s3_max_concurrent_downloads: int = 5
+    # S3 client timeouts + bounded retry. Without these botocore can hang a
+    # request indefinitely on a stalled endpoint, wedging the whole sync loop
+    # (no per-request ceiling, no recovery). connect/read are per-attempt;
+    # max_attempts bounds total retries (botocore "standard" mode).
+    s3_connect_timeout_seconds: float = 5.0
+    s3_read_timeout_seconds: float = 30.0
+    s3_max_attempts: int = 3
     # ECMWF total precipitation (loaded from settings.json, env overrides)
     ecmwf_tile_ttl: int
     ecmwf_forecasts_to_keep: int
@@ -88,6 +111,10 @@ class Settings:
     # WRF model (loaded from settings.json, env overrides)
     wrf_tile_ttl: int = 86400
     wrf_geojson_ttl: int = 86400
+    # WRF is the heaviest product, so it runs on its own loop with a longer
+    # cadence and a generous watchdog (a big backfill pass must not be truncated).
+    wrf_sync_interval_seconds: int = 120
+    wrf_sync_timeout_seconds: int = 1200
     # Cap the WRF init runs walked per product each cycle (newest-first), so the
     # sync scan stays bounded as runs accumulate in S3. Mirrors ecmwf_forecasts_to_keep.
     wrf_inits_to_keep: int = 2
@@ -262,6 +289,7 @@ class Settings:
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
+    _APP_ROLES = ("web", "worker", "all")
     _JSON_NAMESPACES = (
         "basemap",
         "ecmwf",
@@ -302,15 +330,21 @@ class Settings:
             "tileset_listing_ttl",
             "sync_interval_seconds",
             "sync_min_sleep_seconds",
+            "sync_domain_timeout_seconds",
             "cache_control_config",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
+            "s3_connect_timeout_seconds",
+            "s3_read_timeout_seconds",
+            "s3_max_attempts",
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
             "ecmwf_mslp_geojson_ttl",
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
             "wrf_inits_to_keep",
+            "wrf_sync_interval_seconds",
+            "wrf_sync_timeout_seconds",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -414,6 +448,7 @@ class Settings:
         """Load from environment variables (overrides JSON values)."""
         self.log_level = os.getenv("LOG_LEVEL", self.log_level)
         self.app_env = os.getenv("APP_ENV", self.app_env)
+        self.app_role = os.getenv("APP_ROLE", self.app_role) or self.app_role
 
         # S3
         self.s3_tiles_data_endpoint = os.getenv(
@@ -455,6 +490,9 @@ class Settings:
         self.sync_min_sleep_seconds = self._env_int(
             "SYNC_MIN_SLEEP_SECONDS", self.sync_min_sleep_seconds
         )
+        self.sync_domain_timeout_seconds = self._env_int(
+            "SYNC_DOMAIN_TIMEOUT_SECONDS", self.sync_domain_timeout_seconds
+        )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
         self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
@@ -470,6 +508,13 @@ class Settings:
         self.s3_max_concurrent_downloads = self._env_int(
             "S3_MAX_CONCURRENT_DOWNLOADS", self.s3_max_concurrent_downloads
         )
+        self.s3_connect_timeout_seconds = self._env_float(
+            "S3_CONNECT_TIMEOUT_SECONDS", self.s3_connect_timeout_seconds
+        )
+        self.s3_read_timeout_seconds = self._env_float(
+            "S3_READ_TIMEOUT_SECONDS", self.s3_read_timeout_seconds
+        )
+        self.s3_max_attempts = self._env_int("S3_MAX_ATTEMPTS", self.s3_max_attempts)
         self.ecmwf_tile_ttl = self._env_int("ECMWF_TILE_TTL", self.ecmwf_tile_ttl)
         self.ecmwf_forecasts_to_keep = self._env_int(
             "ECMWF_FORECASTS_TO_KEEP", self.ecmwf_forecasts_to_keep
@@ -481,6 +526,12 @@ class Settings:
         self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
         self.wrf_inits_to_keep = self._env_int(
             "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
+        )
+        self.wrf_sync_interval_seconds = self._env_int(
+            "WRF_SYNC_INTERVAL_SECONDS", self.wrf_sync_interval_seconds
+        )
+        self.wrf_sync_timeout_seconds = self._env_int(
+            "WRF_SYNC_TIMEOUT_SECONDS", self.wrf_sync_timeout_seconds
         )
 
         # Basemap
@@ -725,6 +776,7 @@ class Settings:
         )
 
     def _validate(self) -> None:
+        # pylint: disable=too-many-branches
         """Fail-fast validation for values with a fixed domain."""
         if self.basemap_sync_mode not in self._BASEMAP_SYNC_MODES:
             raise ValueError(
@@ -794,6 +846,11 @@ class Settings:
                 f"Invalid weather_stations_sync_mode="
                 f"{self.weather_stations_sync_mode!r}; "
                 f"expected one of {self._WEATHER_STATIONS_SYNC_MODES}"
+            )
+        if self.app_role not in self._APP_ROLES:
+            raise ValueError(
+                f"Invalid app_role={self.app_role!r}; "
+                f"expected one of {self._APP_ROLES}"
             )
         if self.weather_stations_scrape_interval_seconds < 60:
             raise ValueError(

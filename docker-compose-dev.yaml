@@ -1,16 +1,82 @@
-# Data Service - Tile Serving via REST API
+# Data Service - Tile Serving via REST API (dev)
 #
-# This service syncs tiles from an external S3 bucket and serves them via REST API.
-# The S3 instance is typically provided by tiles-processor running separately.
+# Roles (same image, selected by APP_ROLE — checked at startup):
+#   - data-service-api  (APP_ROLE=web)    : serves HTTP only.
+#   - data-service-sync (APP_ROLE=worker) : runs the background sync/scrape/
+#                                           metrics loops only.
+# Running them as separate containers keeps the heavy background sync from
+# starving request serving (each container is its own process/event loop).
 #
 # Configuration:
-#   S3_TILES_DATA_ENDPOINT: Set to the S3 host:port (e.g., "host.docker.internal:9000" for local,
-#                   or "s3.example.com:9000" for remote)
+#   S3_TILES_DATA_ENDPOINT: Set to the S3 host:port (e.g., "host.docker.internal:9000" for local)
 #
 # Usage with tiles-processor S3:
 #   1. Start tiles-processor: cd ../tiles-processor && docker compose up -d
 #   2. Set S3_TILES_DATA_ENDPOINT=host.docker.internal:9000 in .env
-#   3. Start data-service: docker compose up -d
+#   3. Start data-service: make up   (brings up redis + api + sync)
+
+# Shared environment for both roles. WEB_CONCURRENCY + APP_ROLE are set per role.
+x-ds-dev-env: &ds-dev-env
+  LOG_LEVEL: ${LOG_LEVEL}
+  APP_ENV: ${APP_ENV}
+  # S3 Configuration - connect to external S3 (e.g., S3 from tiles-processor)
+  S3_TILES_DATA_ENDPOINT: ${S3_TILES_DATA_ENDPOINT}
+  S3_TILES_DATA_ACCESS_KEY: ${S3_TILES_DATA_ACCESS_KEY}
+  S3_TILES_DATA_SECRET_KEY: ${S3_TILES_DATA_SECRET_KEY}
+  S3_TILES_DATA_BUCKET_NAME: ${S3_TILES_DATA_BUCKET_NAME}
+  S3_TILES_DATA_SECURE: ${S3_TILES_DATA_SECURE}
+  SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
+  REDIS_URL: ${REDIS_URL}
+  # Basemap tile backup bucket + per-provider source URLs
+  S3_BASEMAP_BUCKET_NAME: ${S3_BASEMAP_BUCKET_NAME}
+  BASEMAP_ARGENMAP_URL: ${BASEMAP_ARGENMAP_URL}
+  BASEMAP_ARGENMAPGRIS_URL: ${BASEMAP_ARGENMAPGRIS_URL}
+  BASEMAP_ARGENMAPOSCURO_URL: ${BASEMAP_ARGENMAPOSCURO_URL}
+  BASEMAP_ARGENMAPTOPOGRAFICO_URL: ${BASEMAP_ARGENMAPTOPOGRAFICO_URL}
+  BASEMAP_SATELLITE_URL: ${BASEMAP_SATELLITE_URL}
+  BASEMAP_TOPOGRAPHIC_URL: ${BASEMAP_TOPOGRAPHIC_URL}
+  BASEMAP_GOOGLESATELLITE_URL: ${BASEMAP_GOOGLESATELLITE_URL}
+  BASEMAP_OCEANBASE_URL: ${BASEMAP_OCEANBASE_URL}
+  # Weather stations: dedicated S3 bucket + SMN API credentials + admin password
+  S3_WEATHER_STATIONS_BUCKET_NAME: ${S3_WEATHER_STATIONS_BUCKET_NAME}
+  SMN_API_BASE_URL: ${SMN_API_BASE_URL}
+  SMN_API_USERNAME: ${SMN_API_USERNAME}
+  SMN_API_PASSWORD: ${SMN_API_PASSWORD}
+  SMN_API_TOKEN_SETTLING_DELAY_SECONDS: ${SMN_API_TOKEN_SETTLING_DELAY_SECONDS}
+  SMN_API_USER_AGENT: ${SMN_API_USER_AGENT}
+  SMN_API_LOG_REQUESTS: ${SMN_API_LOG_REQUESTS}
+  SMN_STATIONS_REGISTRY_URL: ${SMN_STATIONS_REGISTRY_URL}
+  WEATHER_STATIONS_ADMIN_PASSWORD: ${WEATHER_STATIONS_ADMIN_PASSWORD}
+
+# Shared service config for both roles (same build + mounts + deps + health).
+x-ds-dev-common: &ds-dev-common
+  build:
+    context: .
+    dockerfile: Dockerfile.dev
+    args:
+      - APP_HOST_PORT=${APP_HOST_PORT}
+  restart: unless-stopped
+  extra_hosts:
+    - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
+  depends_on:
+    redis:
+      condition: service_healthy
+  volumes:
+    - ./src:/app
+    - ./settings.json:/settings.json:ro
+    # ./src is mounted at /app, so db/migrate.py resolves the repo root to "/";
+    # the metrics-DB migrations must be reachable at /alembic.ini + /migrations.
+    - ./alembic.ini:/alembic.ini:ro
+    - ./migrations:/migrations:ro
+    - ./output_radar:/output_radar
+    - ./data:/app/data
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+    interval: 10s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+    start_interval: 1s
 
 services:
   redis:
@@ -32,70 +98,26 @@ services:
       start_period: 15s
       start_interval: 1s
 
-  data-service:
-    container_name: data-service-dev-container
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
-      args:
-        - APP_HOST_PORT=${APP_HOST_PORT}
+  # Web role: serves HTTP only (no background sync).
+  data-service-api:
+    <<: *ds-dev-common
+    container_name: data-service-api-dev
     ports:
       - "${APP_HOST_PORT:-6006}:8080"
-    restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Allows connecting to host services (Linux)
-    depends_on:
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./src:/app
-      - ./settings.json:/settings.json:ro
-      # ./src is mounted at /app, so db/migrate.py resolves the repo root to "/";
-      # the metrics-DB migrations must be reachable at /alembic.ini + /migrations.
-      - ./alembic.ini:/alembic.ini:ro
-      - ./migrations:/migrations:ro
-      - ./output_radar:/output_radar
-      - ./data:/app/data
     environment:
-      - LOG_LEVEL=${LOG_LEVEL}
-      - APP_ENV=${APP_ENV}
-      # S3 Configuration - connect to external S3 (e.g., S3 from tiles-processor)
-      # Use host.docker.internal:9000 to connect to S3 running on the host
-      - S3_TILES_DATA_ENDPOINT=${S3_TILES_DATA_ENDPOINT}
-      - S3_TILES_DATA_ACCESS_KEY=${S3_TILES_DATA_ACCESS_KEY}
-      - S3_TILES_DATA_SECRET_KEY=${S3_TILES_DATA_SECRET_KEY}
-      - S3_TILES_DATA_BUCKET_NAME=${S3_TILES_DATA_BUCKET_NAME}
-      - S3_TILES_DATA_SECURE=${S3_TILES_DATA_SECURE}
-      - SYNC_INTERVAL_SECONDS=${SYNC_INTERVAL_SECONDS}
-      - WEB_CONCURRENCY=${WEB_CONCURRENCY}
-      - REDIS_URL=${REDIS_URL}
-      # Basemap tile backup bucket + per-provider source URLs
-      - S3_BASEMAP_BUCKET_NAME=${S3_BASEMAP_BUCKET_NAME}
-      - BASEMAP_ARGENMAP_URL=${BASEMAP_ARGENMAP_URL}
-      - BASEMAP_ARGENMAPGRIS_URL=${BASEMAP_ARGENMAPGRIS_URL}
-      - BASEMAP_ARGENMAPOSCURO_URL=${BASEMAP_ARGENMAPOSCURO_URL}
-      - BASEMAP_ARGENMAPTOPOGRAFICO_URL=${BASEMAP_ARGENMAPTOPOGRAFICO_URL}
-      - BASEMAP_SATELLITE_URL=${BASEMAP_SATELLITE_URL}
-      - BASEMAP_TOPOGRAPHIC_URL=${BASEMAP_TOPOGRAPHIC_URL}
-      - BASEMAP_GOOGLESATELLITE_URL=${BASEMAP_GOOGLESATELLITE_URL}
-      - BASEMAP_OCEANBASE_URL=${BASEMAP_OCEANBASE_URL}
-      # Weather stations: dedicated S3 bucket + SMN API credentials + admin password
-      - S3_WEATHER_STATIONS_BUCKET_NAME=${S3_WEATHER_STATIONS_BUCKET_NAME}
-      - SMN_API_BASE_URL=${SMN_API_BASE_URL}
-      - SMN_API_USERNAME=${SMN_API_USERNAME}
-      - SMN_API_PASSWORD=${SMN_API_PASSWORD}
-      - SMN_API_TOKEN_SETTLING_DELAY_SECONDS=${SMN_API_TOKEN_SETTLING_DELAY_SECONDS}
-      - SMN_API_USER_AGENT=${SMN_API_USER_AGENT}
-      - SMN_API_LOG_REQUESTS=${SMN_API_LOG_REQUESTS}
-      - SMN_STATIONS_REGISTRY_URL=${SMN_STATIONS_REGISTRY_URL}
-      - WEATHER_STATIONS_ADMIN_PASSWORD=${WEATHER_STATIONS_ADMIN_PASSWORD}
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
-      interval: 10s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-      start_interval: 1s
+      <<: *ds-dev-env
+      APP_ROLE: web
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY}
+
+  # Worker role: runs all background jobs (tile sync + basemap/weather scrapers +
+  # Redis-metrics collector). No public port.
+  data-service-sync:
+    <<: *ds-dev-common
+    container_name: data-service-sync-dev
+    environment:
+      <<: *ds-dev-env
+      APP_ROLE: worker
+      WEB_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
 
 volumes:
   redis_dev_data:

@@ -46,24 +46,37 @@ class WrfSyncStrategy(Protocol):
     async def list_steps(self, product_id: str, init_tag: str) -> List[str]:
         """List forecast steps for a product/init_tag, sorted ascending."""
 
-    async def list_layers(
-        self, product_id: str, init_tag: str, fxxx: str
-    ) -> List[str]:
+    async def list_layers(self, product_id: str, init_tag: str, fxxx: str) -> List[str]:
         """List GeoJSON layers available for a step, sorted ascending."""
 
 
 class WrfFullSyncStrategy:
-    """Reads from pre-populated Redis (background sync fills it).
+    """Redis-first reads (background sync pre-warms), with an S3 fallback.
 
-    Barb tiles are not pre-synced (too many files); they go direct to S3
-    via the optional S3 client passed at construction time.
+    Tiles, GeoJSON layers, and listings fall back to S3 when Redis misses / its
+    index is empty (evicted or cold), delegating the S3 miss-path to
+    ``WrfOnDemandStrategy``. Barb tiles are never pre-synced (too many files) so
+    they always go direct to S3. Without an S3 client the behaviour is
+    Redis-only (unchanged) and barb tiles return None.
     """
 
     def __init__(
-        self, redis_client: RedisClient, s3_client: Optional[S3Client] = None
+        self,
+        redis_client: RedisClient,
+        s3_client: Optional[S3Client] = None,
+        tile_ttl: int = 0,
+        geojson_ttl: int = 0,
+        listing_ttl: int = 0,
     ):
         self._redis = redis_client
         self._s3 = s3_client
+        self._fallback = (
+            WrfOnDemandStrategy(
+                redis_client, s3_client, tile_ttl, geojson_ttl, listing_ttl
+            )
+            if s3_client is not None
+            else None
+        )
 
     async def get_tile(
         self,
@@ -74,12 +87,22 @@ class WrfFullSyncStrategy:
         x: int,
         y: int,
     ) -> Optional[bytes]:
-        return await self._redis.get_wrf_tile(product_id, init_tag, fxxx, z, x, y)
+        data = await self._redis.get_wrf_tile(product_id, init_tag, fxxx, z, x, y)
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_tile(product_id, init_tag, fxxx, z, x, y)
+        return None
 
     async def get_geojson(
         self, product_id: str, init_tag: str, fxxx: str, layer: str
     ) -> Optional[bytes]:
-        return await self._redis.get_wrf_geojson(product_id, init_tag, fxxx, layer)
+        data = await self._redis.get_wrf_geojson(product_id, init_tag, fxxx, layer)
+        if data:
+            return data
+        if self._fallback is not None:
+            return await self._fallback.get_geojson(product_id, init_tag, fxxx, layer)
+        return None
 
     async def get_barb_tile(
         self,
@@ -97,15 +120,28 @@ class WrfFullSyncStrategy:
         return await self._s3.download_tile(s3_key)
 
     async def list_init_runs(self, product_id: str) -> List[str]:
-        return await self._redis.get_wrf_init_runs(product_id)
+        init_runs = await self._redis.get_wrf_init_runs(product_id)
+        if init_runs:
+            return init_runs
+        if self._fallback is not None:
+            return await self._fallback.list_init_runs(product_id)
+        return []
 
     async def list_steps(self, product_id: str, init_tag: str) -> List[str]:
-        return await self._redis.get_wrf_steps(product_id, init_tag)
+        steps = await self._redis.get_wrf_steps(product_id, init_tag)
+        if steps:
+            return steps
+        if self._fallback is not None:
+            return await self._fallback.list_steps(product_id, init_tag)
+        return []
 
-    async def list_layers(
-        self, product_id: str, init_tag: str, fxxx: str
-    ) -> List[str]:
-        return await self._redis.get_wrf_layers(product_id, init_tag, fxxx)
+    async def list_layers(self, product_id: str, init_tag: str, fxxx: str) -> List[str]:
+        layers = await self._redis.get_wrf_layers(product_id, init_tag, fxxx)
+        if layers:
+            return layers
+        if self._fallback is not None:
+            return await self._fallback.list_layers(product_id, init_tag, fxxx)
+        return []
 
 
 class WrfOnDemandStrategy:
@@ -196,9 +232,7 @@ class WrfOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(
-            f"{WRF_S3_PREFIX}/{product_id}"
-        )
+        subdirs = await self._s3.get_subdirectories(f"{WRF_S3_PREFIX}/{product_id}")
         init_runs = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -236,9 +270,7 @@ class WrfOnDemandStrategy:
         )
         return steps
 
-    async def list_layers(
-        self, product_id: str, init_tag: str, fxxx: str
-    ) -> List[str]:
+    async def list_layers(self, product_id: str, init_tag: str, fxxx: str) -> List[str]:
         cache_key = f"cache:listing:wrf:{product_id}:{init_tag}:{fxxx}:layers"
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
@@ -247,9 +279,7 @@ class WrfOnDemandStrategy:
         if not self._s3:
             return []
 
-        layers = sorted(
-            await self._s3.list_wrf_layers(product_id, init_tag, fxxx)
-        )
+        layers = sorted(await self._s3.list_wrf_layers(product_id, init_tag, fxxx))
         await self._redis.cache_listing(
             cache_key, json.dumps(layers).encode(), self._listing_ttl
         )

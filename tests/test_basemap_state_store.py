@@ -211,6 +211,54 @@ async def test_wal_mode_enabled(tmp_path):
         await s.close()
 
 
+@pytest.mark.asyncio
+async def test_busy_timeout_pragma_set(tmp_path):
+    """A busy timeout is set so the web reader waits out the worker's write lock
+    instead of failing with 'database is locked'."""
+    db_path = tmp_path / "state.sqlite"
+    s = BasemapStateStore(str(db_path))
+    await s.connect()
+    try:
+        con = sqlite3.connect(str(db_path))
+        timeout_ms = con.execute("PRAGMA busy_timeout;").fetchone()[0]
+        con.close()
+        assert timeout_ms == 5000
+    finally:
+        await s.close()
+
+
+@pytest.mark.asyncio
+async def test_two_connections_share_state_concurrently(tmp_path):
+    """Mirror the web/worker split: a writer store and a reader store open the
+    same file at once, and the reader sees the writer's committed rows without
+    the writer closing first.
+
+    Regression for the dashboard showing every provider as 'pendiente' — the web
+    process reads the same SQLite the worker writes (WAL + busy_timeout make the
+    cross-process reader safe).
+    """
+    db_path = tmp_path / "state.sqlite"
+    writer = BasemapStateStore(str(db_path))
+    reader = BasemapStateStore(str(db_path))
+    await writer.connect()
+    await reader.connect()
+    try:
+        await writer.set_last_completed("argenmap", 1700000000)
+        await writer.set_scrape_stats(
+            "argenmap", attempted=500, ok=498, failed=2, completed=True
+        )
+        await writer.set_cursor("argenmap", zoom=8, tile_index=42)
+
+        assert await reader.get_last_completed("argenmap") == 1700000000
+        stats = await reader.get_scrape_stats("argenmap")
+        assert stats is not None
+        assert (stats.attempted, stats.ok, stats.failed) == (500, 498, 2)
+        assert await reader.get_cursor("argenmap") == Cursor(zoom=8, tile_index=42)
+    finally:
+        await reader.close()
+        await writer.close()
+
+
 # --------------------------------------------------------------------------- #
 # Provider health table
 # --------------------------------------------------------------------------- #
