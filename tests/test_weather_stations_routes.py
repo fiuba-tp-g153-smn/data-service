@@ -200,6 +200,9 @@ async def test_latest_returns_snapshot_with_cache_control(app_and_keystore):
     body = resp.json()
     assert body["scraped_at"] == "2026-05-17T14:00:00Z"
     assert len(body["stations"]) == 2
+    # dew_point is derived at read time and surfaced on every station (None here:
+    # the fixture carries no temperature/humidity).
+    assert "dew_point" in body["stations"][0]
     assert (
         resp.headers["cache-control"] == settings.weather_stations_cache_control_latest
     )

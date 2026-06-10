@@ -8,6 +8,7 @@ from typing import Optional
 import pytest
 
 from services.weather_stations_cache import (
+    annotate_dew_point,
     extract_station_series,
     magnus_dew_point,
     pivot_station_series,
@@ -82,6 +83,37 @@ async def test_get_latest_returns_parsed_snapshot():
     assert out is not None
     assert out["scraped_at"] == "2026-05-17T14:05:00Z"
     assert len(out["stations"]) == 3
+
+
+def _snap_body_with_readings(scraped_at, stations) -> bytes:
+    """Snapshot body carrying explicit per-station fields (temp/humidity/etc.)."""
+    return json.dumps(
+        {
+            "scraped_at": scraped_at.isoformat().replace("+00:00", "Z"),
+            "source_url": "x",
+            "stations": stations,
+        }
+    ).encode()
+
+
+@pytest.mark.asyncio
+async def test_get_latest_derives_dew_point_per_station():
+    # The map markers read dew_point off /latest; it's derived (Magnus) at read
+    # time: a real value when temp+humidity are present, None otherwise.
+    ts = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    body = _snap_body_with_readings(
+        ts,
+        [
+            {"station_id": 1, "temperature": 20.0, "humidity": 50.0},
+            {"station_id": 2, "temperature": 20.0, "humidity": None},
+            {"station_id": 3, "humidity": 50.0},  # no temperature
+        ],
+    )
+    svc = _new_service({"weather-stations/latest.json": body})
+    out = await svc.get_latest_snapshot()
+    assert out["stations"][0]["dew_point"] == pytest.approx(9.27, abs=0.05)
+    assert out["stations"][1]["dew_point"] is None
+    assert out["stations"][2]["dew_point"] is None
 
 
 @pytest.mark.asyncio
@@ -216,6 +248,29 @@ async def test_tileset_is_current_respects_grace_period():
     # grace=2: 14:00, 13:00, 12:00 current; a station with no reading stays stale.
     snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 2.0)
     assert flags(snap) == [True, True, True, False]
+
+
+@pytest.mark.asyncio
+async def test_tileset_derives_dew_point_alongside_is_current():
+    # The /{tileset_id} snapshot also carries the derived dew_point, next to the
+    # per-station is_current flag.
+    scraped = datetime(2026, 5, 17, 14, 5, 0, tzinfo=timezone.utc)
+    h14 = datetime(2026, 5, 17, 14, 0, 0, tzinfo=timezone.utc)
+    body = _snap_body_with_readings(
+        scraped,
+        [
+            {
+                "station_id": 1,
+                "observed_at": h14.isoformat().replace("+00:00", "Z"),
+                "temperature": 20.0,
+                "humidity": 50.0,
+            }
+        ],
+    )
+    svc = _new_service({_snap_key(scraped): body})
+    snap = await svc.get_snapshot_for_tileset("20260517T1400Z", 0.0)
+    assert snap["stations"][0]["dew_point"] == pytest.approx(9.27, abs=0.05)
+    assert snap["stations"][0]["is_current"] is True
 
 
 @pytest.mark.asyncio
@@ -620,6 +675,26 @@ def test_magnus_dew_point_clamps_slight_sensor_overread():
 )
 def test_magnus_dew_point_invalid_inputs_return_none(temperature, humidity):
     assert magnus_dew_point(temperature, humidity) is None
+
+
+def test_annotate_dew_point_adds_field_per_station_in_place():
+    body = {
+        "stations": [
+            {"station_id": 1, "temperature": 20.0, "humidity": 50.0},
+            {"station_id": 2, "temperature": 20.0},  # no humidity
+        ]
+    }
+    out = annotate_dew_point(body)
+    assert out is body  # mutates in place
+    assert body["stations"][0]["dew_point"] == pytest.approx(9.27, abs=0.05)
+    assert body["stations"][1]["dew_point"] is None
+
+
+def test_annotate_dew_point_tolerates_missing_or_malformed_stations():
+    # Never raises on a body without a stations list (e.g. corrupt snapshot).
+    assert annotate_dew_point({}) == {}
+    body = {"stations": "not-a-list"}
+    assert annotate_dew_point(body) == {"stations": "not-a-list"}
 
 
 def test_pivot_station_series_groups_each_station_sorted():

@@ -16,6 +16,9 @@ class StationObservation(BaseModel):
     humidity: Optional[float] = None
     pressure: Optional[float] = None
     visibility: Optional[float] = None
+    # Dew point (°C), derived server-side via the Magnus formula from
+    # temperature + humidity; None when either is missing/out of range.
+    dew_point: Optional[float] = None
     weather: Optional[dict] = None
     wind: Optional[dict] = None
     # Set only by the `/{tileset_id}` endpoint: True when this station's
@@ -34,6 +37,7 @@ class StationObservation(BaseModel):
                     "humidity": 62.0,
                     "pressure": 1013.2,
                     "visibility": 10.0,
+                    "dew_point": 10.89,
                     "weather": {"id": 1, "description": "Despejado"},
                     "wind": {"direction": "Norte", "deg": 5, "speed": 8.2},
                 }
@@ -64,6 +68,7 @@ class WeatherStationsSnapshot(BaseModel):
                             "humidity": 62.0,
                             "pressure": 1013.2,
                             "visibility": 10.0,
+                            "dew_point": 10.89,
                             "weather": {"id": 1, "description": "Despejado"},
                             "wind": {"direction": "Norte", "deg": 5, "speed": 8.2},
                         }

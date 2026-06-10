@@ -20,6 +20,7 @@ from clients.s3_client import S3Client
 from services.weather_stations_cache import (
     SNAPSHOT_META_SUFFIX,
     TilesetIdFormatError,
+    annotate_dew_point,
     compute_tilesets_entries,
     day_prefixes_covering,
     extract_station_series,
@@ -109,10 +110,15 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------ /latest
 
     async def get_latest_snapshot(self) -> Optional[dict]:
-        """Return the most recent snapshot (parsed JSON) or `None` if not yet scraped."""
-        return await self._get_cached_object(
+        """Return the most recent snapshot (parsed JSON) or `None` if not yet scraped.
+
+        Each station is annotated with a derived `dew_point` (Magnus) so the map
+        markers can paint it without a second request — mirrors the series path.
+        """
+        body = await self._get_cached_object(
             latest_key(), _LATEST_KEY, self._latest_ttl
         )
+        return annotate_dew_point(body) if body is not None else None
 
     # ----------------------------------------------------------------- /stations
 
@@ -178,6 +184,7 @@ class WeatherStationsService:  # pylint: disable=too-many-instance-attributes
         body = await self._get_snapshot_body(best_key)
         if body is None:
             return None
+        annotate_dew_point(body)
         return self._annotate_is_current(body, target, grace_period_hours)
 
     async def _resolve_bucket_snapshot_key(self, target: datetime) -> Optional[str]:

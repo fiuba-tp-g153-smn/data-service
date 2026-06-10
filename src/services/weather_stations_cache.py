@@ -274,6 +274,23 @@ def magnus_dew_point(temperature: Any, humidity: Any) -> Optional[float]:
     return round((_DEW_C * gamma) / (_DEW_B - gamma), 2)
 
 
+def annotate_dew_point(body: dict) -> dict:
+    """Add a derived `dew_point` (°C, Magnus) to each station in a snapshot body.
+
+    Mirrors `_observation_to_point`'s series derivation so the latest/tileset map
+    markers expose the same value. Mutates in place — safe because callers
+    re-parse fresh JSON per request (same contract as `_annotate_is_current`).
+    """
+    stations = body.get("stations")
+    if isinstance(stations, list):
+        for obs in stations:
+            if isinstance(obs, dict):
+                obs["dew_point"] = magnus_dew_point(
+                    obs.get("temperature"), obs.get("humidity")
+                )
+    return body
+
+
 def _observation_to_point(obs: dict) -> dict:
     """Flatten one `StationObservation` dict into a series point (wind unpacked)."""
     raw_wind = obs.get("wind")
