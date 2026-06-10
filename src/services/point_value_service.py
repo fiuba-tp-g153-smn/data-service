@@ -77,7 +77,7 @@ class PointValueService(BaseProductService):
         "shear_850_500": "kt",
         "shear_850_700": "kt",
         "brn": "",
-        "haildiammax": "mm",
+        "haildiammax": "cm",
     }
 
     def set_strategy(self, strategy: PointValueStrategy) -> None:
