@@ -227,8 +227,13 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         objects = await self._list_objects(prefix)
         return [obj["Key"] for obj in objects]
 
-    async def _list_objects(self, prefix: str) -> List[dict]:
-        """List all objects under a prefix."""
+    async def _list_objects(self, prefix: str, delimiter: str = "") -> List[dict]:
+        """List all objects under a prefix.
+
+        With ``delimiter="/"`` only objects directly under the prefix are
+        returned — deeper sub-prefixes are collapsed server-side, so large
+        subtrees are never fetched or parsed.
+        """
         if self._client is None:
             raise RuntimeError("S3 client is not connected")
 
@@ -236,10 +241,13 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         objects = []
         try:
             paginator = client.get_paginator("list_objects_v2")
-            async for page in cast(
-                AsyncIterator[dict],
-                paginator.paginate(Bucket=self._bucket, Prefix=prefix),
-            ):
+            if delimiter:
+                pages = paginator.paginate(
+                    Bucket=self._bucket, Prefix=prefix, Delimiter=delimiter
+                )
+            else:
+                pages = paginator.paginate(Bucket=self._bucket, Prefix=prefix)
+            async for page in cast(AsyncIterator[dict], pages):
                 for obj in page.get("Contents", []):
                     if not obj["Key"].endswith("/"):
                         objects.append(obj)
@@ -363,10 +371,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     async def list_wrf_layers(
         self, product_id: str, init_tag: str, fxxx: str
     ) -> List[str]:
-        """List GeoJSON layer names available under a WRF forecast step."""
+        """List GeoJSON layer names available under a WRF forecast step.
+
+        Lists with a delimiter: step dirs also hold tiled-overlay subtrees
+        (e.g. ``barbs/{z}/{x}/{y}``) whose thousands of keys must not be
+        fetched just to be filtered out.
+        """
         await self._ensure_connected()
         prefix = f"{self.WRF_GEOJSON_PREFIX}/{product_id}/{init_tag}/{fxxx}/"
-        return await self.list_object_basenames(prefix, ".json")
+        return await self.list_object_basenames(prefix, ".json", delimiter="/")
 
     async def sync_wrf_geojson_to_redis(
         self,
@@ -494,14 +507,21 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         """Build S3 key for an ECMWF mean sea level pressure isobars GeoJSON."""
         return f"geojson/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json"
 
-    async def list_object_basenames(self, prefix: str, suffix: str) -> List[str]:
+    async def list_object_basenames(
+        self, prefix: str, suffix: str, delimiter: str = ""
+    ) -> List[str]:
         """List basenames (without `suffix`) of objects directly under `prefix` ending in `suffix`.
 
         Example: list_object_basenames("cog/.../{forecast_ts}/", ".tif") yields
         ["20260413T1500Z", "20260413T1800Z", ...].
+
+        Pass ``delimiter="/"`` to exclude deeper sub-prefixes server-side —
+        essential when the prefix holds large subtrees (e.g. tiled overlays)
+        that would otherwise be fetched and parsed page by page just to be
+        filtered out below.
         """
         await self._ensure_connected()
-        objects = await self._list_objects(prefix)
+        objects = await self._list_objects(prefix, delimiter=delimiter)
         names: List[str] = []
         for obj in objects:
             key = obj["Key"]

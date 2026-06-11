@@ -6,6 +6,7 @@ block satellite/radar/ECMWF, and they can never block it.
 """
 
 import logging
+import time
 from typing import List, Optional, Tuple
 
 from clients.s3_client import S3Client
@@ -52,6 +53,7 @@ class WrfSyncService(DomainSyncService):
 
         total_downloaded = 0
         errors = 0
+        scan_start = time.monotonic()
 
         try:
             product_prefixes = await self._client.get_subdirectories(
@@ -129,6 +131,12 @@ class WrfSyncService(DomainSyncService):
                         product_id, [it for it, _ in active_inits]
                     )
 
+            logger.info(
+                "[wrf] %d product(s) scanned | %d tiles downloaded | %.1fs",
+                len(product_prefixes),
+                total_downloaded,
+                time.monotonic() - scan_start,
+            )
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("WRF sync error: %s", e)
             errors += 1
@@ -156,6 +164,16 @@ class WrfSyncService(DomainSyncService):
         try:
             s3_layers = await self._client.list_wrf_layers(product_id, init_tag, fxxx)
             if not s3_layers:
+                # Latch with a short recheck TTL: without it, every
+                # overlay-less step re-runs the S3 LIST on every cycle
+                # forever. GeoJSONs uploaded after the tiles still get
+                # discovered once the marker expires.
+                await self._redis_client.set_wrf_overlays_complete(
+                    product_id,
+                    init_tag,
+                    fxxx,
+                    ttl=self._settings.wrf_overlay_recheck_ttl,
+                )
                 return
 
             # Idempotency guard: skip the per-layer S3 GET when Redis already

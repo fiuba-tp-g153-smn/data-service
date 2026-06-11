@@ -342,3 +342,8 @@ def test_redis_metrics_memory_sample_negative_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="redis_metrics_memory_sample_per_domain"):
         _built_settings(tmp_path, {"redis_metrics_memory_sample_per_domain": -1})
+
+
+def test_wrf_overlay_recheck_ttl_loads_from_json(tmp_path):
+    s = _load(tmp_path, {"wrf": {"overlay_recheck_ttl": 500}})
+    assert s.wrf_overlay_recheck_ttl == 500

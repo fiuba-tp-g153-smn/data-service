@@ -118,6 +118,11 @@ class Settings:
     # Cap the WRF init runs walked per product each cycle (newest-first), so the
     # sync scan stays bounded as runs accumulate in S3. Mirrors ecmwf_forecasts_to_keep.
     wrf_inits_to_keep: int = 2
+    # How long a step with no overlay layers in S3 skips the per-step overlay
+    # LIST before re-checking. Short enough that GeoJSONs uploaded after the
+    # tiles (separate pipeline steps) are picked up within the hour; without
+    # it, every overlay-less step is re-listed on every cycle forever.
+    wrf_overlay_recheck_ttl: int = 3600
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -346,6 +351,7 @@ class Settings:
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
             "wrf_inits_to_keep",
+            "wrf_overlay_recheck_ttl",
             "wrf_sync_interval_seconds",
             "wrf_sync_timeout_seconds",
             "basemap_tile_ttl",
@@ -530,6 +536,9 @@ class Settings:
         self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
         self.wrf_inits_to_keep = self._env_int(
             "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
+        )
+        self.wrf_overlay_recheck_ttl = self._env_int(
+            "WRF_OVERLAY_RECHECK_TTL", self.wrf_overlay_recheck_ttl
         )
         self.wrf_sync_interval_seconds = self._env_int(
             "WRF_SYNC_INTERVAL_SECONDS", self.wrf_sync_interval_seconds

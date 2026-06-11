@@ -150,6 +150,7 @@ def _make_settings(ecmwf_forecasts_to_keep=2, wrf_inits_to_keep=2):
     settings.wrf_tile_ttl = 86400
     settings.wrf_geojson_ttl = 86400
     settings.wrf_inits_to_keep = wrf_inits_to_keep
+    settings.wrf_overlay_recheck_ttl = 3600
     return settings
 
 
@@ -685,6 +686,62 @@ async def test_sync_wrf_overlays_latches_marker_when_complete(mock_redis_client)
     mock_redis_client.set_wrf_overlays_complete.assert_awaited_once()
     mock_s3.sync_wrf_geojson_to_redis.assert_not_awaited()
     mock_redis_client.add_wrf_layers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_wrf_overlays_latches_recheck_when_no_layers(mock_redis_client):
+    """A step with no overlays in S3 latches a short-TTL marker so the
+    per-step S3 LIST is not repeated on every cycle forever."""
+    mock_s3 = AsyncMock()
+    mock_s3.list_wrf_layers = AsyncMock(return_value=[])
+    mock_redis_client.is_wrf_overlays_complete = AsyncMock(return_value=False)
+
+    service = _make_wrf(mock_s3, mock_redis_client)
+
+    await service._sync_wrf_overlays("precip", "20260430_060000", "F012")
+
+    mock_redis_client.set_wrf_overlays_complete.assert_awaited_once_with(
+        "precip", "20260430_060000", "F012", ttl=3600
+    )
+    mock_redis_client.add_wrf_layers.assert_not_awaited()
+    mock_s3.sync_wrf_geojson_to_redis.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_list_object_basenames_delimiter_reaches_paginator():
+    """delimiter='/' is forwarded to S3 so subtree keys are excluded server-side."""
+    client = S3Client(
+        "endpoint", "access", "secret", "bucket", max_concurrent_downloads=5
+    )
+
+    captured = {}
+
+    class _FakePaginator:
+        def paginate(self, **kwargs):
+            captured.update(kwargs)
+
+            async def _pages():
+                yield {
+                    "Contents": [
+                        {"Key": "geojson/wrf/p/i/F001/gust_threshold.json"},
+                    ]
+                }
+
+            return _pages()
+
+    mock_client = MagicMock()
+    mock_client.get_paginator = MagicMock(return_value=_FakePaginator())
+    client._client = mock_client
+
+    names = await client.list_object_basenames(
+        "geojson/wrf/p/i/F001/", ".json", delimiter="/"
+    )
+    assert names == ["gust_threshold"]
+    assert captured["Delimiter"] == "/"
+
+    captured.clear()
+    await client.list_object_basenames("geojson/wrf/p/i/F001/", ".json")
+    assert "Delimiter" not in captured  # default keeps the old recursive listing
 
 
 @pytest.mark.asyncio
