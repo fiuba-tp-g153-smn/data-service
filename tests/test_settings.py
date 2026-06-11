@@ -325,3 +325,20 @@ def test_metrics_max_rows_negative_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="metrics_max_rows"):
         _built_settings(tmp_path, {"metrics_max_rows": -1})
+
+
+def test_redis_metrics_memory_sample_loads_from_json(tmp_path):
+    s = _load(tmp_path, {"redis_metrics_memory_sample_per_domain": 500})
+    assert s.redis_metrics_memory_sample_per_domain == 500
+
+
+def test_redis_metrics_memory_sample_zero_disables_sampling(tmp_path):
+    s = _built_settings(tmp_path, {"redis_metrics_memory_sample_per_domain": 0})
+    assert s.redis_metrics_memory_sample_per_domain == 0
+
+
+def test_redis_metrics_memory_sample_negative_rejected(tmp_path):
+    import pytest
+
+    with pytest.raises(ValueError, match="redis_metrics_memory_sample_per_domain"):
+        _built_settings(tmp_path, {"redis_metrics_memory_sample_per_domain": -1})

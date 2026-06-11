@@ -7,7 +7,11 @@ import pytest_asyncio
 
 from clients.metrics_store import MetricsStore
 from db.migrate import run_migrations
-from services.redis_metrics_service import RedisMetricsService, classify_key
+from services.redis_metrics_service import (
+    RedisMetricsService,
+    _reservoir_observe,
+    classify_key,
+)
 
 
 def test_classify_key_maps_known_prefixes():
@@ -36,6 +40,7 @@ def _settings(**overrides):
         redis_metrics_sample_interval_seconds=900,
         redis_metrics_scan_count=1000,
         redis_metrics_memory_batch_size=2,  # small to exercise batch flushing
+        redis_metrics_memory_sample_per_domain=2000,  # > test keyspaces -> exact
         metrics_retention_days=14,
         metrics_max_rows=1_000_000,
         metrics_lock_path="/tmp/test_redis_metrics.lock",
@@ -51,12 +56,14 @@ class _FakeRedis:
         self._sizes = sizes  # dict[bytes, Optional[int]]
         self._info = info
         self._dbsize = dbsize
+        self.memory_calls = []  # list[list[bytes]]: one entry per pipeline batch
 
     async def scan_keys(self, match=None, count=1000):
         for key in self._sizes:
             yield key
 
     async def memory_usage_batch(self, keys):
+        self.memory_calls.append(list(keys))
         return [self._sizes[key] for key in keys]
 
     async def info(self, section=None):
@@ -105,6 +112,56 @@ async def test_run_sync_aggregates_memory_by_domain(store):
         "sync": (1, 0),
         "other": (1, 10),
     }
+
+
+@pytest.mark.asyncio
+async def test_run_sync_samples_large_domains(store):
+    """Domains over the cap are measured via <= cap sampled keys, extrapolated."""
+    sizes = {f"tile:sat:band_2/ts/3/1/{i}".encode(): 100 for i in range(10)}
+    redis = _FakeRedis(sizes, info={}, dbsize=10)
+    svc = RedisMetricsService(
+        _settings(redis_metrics_memory_sample_per_domain=2), redis, store
+    )
+
+    await svc._run_sync()  # pylint: disable=protected-access
+
+    _, rows = await store.get_latest_memory()
+    by_domain = {r.domain: (r.key_count, r.memory_bytes) for r in rows}
+    # All keys are 100 bytes, so mean * count is exact whichever 2 were sampled.
+    assert by_domain == {"satellite": (10, 1000)}
+    assert sum(len(call) for call in redis.memory_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_run_sync_zero_sample_cap_is_exact_census(store):
+    """Cap 0 disables sampling: every key is measured (old exact behavior)."""
+    sizes = {f"tile:sat:band_2/ts/3/1/{i}".encode(): 100 + i for i in range(10)}
+    redis = _FakeRedis(sizes, info={}, dbsize=10)
+    svc = RedisMetricsService(
+        _settings(redis_metrics_memory_sample_per_domain=0), redis, store
+    )
+
+    await svc._run_sync()  # pylint: disable=protected-access
+
+    _, rows = await store.get_latest_memory()
+    by_domain = {r.domain: (r.key_count, r.memory_bytes) for r in rows}
+    assert by_domain == {"satellite": (10, sum(sizes.values()))}
+    assert sum(len(call) for call in redis.memory_calls) == 10
+
+
+def test_reservoir_observe_caps_sample():
+    keys = [f"k{i}".encode() for i in range(50)]
+
+    capped = []
+    for seen, key in enumerate(keys, start=1):
+        _reservoir_observe(capped, key, seen, cap=5)
+    assert len(capped) == 5
+    assert set(capped) <= set(keys)
+
+    uncapped = []
+    for seen, key in enumerate(keys, start=1):
+        _reservoir_observe(uncapped, key, seen, cap=0)
+    assert uncapped == keys
 
 
 @pytest.mark.asyncio

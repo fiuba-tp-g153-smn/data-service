@@ -278,13 +278,16 @@ class Settings:
     metrics_max_rows: int = 1_000_000
     # File lock so only one uvicorn worker runs the Redis memory collector.
     metrics_lock_path: str = "/tmp/redis_metrics.lock"
-    # Redis memory collector cadence. Each cycle SCANs the whole keyspace and runs
-    # MEMORY USAGE per key (pipelined) — accurate but O(N keys), so the default
-    # interval is generous. scan_count bounds the SCAN batch; memory_batch_size
-    # bounds the MEMORY USAGE pipeline depth.
+    # Redis memory collector cadence. Each cycle SCANs the whole keyspace for
+    # exact per-domain key counts, but runs MEMORY USAGE (pipelined) only on a
+    # uniform sample of up to memory_sample_per_domain keys per domain and
+    # extrapolates the domain's bytes. scan_count bounds the SCAN batch;
+    # memory_batch_size bounds the MEMORY USAGE pipeline depth.
+    # memory_sample_per_domain=0 disables sampling (exact per-key census).
     redis_metrics_sample_interval_seconds: int = 300
     redis_metrics_scan_count: int = 1000
     redis_metrics_memory_batch_size: int = 500
+    redis_metrics_memory_sample_per_domain: int = 2000
 
     _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
@@ -409,6 +412,7 @@ class Settings:
             "redis_metrics_sample_interval_seconds",
             "redis_metrics_scan_count",
             "redis_metrics_memory_batch_size",
+            "redis_metrics_memory_sample_per_domain",
         }
 
         for key in json_keys:
@@ -774,6 +778,10 @@ class Settings:
         self.redis_metrics_memory_batch_size = self._env_int(
             "REDIS_METRICS_MEMORY_BATCH_SIZE", self.redis_metrics_memory_batch_size
         )
+        self.redis_metrics_memory_sample_per_domain = self._env_int(
+            "REDIS_METRICS_MEMORY_SAMPLE_PER_DOMAIN",
+            self.redis_metrics_memory_sample_per_domain,
+        )
 
     def _validate(self) -> None:
         # pylint: disable=too-many-branches
@@ -897,6 +905,12 @@ class Settings:
             raise ValueError(
                 f"metrics_max_rows must be >= 0 (got {self.metrics_max_rows}); "
                 "use 0 to disable the per-table row cap."
+            )
+        if self.redis_metrics_memory_sample_per_domain < 0:
+            raise ValueError(
+                "redis_metrics_memory_sample_per_domain must be >= 0 "
+                f"(got {self.redis_metrics_memory_sample_per_domain}); "
+                "use 0 to disable sampling (exact census)."
             )
 
     def is_s3_configured(self) -> bool:
