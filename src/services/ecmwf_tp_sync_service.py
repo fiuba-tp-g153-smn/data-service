@@ -30,7 +30,12 @@ class EcmwfTpSyncService(DomainSyncService):
         await self._run_single_domain(self._sync_ecmwf_tp())
 
     async def _sync_ecmwf_tp(self) -> Tuple[int, int]:
-        """Sync ECMWF total precipitation from S3 to Redis. Returns (downloaded, errors)."""
+        """Sync ECMWF total precipitation from S3 to Redis. Returns (downloaded, errors).
+
+        Each period is indexed immediately after its tiles land (frontier
+        checkpoint), so a watchdog cancellation costs at most one partial
+        period and the next cycle resumes where this one stopped.
+        """
         if self._client is None or self._redis_client is None:
             raise RuntimeError("S3 or Redis client is not initialized")
 
@@ -79,6 +84,13 @@ class EcmwfTpSyncService(DomainSyncService):
                         self._settings.ecmwf_tile_ttl,
                     )
                     total_downloaded += stored
+                    if stored > 0:
+                        # Checkpoint the frontier so a watchdog cancellation
+                        # costs at most one partial period and the next cycle
+                        # resumes from here.
+                        await self._redis_client.store_ecmwf_tp_index(
+                            forecast_ts, [period_ts], self._settings.ecmwf_tile_ttl
+                        )
                     logger.info(
                         "ECMWF-TP synced %d tiles for %s/%s",
                         stored,
@@ -86,6 +98,8 @@ class EcmwfTpSyncService(DomainSyncService):
                         period_ts,
                     )
 
+                # Refreshes index TTLs on quiet cycles; the per-period writes
+                # above are the cancellation-safe path.
                 await self._redis_client.store_ecmwf_tp_index(
                     forecast_ts, periods, self._settings.ecmwf_tile_ttl
                 )

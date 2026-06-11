@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -402,8 +403,9 @@ async def test_sync_ecmwf_tp_downloads_new_periods_and_writes_index(mock_redis_c
     assert errors == 0
     assert downloaded == 4 * 2  # one new period per forecast → two downloads
     assert mock_s3.sync_ecmwf_tp_period_to_redis.await_count == 2
-    # Index updates always run, even when nothing was downloaded.
-    assert mock_redis_client.store_ecmwf_tp_index.await_count == 2
+    # One frontier checkpoint per downloaded period + one full-list refresh
+    # per forecast (2 forecasts × 1 new period each).
+    assert mock_redis_client.store_ecmwf_tp_index.await_count == 4
     # Forecasts index is reconciled to the active set each cycle.
     mock_redis_client.prune_ecmwf_tp_forecasts.assert_awaited_once_with(
         ["20260330T1200Z", "20260330T0000Z"]
@@ -481,10 +483,104 @@ async def test_sync_ecmwf_tp_filters_old_format_periods(mock_redis_client):
     ]
     assert period_ts_args == ["20260330T1500Z", "20260330T1800Z"]
 
-    # Index also contains only the centered periods.
-    mock_redis_client.store_ecmwf_tp_index.assert_awaited_once()
-    indexed_periods = mock_redis_client.store_ecmwf_tp_index.await_args.args[1]
-    assert indexed_periods == ["20260330T1500Z", "20260330T1800Z"]
+    # Index also contains only the centered periods: two per-period frontier
+    # checkpoints plus the final full-list refresh.
+    index_calls = mock_redis_client.store_ecmwf_tp_index.await_args_list
+    assert len(index_calls) == 3
+    assert [c.args[1] for c in index_calls] == [
+        ["20260330T1500Z"],
+        ["20260330T1800Z"],
+        ["20260330T1500Z", "20260330T1800Z"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_tp_checkpoints_frontier_on_cancellation(mock_redis_client):
+    """Completed periods are indexed even when the watchdog cancels mid-cycle."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/"],
+            [
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T1500Z/",
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T1800Z/",
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T2100Z/",
+            ],
+        ]
+    )
+    # Third period download is preempted by the watchdog.
+    mock_s3.sync_ecmwf_tp_period_to_redis = AsyncMock(
+        side_effect=[5, 5, asyncio.CancelledError()]
+    )
+    mock_redis_client.get_ecmwf_tp_periods = AsyncMock(return_value=[])
+
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
+
+    with pytest.raises(asyncio.CancelledError):
+        await service._sync_ecmwf_tp()
+
+    # The two completed periods were checkpointed; neither the partial period
+    # nor the end-of-forecast full-list refresh ever ran.
+    index_calls = mock_redis_client.store_ecmwf_tp_index.await_args_list
+    assert [c.args[1] for c in index_calls] == [
+        ["20260330T1500Z"],
+        ["20260330T1800Z"],
+    ]
+    mock_redis_client.prune_ecmwf_tp_forecasts.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_tp_resumes_from_frontier_next_cycle(mock_redis_client):
+    """A cycle after a preemption only downloads the periods past the frontier."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/"],
+            [
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T1500Z/",
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T1800Z/",
+                f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T2100Z/",
+            ],
+        ]
+    )
+    mock_s3.sync_ecmwf_tp_period_to_redis = AsyncMock(return_value=5)
+    # Frontier persisted by the previous (cancelled) cycle.
+    mock_redis_client.get_ecmwf_tp_periods = AsyncMock(
+        return_value=["20260330T1500Z", "20260330T1800Z"]
+    )
+
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf_tp()
+
+    assert errors == 0
+    assert downloaded == 5
+    mock_s3.sync_ecmwf_tp_period_to_redis.assert_awaited_once()
+    assert mock_s3.sync_ecmwf_tp_period_to_redis.await_args.args[2] == "20260330T2100Z"
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_tp_skips_checkpoint_on_zero_download(mock_redis_client):
+    """A period whose download stored nothing is not frontier-checkpointed."""
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            [f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/"],
+            [f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/20260330T1500Z/"],
+        ]
+    )
+    mock_s3.sync_ecmwf_tp_period_to_redis = AsyncMock(return_value=0)
+    mock_redis_client.get_ecmwf_tp_periods = AsyncMock(return_value=[])
+
+    service = _make_ecmwf_tp(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf_tp()
+
+    assert (downloaded, errors) == (0, 0)
+    # Only the end-of-forecast full-list refresh ran.
+    mock_redis_client.store_ecmwf_tp_index.assert_awaited_once_with(
+        "20260330T1200Z", ["20260330T1500Z"], 86400
+    )
 
 
 @pytest.mark.asyncio
