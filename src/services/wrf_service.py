@@ -17,7 +17,7 @@ from services.wrf_sync_strategy import WrfSyncStrategy
 class WrfService(BaseProductService):
     """Service managing WRF model tile data + GeoJSON overlay layers."""
 
-    ZOOM_LEVELS = ZoomLevels(min=4, max=9)
+    ZOOM_LEVELS = ZoomLevels(min=4, max=6)
     BOUNDING_BOX = BoundingBox(minx=-110.0, miny=-60.0, maxx=-30.0, maxy=-15.0)
     TILE_URL_PATTERN = "/products/wrf/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
 
