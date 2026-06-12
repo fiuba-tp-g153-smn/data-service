@@ -122,10 +122,10 @@ def test_real_settings_json_round_trip():
     repo_path = Path(__file__).resolve().parent.parent / "settings.json"
     s = Settings.__new__(Settings)
     s._load_from_json(repo_path)  # pylint: disable=protected-access
-    assert s.basemap_tile_ttl == 2592000
+    assert s.basemap_tile_ttl == 86400
     assert s.basemap_sync_mode == "no_cache"
     assert s.ecmwf_tile_ttl == 86400
-    assert s.radar_tile_ttl == 2592000
+    assert s.radar_tile_ttl == 21600
     assert s.sync_mode == "full"
     assert s.sync_min_sleep_seconds == 20
     assert s.wrf_inits_to_keep == 3
