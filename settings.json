@@ -22,8 +22,8 @@
     "geojson_ttl": 86400
   },
   "wrf": {
-    "tile_ttl": 21600,
-    "geojson_ttl": 21600,
+    "tile_ttl": 64800,
+    "geojson_ttl": 64800,
     "inits_to_keep": 3,
     "sync_interval_seconds": 120,
     "sync_timeout_seconds": 1200
