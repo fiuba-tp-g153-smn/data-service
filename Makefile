@@ -1,7 +1,7 @@
 # Makefile for managing the Data Service application
 
 # Declare phony targets to avoid conflicts with files of the same name
-.PHONY: up prod dev test local down
+.PHONY: up prod dev test local down data redis
 
 install:
 	pip install poetry
@@ -12,6 +12,17 @@ up:
 
 prod:
 	docker compose up --build
+
+# Split deployment: Redis on its own stack (`make redis`) + the two data
+# services on theirs (`make data`), instead of the all-in-one `make prod`.
+# Both attach to the shared external network (create it once):
+#   docker network create data_service_network
+# Separate compose projects so each can be started/stopped independently.
+data:
+	docker compose -p data-service-data -f docker-compose.data.yaml up --build
+
+redis:
+	docker compose -p data-service-redis -f docker-compose.redis.yaml up
 
 local:
 	cd ./src && uvicorn main:app --host 0.0.0.0 --port 8080 --reload

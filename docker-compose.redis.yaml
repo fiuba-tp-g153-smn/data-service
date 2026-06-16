@@ -1,0 +1,43 @@
+# Redis-only stack (`make redis`).
+#
+# Split out from the all-in-one docker-compose.yaml (`make prod`) so the cache
+# can run on its own lifecycle — and, later, its own host — isolated from the
+# data-service + the co-located GDAL renderer / SeaweedFS that were paging it
+# to swap.
+#
+# Same host (this step): joins the shared external `data_service_network`, so
+# the data services reach it as `redis:6379` via DNS (REDIS_URL=redis://redis:6379/0).
+# No port is published — the cache stays on the internal docker network only.
+#
+# Separate host (later): publish 6379 (add `ports: ["6379:6379"]`), put it behind
+# a firewall / `--requirepass`, and point the data services' REDIS_URL at the
+# Redis host IP instead of the service name.
+#
+# Run with its own project name so it's independent of the `data` stack:
+#   docker compose -p data-service-redis -f docker-compose.redis.yaml up
+# Requires the shared network once:  docker network create data_service_network
+
+services:
+  redis:
+    container_name: data-service-redis-dev
+    image: redis:8.6-alpine
+    command: redis-server --maxmemory 7gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 15s
+      start_interval: 1s
+    networks:
+      - data_service_network
+
+volumes:
+  redis_data:
+
+networks:
+  data_service_network:
+    external: true
