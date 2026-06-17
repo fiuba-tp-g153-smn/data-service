@@ -361,9 +361,10 @@ class MetricsStore:
     def _get_sync_history_sync(
         self, since_iso: str, bucket: str, domain: Optional[str]
     ) -> List[SyncHistoryBucket]:
-        # ISO8601 UTC strings bucket cleanly by prefix length: 13 = "YYYY-MM-DDTHH"
-        # (hourly), 10 = "YYYY-MM-DD" (daily). Same trick the tiles-processor uses.
-        prefix_len = 10 if bucket == "day" else 13
+        # ISO8601 UTC strings bucket cleanly by prefix length: 15 = "YYYY-MM-DDTHH:M"
+        # (10-min), 13 = "YYYY-MM-DDTHH" (hourly), 10 = "YYYY-MM-DD" (daily). Same trick
+        # the tiles-processor uses.
+        prefix_len = {"day": 10, "10min": 15}.get(bucket, 13)
         params: List[object] = [prefix_len, since_iso]
         sql = (
             "SELECT substr(finished_at, 1, ?) AS bucket, domain, "

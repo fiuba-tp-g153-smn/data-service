@@ -139,6 +139,19 @@ async def test_sync_history_hourly_buckets_and_sums(store):
 
 
 @pytest.mark.asyncio
+async def test_sync_history_10min_buckets(store):
+    await store.record_sync_cycle("satellite", T1000, T1000, 100, 5, 0, "ok")
+    await store.record_sync_cycle("satellite", T1030, T1030, 300, 7, 0, "ok")
+
+    buckets = await store.get_sync_history(T0900, bucket="10min", domain="satellite")
+    by_bucket = {b.bucket: b for b in buckets}
+    # 10:00 y 10:30 caen en buckets de 10 min distintos (corte a 15 caracteres).
+    assert set(by_bucket) == {"2026-06-07T10:0", "2026-06-07T10:3"}
+    assert by_bucket["2026-06-07T10:0"].downloaded == 5
+    assert by_bucket["2026-06-07T10:3"].downloaded == 7
+
+
+@pytest.mark.asyncio
 async def test_sync_history_daily_bucket(store):
     await store.record_sync_cycle("radar", T1000, T1000, 100, 5, 0, "ok")
     await store.record_sync_cycle("radar", T1100, T1100, 100, 3, 0, "ok")

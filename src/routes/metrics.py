@@ -152,7 +152,7 @@ async def get_sync_status(
 )
 async def get_sync_history(
     hours: int = Query(24, ge=0),
-    bucket: str = Query("hour", pattern="^(hour|day)$"),
+    bucket: str = Query("hour", pattern="^(hour|day|10min)$"),
     domain: Optional[str] = None,
     metrics_store: MetricsStore = Depends(get_metrics_store),
 ) -> List[SyncHistoryPoint]:

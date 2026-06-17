@@ -230,6 +230,19 @@ def test_sync_history_rejects_bad_bucket():
         app.dependency_overrides.clear()
 
 
+def test_sync_history_accepts_10min_bucket():
+    store = AsyncMock()
+    store.get_sync_history = AsyncMock(return_value=[])
+    app.dependency_overrides[get_metrics_store] = lambda: store
+    try:
+        resp = TestClient(app).get("/metrics/sync/history?bucket=10min&hours=6")
+        assert resp.status_code == 200
+        store.get_sync_history.assert_awaited_once()
+        assert store.get_sync_history.await_args.kwargs["bucket"] == "10min"
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_sync_cycles_passes_since_before_and_unlimited():
     store = AsyncMock()
     store.get_sync_cycles = AsyncMock(return_value=[])
