@@ -5,13 +5,13 @@
 # data-service + the co-located GDAL renderer / SeaweedFS that were paging it
 # to swap.
 #
-# Same host (this step): joins the shared external `data_service_network`, so
-# the data services reach it as `redis:6379` via DNS (REDIS_URL=redis://redis:6379/0).
-# No port is published — the cache stays on the internal docker network only.
+# Same host: joins the shared external `data_service_network`, so co-located
+# data services reach it as `redis:6379` via DNS (REDIS_URL=redis://redis:6379/0).
 #
-# Separate host (later): publish 6379 (add `ports: ["6379:6379"]`), put it behind
-# a firewall / `--requirepass`, and point the data services' REDIS_URL at the
-# Redis host IP instead of the service name.
+# Cross host: port 6379 is published to the host (see `ports:` below), so a
+# data-service on another VPS can connect via REDIS_URL=redis://<this-host>:6379/0.
+# This exposes Redis on the host's network — lock it down with `--requirepass`
+# + a firewall allowlist (see the note on the service).
 #
 # Run with its own project name so it's independent of the `data` stack:
 #   docker compose -p data-service-redis -f docker-compose.redis.yaml up
@@ -23,6 +23,14 @@ services:
     image: redis:8.6-alpine
     command: redis-server --maxmemory 7gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
     restart: unless-stopped
+    # Published to the host so the cache is reachable from another host
+    # (e.g. the data services on a separate VPS, or an external connectivity
+    # check). 0.0.0.0:6379 -> exposed to anything that can route to this host.
+    # SECURE THIS: add `--requirepass <pw>` to the command above + restrict the
+    # firewall (host ufw + Hetzner Cloud Firewall) to the peer IP — an
+    # unauthenticated Redis open to the internet is compromised within minutes.
+    ports:
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
