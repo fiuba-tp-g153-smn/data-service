@@ -17,14 +17,14 @@ class _FakeS3:
     def __init__(self):
         self.uploads: dict[str, tuple[bytes, str]] = {}
         self.downloads: dict[str, Optional[bytes]] = {}
-        self.lifecycle_calls: list[tuple[int, str]] = []
+        self.lifecycle_calls: list[tuple[int, str, str]] = []
         self._lifecycle_ok = True
 
     def disable_lifecycle(self):
         self._lifecycle_ok = False
 
-    async def ensure_lifecycle_expiration(self, days, rule_id):
-        self.lifecycle_calls.append((days, rule_id))
+    async def ensure_lifecycle_expiration(self, days, rule_id, prefix=""):
+        self.lifecycle_calls.append((days, rule_id, prefix))
         return self._lifecycle_ok
 
     async def download_tile(self, key):
@@ -136,8 +136,11 @@ async def test_cold_cycle_writes_registry_snapshot_and_meta():
 
     await scraper._run_sync()
 
-    # Lifecycle applied lazily on the first cycle.
-    assert s3.lifecycle_calls == [(2, "weather-stations-expiration")]
+    # Lifecycle applied lazily on the first cycle, scoped to the rolling
+    # snapshots prefix so the registry/`latest` singletons are never swept.
+    assert s3.lifecycle_calls == [
+        (2, "weather-stations-expiration", "weather-stations/snapshots/")
+    ]
 
     # Registry trio: stations.json + stations.meta.json (both with content_type=json).
     assert "weather-stations/stations.json" in s3.uploads
@@ -180,8 +183,8 @@ async def test_lifecycle_failure_unlatches_for_retry_next_cycle():
     await scraper._run_sync()
     # Both cycles tried (no latch).
     assert s3.lifecycle_calls == [
-        (2, "weather-stations-expiration"),
-        (2, "weather-stations-expiration"),
+        (2, "weather-stations-expiration", "weather-stations/snapshots/"),
+        (2, "weather-stations-expiration", "weather-stations/snapshots/"),
     ]
 
 
@@ -338,6 +341,40 @@ async def test_unchanged_registry_still_rewarms_registry_cache():
     assert redis.store["cache:ws:registry"][1] == 3600
     assert "cache:ws:latest" in redis.store
     assert "cache:ws:tilesets" in redis.store
+
+
+@pytest.mark.asyncio
+async def test_missing_registry_in_s3_triggers_reupload_self_heal():
+    """A vanished `stations.json` must not strand `/stations` forever.
+
+    Reproduces the production failure: the bucket lifecycle swept the static
+    registry after its TTL while the long-running worker kept the unchanged
+    upstream hash in memory, so the hash-match no-op never recreated it. The
+    warm step now detects the absence and forces a re-upload next cycle.
+    """
+    s3, smn, reg = _FakeS3(), _FakeSmn(), _FakeRegistry(_REGISTRY_TXT)
+    redis = _FakeRedis()
+    scraper = _make_scraper(s3, smn, reg, redis_client=redis)
+
+    await scraper._run_sync()  # cycle 1: writes stations.json, caches the hash
+    assert "weather-stations/stations.json" in s3.uploads
+    assert scraper._registry_hash is not None
+
+    # Simulate the lifecycle sweep: the registry objects disappear from S3 while
+    # the in-memory hash (worker still up) still matches the unchanged upstream.
+    del s3.uploads["weather-stations/stations.json"]
+    del s3.uploads["weather-stations/stations.meta.json"]
+
+    # cycle 2: refresh no-ops on the matching hash; the warm read finds the
+    # object gone and invalidates the hash so the next cycle re-uploads.
+    await scraper._run_sync()
+    assert scraper._registry_hash is None
+    assert "weather-stations/stations.json" not in s3.uploads
+
+    # cycle 3: invalidated hash → registry rewritten, self-healing /stations.
+    await scraper._run_sync()
+    assert "weather-stations/stations.json" in s3.uploads
+    assert "weather-stations/stations.meta.json" in s3.uploads
 
 
 @pytest.mark.asyncio

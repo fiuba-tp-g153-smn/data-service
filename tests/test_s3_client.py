@@ -190,6 +190,40 @@ async def test_ensure_lifecycle_expiration_success_logs_info(monkeypatch, caplog
 
 
 @pytest.mark.asyncio
+async def test_ensure_lifecycle_expiration_scopes_rule_to_given_prefix():
+    """A non-empty prefix scopes the rule so root singletons aren't swept."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.put_bucket_lifecycle_configuration = AsyncMock(return_value=None)
+    client._ensure_connected = AsyncMock(return_value=fake)  # type: ignore[assignment]
+
+    await client.ensure_lifecycle_expiration(
+        days=2, rule_id="weather-stations-expiration", prefix="weather-stations/snapshots/"
+    )
+
+    _, kwargs = fake.put_bucket_lifecycle_configuration.call_args
+    rule = kwargs["LifecycleConfiguration"]["Rules"][0]
+    assert rule["ID"] == "weather-stations-expiration"
+    assert rule["Filter"] == {"Prefix": "weather-stations/snapshots/"}
+    assert rule["Expiration"] == {"Days": 2}
+
+
+@pytest.mark.asyncio
+async def test_ensure_lifecycle_expiration_defaults_to_bucket_wide_prefix():
+    """Default prefix stays bucket-wide so the basemap caller is unchanged."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.put_bucket_lifecycle_configuration = AsyncMock(return_value=None)
+    client._ensure_connected = AsyncMock(return_value=fake)  # type: ignore[assignment]
+
+    await client.ensure_lifecycle_expiration(days=35)
+
+    _, kwargs = fake.put_bucket_lifecycle_configuration.call_args
+    rule = kwargs["LifecycleConfiguration"]["Rules"][0]
+    assert rule["Filter"] == {"Prefix": ""}
+
+
+@pytest.mark.asyncio
 async def test_ensure_lifecycle_expiration_does_not_swallow_timeout_as_raise():
     """Sanity: asyncio.TimeoutError is caught (belt-and-suspenders with BotoCoreError)."""
     client = _make_client()

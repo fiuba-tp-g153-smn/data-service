@@ -747,11 +747,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             )
 
     async def ensure_lifecycle_expiration(
-        self, days: int, rule_id: str = "basemap-tile-expiration"
+        self, days: int, rule_id: str = "basemap-tile-expiration", prefix: str = ""
     ) -> bool:
         """
-        Idempotently set a bucket-wide lifecycle rule that expires all objects
+        Idempotently set a lifecycle rule that expires objects under `prefix`
         after `days` days from their creation (i.e. last PUT).
+
+        `prefix` defaults to ``""`` (bucket-wide). Callers that only want a
+        rolling subset expired — e.g. the weather-stations scraper, whose
+        registry/`latest` singletons must NOT be swept — pass the rolling
+        prefix so the always-present objects survive.
 
         Safe to call on every startup — `put_bucket_lifecycle_configuration`
         replaces the named rule. Not all S3-compatible backends support this
@@ -770,15 +775,17 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                         {
                             "ID": rule_id,
                             "Status": "Enabled",
-                            "Filter": {"Prefix": ""},
+                            "Filter": {"Prefix": prefix},
                             "Expiration": {"Days": days},
                         }
                     ]
                 },
             )
             logger.info(
-                "S3 lifecycle policy set on bucket %s: expire all objects after %d days",
+                "S3 lifecycle policy set on bucket %s: expire objects under %r "
+                "after %d days",
                 self._bucket,
+                prefix,
                 days,
             )
             return True

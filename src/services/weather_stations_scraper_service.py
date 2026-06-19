@@ -18,6 +18,7 @@ from services.smn_stations_registry import (
     station_metadata_to_jsonable,
 )
 from services.weather_stations_cache import (
+    SNAPSHOTS_PREFIX,
     compute_tilesets_entries,
     latest_key,
     parse_json_or_none,
@@ -160,11 +161,19 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         await self._warm_recent_snapshot_bodies()
 
     async def _ensure_lifecycle_applied(self) -> None:
-        """Idempotently set the bucket lifecycle rule; latches on success."""
+        """Idempotently set the snapshots lifecycle rule; latches on success.
+
+        Scoped to the rolling snapshots prefix only: the registry/`latest`
+        singletons live at the bucket root and must NOT be expired — a
+        bucket-wide rule swept the static `stations.json` after the TTL window
+        (it's re-PUT only when upstream changes), 503ing `/stations`.
+        """
         if self._lifecycle_applied:
             return
         if await self._s3.ensure_lifecycle_expiration(
-            self._s3_object_ttl_days, rule_id=_LIFECYCLE_RULE_ID
+            self._s3_object_ttl_days,
+            rule_id=_LIFECYCLE_RULE_ID,
+            prefix=SNAPSHOTS_PREFIX,
         ):
             self._lifecycle_applied = True
 
@@ -246,6 +255,11 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         Warms at boot from the already-present `stations.json` and refreshes the
         TTL afterwards, independent of whether the registry changed — so
         `/stations` reads stay warm like the other always-warm keys. Fail-soft.
+
+        Doubles as a self-heal: if `stations.json` is absent in S3 (e.g. swept by
+        a stale bucket-wide lifecycle rule), invalidate the in-memory hash so the
+        next `_refresh_registry_if_changed` re-uploads it instead of no-op'ing on
+        the unchanged upstream hash forever.
         """
         if not self._cache_enabled:
             return
@@ -254,8 +268,15 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         except Exception as exc:  # pylint: disable=broad-exception-caught
             logger.warning("Registry cache warm: S3 read failed: %s", exc)
             return
-        if body is not None:
-            await self._redis_set(registry_key(), body, self._registry_ttl)
+        if body is None:
+            if self._registry_hash is not None:
+                logger.warning(
+                    "Registry %s missing in S3; forcing re-upload next cycle",
+                    _REGISTRY_KEY,
+                )
+                self._registry_hash = None
+            return
+        await self._redis_set(registry_key(), body, self._registry_ttl)
 
     async def _warm_observation_cache(self, snapshot_bytes: bytes) -> None:
         """Write-through latest + recomputed tilesets so reads stay warm (fail-soft)."""
