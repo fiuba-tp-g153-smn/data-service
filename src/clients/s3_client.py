@@ -758,9 +758,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         registry/`latest` singletons must NOT be swept — pass the rolling
         prefix so the always-present objects survive.
 
-        Safe to call on every startup — `put_bucket_lifecycle_configuration`
-        replaces the named rule. Not all S3-compatible backends support this
-        API; failures are logged at WARNING and do not abort startup.
+        Safe to call on every startup, but note the S3 semantics:
+        `put_bucket_lifecycle_configuration` replaces the bucket's ENTIRE rule
+        set, not just the rule named `rule_id`. One caller per bucket is
+        therefore a hard requirement — a second caller would silently drop the
+        first one's rule. Not all S3-compatible backends support this API;
+        failures are logged at WARNING and do not abort startup.
 
         Returns ``True`` when the policy was applied, ``False`` on a swallowed
         error. Callers that want "retry until it sticks" semantics (the
