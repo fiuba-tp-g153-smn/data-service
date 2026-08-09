@@ -61,6 +61,16 @@ class Settings:
     smn_stations_registry_url: str = (
         "http://ssl.smn.gob.ar/dpd/zipopendata.php?dato=estaciones"
     )
+    # Registry copy committed to the repo, used to SEED the bucket when the live
+    # fetch fails and nothing is stored yet. SMN sits behind Cloudflare, which
+    # challenges datacenter egress IPs with a 403 no retry can clear, so without
+    # this a fresh deployment would never obtain a station registry at all.
+    # Never overwrites a registry that was fetched live — see
+    # WeatherStationsScraperService._refresh_registry_if_changed. Path is
+    # relative to the application root (`/app` in the image), not the CWD.
+    # Refresh it with `make refresh-stations-registry` from an unblocked network.
+    weather_stations_registry_fallback_enabled: bool = True
+    weather_stations_registry_fallback_path: str = "resources/estaciones_smn.txt"
     # Master password protecting /weather-stations/admin/* endpoints. Required
     # when weather_stations_api_key_auth_enabled is True (validator enforces).
     weather_stations_admin_password: str = ""
@@ -673,6 +683,14 @@ class Settings:
         )
         self.smn_stations_registry_url = os.getenv(
             "SMN_STATIONS_REGISTRY_URL", self.smn_stations_registry_url
+        )
+        self.weather_stations_registry_fallback_enabled = self._env_bool(
+            "WEATHER_STATIONS_REGISTRY_FALLBACK_ENABLED",
+            self.weather_stations_registry_fallback_enabled,
+        )
+        self.weather_stations_registry_fallback_path = os.getenv(
+            "WEATHER_STATIONS_REGISTRY_FALLBACK_PATH",
+            self.weather_stations_registry_fallback_path,
         )
         self.weather_stations_admin_password = os.getenv(
             "WEATHER_STATIONS_ADMIN_PASSWORD", self.weather_stations_admin_password

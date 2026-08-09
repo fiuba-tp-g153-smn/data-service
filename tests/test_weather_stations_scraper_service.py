@@ -7,7 +7,7 @@ from typing import Optional
 import pytest
 
 from clients.smn_api_client import SmnApiError
-from clients.smn_registry_client import SmnRegistryError
+from clients.smn_registry_client import SmnRegistryBlockedError, SmnRegistryError
 from services.weather_stations_scraper_service import (
     WeatherStationsScraperService,
 )
@@ -105,8 +105,10 @@ _REGISTRY_TXT = (
 )
 
 
-def _settings(redis_cache_enabled=True):
+def _settings(redis_cache_enabled=True, registry_fallback_enabled=True):
     return SimpleNamespace(
+        weather_stations_registry_fallback_enabled=registry_fallback_enabled,
+        weather_stations_registry_fallback_path="resources/estaciones_smn.txt",
         weather_stations_scrape_interval_seconds=300,
         weather_stations_scrape_lock_path="/tmp/test_ws_scrape.lock",
         weather_stations_s3_object_ttl_days=2,
@@ -247,13 +249,94 @@ async def test_registry_failure_does_not_block_snapshot():
         _FakeSmn(),
         _FakeRegistry(exc=SmnRegistryError("zip 404")),
     )
-    scraper = _make_scraper(s3, smn, reg)
+    # Fallback off, so this still asserts the original contract: a registry
+    # failure is fail-soft and must not stop the observation pipeline.
+    scraper = _make_scraper(
+        s3, smn, reg, settings=_settings(registry_fallback_enabled=False)
+    )
 
     await scraper._run_sync()
 
     # Registry skipped, but observations + latest still landed.
     assert "weather-stations/stations.json" not in s3.uploads
     assert "weather-stations/latest.json" in s3.uploads
+
+
+@pytest.mark.asyncio
+async def test_blocked_registry_seeds_from_bundle_when_nothing_stored():
+    """Cold start behind Cloudflare: the bundled copy seeds the empty bucket."""
+    s3, smn, reg = (
+        _FakeS3(),
+        _FakeSmn(),
+        _FakeRegistry(exc=SmnRegistryBlockedError("cloudflare challenge")),
+    )
+    scraper = _make_scraper(s3, smn, reg)
+
+    await scraper._run_sync()
+
+    registry = json.loads(s3.uploads["weather-stations/stations.json"][0])
+    meta = json.loads(s3.uploads["weather-stations/stations.meta.json"][0])
+    assert registry["source"] == "bundled"
+    assert meta["source"] == "bundled"
+    # Parsed from the real committed file, so this also guards against a
+    # corrupted or HTML-challenge-page bundle being committed.
+    assert meta["station_count"] >= 50
+    assert registry["stations"][0]["station_id"] > 0
+
+
+@pytest.mark.asyncio
+async def test_blocked_registry_keeps_existing_copy_instead_of_bundle():
+    """A stored registry wins over the bundle — the bundle never overwrites it."""
+    s3, smn, reg = (
+        _FakeS3(),
+        _FakeSmn(),
+        _FakeRegistry(exc=SmnRegistryBlockedError("cloudflare challenge")),
+    )
+    s3.downloads["weather-stations/stations.meta.json"] = json.dumps(
+        {"source_hash": "deadbeef", "station_count": 3, "source": "remote"}
+    ).encode("utf-8")
+    scraper = _make_scraper(s3, smn, reg)
+
+    await scraper._run_sync()
+
+    assert "weather-stations/stations.json" not in s3.uploads
+    assert scraper._registry_hash == "deadbeef"
+
+
+@pytest.mark.asyncio
+async def test_bundle_seeding_can_be_disabled():
+    s3, smn, reg = (
+        _FakeS3(),
+        _FakeSmn(),
+        _FakeRegistry(exc=SmnRegistryBlockedError("cloudflare challenge")),
+    )
+    scraper = _make_scraper(
+        s3, smn, reg, settings=_settings(registry_fallback_enabled=False)
+    )
+
+    await scraper._run_sync()
+
+    assert "weather-stations/stations.json" not in s3.uploads
+
+
+@pytest.mark.asyncio
+async def test_live_registry_marked_remote_and_replaces_bundled_seed():
+    """Once SMN is reachable again the live copy supersedes the seeded one."""
+    s3, smn = _FakeS3(), _FakeSmn()
+    blocked = _FakeRegistry(exc=SmnRegistryBlockedError("cloudflare challenge"))
+    scraper = _make_scraper(s3, smn, blocked)
+    await scraper._run_sync()
+    assert json.loads(s3.uploads["weather-stations/stations.json"][0])["source"] == (
+        "bundled"
+    )
+
+    # Same scraper, registry now reachable: different hash -> rewrite as remote.
+    scraper._registry = _FakeRegistry(_REGISTRY_TXT)
+    await scraper._run_sync()
+
+    registry = json.loads(s3.uploads["weather-stations/stations.json"][0])
+    assert registry["source"] == "remote"
+    assert registry["source_url"] == "http://reg.test/x"
 
 
 @pytest.mark.asyncio

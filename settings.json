@@ -83,6 +83,8 @@
     "scrape_lock_path": "/tmp/weather_stations_scrape.lock",
     "http_timeout_seconds": 30,
     "http_max_retries": 3,
+    "registry_fallback_enabled": true,
+    "registry_fallback_path": "resources/estaciones_smn.txt",
     "token_cache_ttl_seconds": 3600,
     "s3_object_ttl_days": 2,
     "list_cache_ttl_seconds": 30,

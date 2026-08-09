@@ -1,10 +1,12 @@
 """Periodic scraper for SMN weather stations (observations + registry)."""
 
+import asyncio
 import hashlib
 import json
 import logging
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from clients.metrics_store import MetricsStore
@@ -193,12 +195,29 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         self._registry_bootstrapped = True
 
     async def _refresh_registry_if_changed(self) -> None:
-        """Fail-soft: skip if download/unzip fails; carry on with existing copy."""
+        """Fail-soft: skip if download/unzip fails; carry on with existing copy.
+
+        Precedence is live > stored > bundled. When the fetch fails the stored
+        copy is authoritative and we simply skip; the repo-bundled registry is
+        only ever used to SEED an empty bucket (`_registry_hash is None`), so a
+        bundle that has drifted behind SMN can never overwrite fresher data.
+        """
+        source = "remote"
         try:
             text = await self._registry.fetch_registry_text()
         except SmnRegistryError as exc:
-            logger.warning("Registry refresh skipped: %s", exc)
-            return
+            if not self._should_seed_from_bundle():
+                logger.warning("Registry refresh skipped: %s", exc)
+                return
+            logger.warning(
+                "Registry unavailable upstream (%s); seeding from the bundled copy "
+                "because no registry is stored yet",
+                exc,
+            )
+            bundled = await self._read_bundled_registry()
+            if bundled is None:
+                return
+            text, source = bundled, "bundled"
 
         source_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if source_hash == self._registry_hash:
@@ -214,13 +233,19 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             .replace(microsecond=0)
             .isoformat()
             .replace("+00:00", "Z"),
-            "source_url": self._settings.smn_stations_registry_url,
+            "source_url": (
+                self._settings.smn_stations_registry_url
+                if source == "remote"
+                else self._settings.weather_stations_registry_fallback_path
+            ),
+            "source": source,
             "stations": station_metadata_to_jsonable(stations),
         }
         meta_payload = {
             "source_hash": source_hash,
             "station_count": len(stations),
             "updated_at": registry_payload["fetched_at"],
+            "source": source,
         }
         registry_bytes = json.dumps(registry_payload, separators=(",", ":")).encode(
             "utf-8"
@@ -241,13 +266,41 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         previous = self._registry_hash
         self._registry_hash = source_hash
         logger.info(
-            "Registry refreshed: %d stations (hash %s -> %s)",
+            "Registry refreshed from %s: %d stations (hash %s -> %s)",
+            source,
             len(stations),
             (previous or "<none>")[:8],
             source_hash[:8],
         )
         # Redis warming is handled unconditionally by _warm_registry_cache() each
         # cycle, so no write-through here — this method only owns the S3 rewrite.
+
+    def _should_seed_from_bundle(self) -> bool:
+        """Seed only when enabled AND nothing is stored yet.
+
+        `_registry_hash is None` means either the bucket has no
+        stations.meta.json (fresh deployment) or _warm_registry_cache found
+        stations.json missing and reset it — both are "no usable registry".
+        """
+        return (
+            self._settings.weather_stations_registry_fallback_enabled
+            and self._registry_hash is None
+        )
+
+    async def _read_bundled_registry(self) -> Optional[str]:
+        """Read the repo-bundled registry TXT, or None if unusable.
+
+        latin-1 to match the upstream encoding (the file carries "PEÑA"), and
+        `to_thread` because this runs on the event loop.
+        """
+        path = Path(__file__).resolve().parents[1] / (
+            self._settings.weather_stations_registry_fallback_path
+        )
+        try:
+            return await asyncio.to_thread(path.read_text, encoding="latin-1")
+        except OSError as exc:
+            logger.warning("Bundled registry unreadable at %s: %s", path, exc)
+            return None
 
     async def _warm_registry_cache(self) -> None:
         """Keep cache:ws:registry resident: warm it from the S3 registry each cycle.

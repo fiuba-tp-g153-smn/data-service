@@ -15,6 +15,16 @@ class SmnRegistryError(Exception):
     """Registry download or unzip failed."""
 
 
+class SmnRegistryBlockedError(SmnRegistryError):
+    """Upstream is behind a Cloudflare challenge that this client cannot pass.
+
+    Subclasses `SmnRegistryError` so existing handlers keep working; callers that
+    want to distinguish "permanently blocked" from "transient" can catch this
+    first. Blocking is decided by the edge on egress-IP reputation, so neither
+    retrying nor spoofing a browser User-Agent changes the outcome.
+    """
+
+
 class SmnRegistryClient:
     """
     Downloads and unzips the public SMN station registry.
@@ -36,9 +46,7 @@ class SmnRegistryClient:
         # `follow_redirects=True` because the SMN open-data endpoint commonly
         # 301s (e.g. http→https). Without this the client treats the 301 as
         # final and fails with "SMN registry HTTP 301".
-        self._client = httpx.AsyncClient(
-            timeout=timeout_seconds, follow_redirects=True
-        )
+        self._client = httpx.AsyncClient(timeout=timeout_seconds, follow_redirects=True)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -70,9 +78,16 @@ class SmnRegistryClient:
                 await asyncio.sleep(min(2 ** (attempt - 1), 10))
                 continue
             if response.status_code != 200:
-                last_exc = SmnRegistryError(
-                    f"SMN registry HTTP {response.status_code}"
-                )
+                if self._is_cloudflare_challenge(response):
+                    raise SmnRegistryBlockedError(
+                        f"SMN registry blocked by Cloudflare challenge "
+                        f"(HTTP {response.status_code}, "
+                        f"cf-ray={response.headers.get('cf-ray', '<none>')}): the egress IP is "
+                        f"being challenged, so retrying and changing the User-Agent cannot "
+                        f"succeed. Reach SMN to allowlist this IP, or fetch the registry from a "
+                        f"non-datacenter network."
+                    )
+                last_exc = SmnRegistryError(f"SMN registry HTTP {response.status_code}")
                 logger.warning(
                     "SMN registry HTTP %d (attempt %d/%d)",
                     response.status_code,
@@ -84,6 +99,23 @@ class SmnRegistryClient:
             return response.content
         raise SmnRegistryError(
             f"SMN registry failed after {self._max_retries} attempts: {last_exc}"
+        )
+
+    @staticmethod
+    def _is_cloudflare_challenge(response: httpx.Response) -> bool:
+        """Detect Cloudflare's managed challenge, which no retry can clear.
+
+        `cf-mitigated: challenge` is Cloudflare stating outright that it blocked
+        the request; the 403 + `server: cloudflare` pair is the fallback signal
+        for edges that omit it. A plain origin 403 (no Cloudflare headers) is NOT
+        matched, so genuine upstream errors keep their retry budget.
+        """
+        headers = response.headers
+        if headers.get("cf-mitigated"):
+            return True
+        return (
+            response.status_code == 403
+            and "cloudflare" in headers.get("server", "").lower()
         )
 
     @staticmethod
