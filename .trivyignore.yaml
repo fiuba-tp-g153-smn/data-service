@@ -12,3 +12,9 @@ vulnerabilities:
   - id: CVE-2026-8376
     expires-at: 2026-07-01
     statement: "perl-base not reachable; service never compiles Perl regex. No Debian fix available yet."
+  - id: CVE-2026-42496
+    expires-at: 2026-09-01
+    statement: "perl-base not reachable; service never runs Archive::Tar. No Debian fix available yet."
+  - id: CVE-2026-8376
+    expires-at: 2026-09-01
+    statement: "perl-base not reachable; service never compiles Perl regex, and the image is 64-bit while the overflow is 32-bit only. No Debian fix available yet."
