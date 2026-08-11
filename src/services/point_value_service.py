@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 from typing import Optional
 
+from clients.s3_client import S3Client
 from services.base_service import BaseProductService
+from services.gfs_config import get_product as get_gfs_product
 from services.point_value_strategy import (
     CogObjectNotFoundError,
     NoDataOrOutsideSampleError,
@@ -171,6 +173,28 @@ class PointValueService(BaseProductService):
         unit = self.MODEL_UNITS.get("ecmwf_mean_sea_level_pressure", "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
+
+    async def sample_gfs_point(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Sample a GFS COG at a coordinate.
+
+        The unit comes from the product catalogue rather than a table here, so
+        it cannot drift from what the processor actually wrote: hPa for `mslp`,
+        knots for the isobaric levels.
+        """
+        product = get_gfs_product(product_id)
+        if product is None:
+            raise CogNotFoundError()
+        cog_key = S3Client.build_gfs_cog_key(product.s3_segment, cycle, fxxx)
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit=product.unit)
 
     async def _sample_value(self, cog_key: str, lat: float, lon: float) -> float:
         strategy = self._get_strategy()

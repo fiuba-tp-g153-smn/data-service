@@ -556,6 +556,143 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Reconcile the ECMWF-MSLP forecasts index to the active forecasts."""
         return await self._prune_index_set("idx:ecmwf_mslp:forecasts", keep)
 
+    # ============== GFS Index Operations ==============
+    #
+    # Only listings and single-file overlays are mirrored by the sync loop.
+    # Raster tiles and barb tiles are read on demand from S3 — a single cycle is
+    # ~75k tiles across the two raster products, far past what belongs in Redis
+    # — and cached lazily by the read strategy.
+
+    async def add_gfs_index(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        cycle_score: float,
+        step_score: float,
+        ttl: int,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Add a (cycle, step) pair to the GFS index sorted sets with TTL."""
+        pipe = await self._conn.pipeline()
+
+        cycles_key = f"idx:gfs:{product_id}:cycles"
+        pipe.zadd(cycles_key, {cycle.encode(): cycle_score})
+        pipe.expire(cycles_key, ttl)
+
+        steps_key = f"idx:gfs:{product_id}:{cycle}:steps"
+        pipe.zadd(steps_key, {fxxx.encode(): step_score})
+        pipe.expire(steps_key, ttl)
+
+        await pipe.execute()
+
+    async def get_gfs_cycles(self, product_id: str) -> List[str]:
+        """Get every indexed cycle for a product, newest first."""
+        key = f"idx:gfs:{product_id}:cycles"
+        members = await self._conn.zrevrange(key, 0, -1)  # type: ignore[misc]
+        return [m.decode() for m in members]
+
+    async def get_gfs_steps(self, product_id: str, cycle: str) -> List[str]:
+        """Get every indexed forecast step of a cycle, ascending."""
+        key = f"idx:gfs:{product_id}:{cycle}:steps"
+        members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
+        return [m.decode() for m in members]
+
+    async def prune_gfs_cycles(self, product_id: str, keep: List[str]) -> int:
+        """Reconcile a product's cycle index to the actively-synced cycles.
+
+        The cycles sorted set has its whole-key TTL refreshed on every new step,
+        so retired cycles would never expire on their own. The per-cycle
+        sub-keys (`:steps`, `:layers`) do self-expire once no longer re-synced.
+        """
+        return await self._prune_index_set(f"idx:gfs:{product_id}:cycles", keep)
+
+    # ============== GFS GeoJSON / Layer Operations ==============
+
+    async def store_gfs_geojson(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        layer: str,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Store a single-file GFS overlay (isobars, thickness, heights, ...)."""
+        key = f"geojson:gfs:{product_id}/{cycle}/{fxxx}/{layer}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_gfs_geojson(
+        self, product_id: str, cycle: str, fxxx: str, layer: str
+    ) -> Optional[bytes]:
+        """Retrieve a single-file GFS overlay from Redis."""
+        key = f"geojson:gfs:{product_id}/{cycle}/{fxxx}/{layer}"
+        return await self._conn.get(key)
+
+    async def add_gfs_layers(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        layers: List[str],
+        ttl: int,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Register which overlay layers a forecast step actually has."""
+        if not layers:
+            return
+        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        pipe = await self._conn.pipeline()
+        for layer in layers:
+            pipe.sadd(key, layer.encode())
+        pipe.expire(key, ttl)
+        await pipe.execute()
+
+    async def get_gfs_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
+        """Get the overlay layers indexed for a forecast step."""
+        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        members = await self._conn.smembers(key)  # type: ignore[misc]
+        return sorted(m.decode() for m in members)
+
+    # ============== GFS Tile Operations (lazy, on-demand cache) ==============
+
+    async def store_gfs_tile(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+        data: bytes,
+        ttl: Optional[int] = None,
+    ) -> None:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Cache one raster tile fetched on demand from S3."""
+        key = f"tile:gfs:{product_id}/{cycle}/{fxxx}/{z}/{x}/{y}"
+        if ttl:
+            await self._conn.set(key, data, ex=ttl)
+        else:
+            await self._conn.set(key, data)
+
+    async def get_gfs_tile(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> Optional[bytes]:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Get a cached GFS raster tile."""
+        key = f"tile:gfs:{product_id}/{cycle}/{fxxx}/{z}/{x}/{y}"
+        return await self._conn.get(key)
+
     # ============== Base Map Tile Operations ==============
 
     async def store_basemap_tile(

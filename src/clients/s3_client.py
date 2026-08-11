@@ -5,6 +5,16 @@ Provides sync functionality to download tiles from S3 bucket and store
 them directly in Redis. Used by SyncService for periodic satellite tile sync.
 """
 
+# TECH DEBT: the module crossed pylint's 1000-line limit when GFS was added, and
+# `S3Client` sits at 39 public methods against a limit of 20 (already over at 33
+# before GFS). Both point at the same thing: this is a *client* — connections,
+# downloads, uploads, lifecycle — that has also accumulated the `build_*_key`
+# builders for six domains, which are pure functions doing no I/O. Extracting
+# every key builder into its own module is the real fix, but it touches all six
+# domains and deserves its own commit and test pass rather than riding along
+# with a feature.
+# pylint: disable=too-many-lines
+
 import asyncio
 import logging
 from contextlib import AsyncExitStack
@@ -506,6 +516,68 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     def build_ecmwf_mslp_geojson_key(forecast_ts: str, timestamp_ts: str) -> str:
         """Build S3 key for an ECMWF mean sea level pressure isobars GeoJSON."""
         return f"geojson/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json"
+
+    # ============== GFS ==============
+    #
+    # tiles-processor names every object of a step after the *combined* id
+    # `{cycle}_{fxxx}` while nesting it under the cycle, e.g.
+    # `.../20260808T0000Z/20260808T0000Z_f003.tif`. The API splits cycle and
+    # step into separate path segments, so `_gfs_step_id` is the single place
+    # that joins them back.
+
+    @staticmethod
+    def _gfs_step_id(cycle: str, fxxx: str) -> str:
+        """Object basename tiles-processor writes for one forecast step."""
+        return f"{cycle}_{fxxx}"
+
+    @staticmethod
+    def gfs_cycle_prefix(s3_segment: str) -> str:
+        """Prefix holding every cycle of a product, for listing cycles."""
+        return f"tiles/models/gfs/{s3_segment}/"
+
+    @staticmethod
+    def gfs_cog_cycle_prefix(s3_segment: str) -> str:
+        """Prefix holding every COG of one product, for listing cycles.
+
+        The COG is the only artifact every product has — `mslp` produces no
+        raster pyramid — so cycle/step discovery reads this prefix rather than
+        the tiles one.
+        """
+        return f"cog/models/gfs/{s3_segment}/"
+
+    @classmethod
+    def build_gfs_tile_key(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        cls, s3_segment: str, cycle: str, fxxx: str, z: int, x: int, y: int
+    ) -> str:
+        """Build S3 key for a GFS raster tile."""
+        step = cls._gfs_step_id(cycle, fxxx)
+        return f"tiles/models/gfs/{s3_segment}/{cycle}/{step}/{z}/{x}/{y}.webp"
+
+    @classmethod
+    def build_gfs_cog_key(cls, s3_segment: str, cycle: str, fxxx: str) -> str:
+        """Build S3 key for a GFS COG (pressure in hPa, or wind speed in kt)."""
+        step = cls._gfs_step_id(cycle, fxxx)
+        return f"cog/models/gfs/{s3_segment}/{cycle}/{step}.tif"
+
+    @classmethod
+    def build_gfs_geojson_key(
+        cls, s3_segment: str, cycle: str, fxxx: str, layer: str
+    ) -> str:
+        """Build S3 key for a single-file GFS overlay (isobars, heights, ...)."""
+        step = cls._gfs_step_id(cycle, fxxx)
+        return f"geojson/models/gfs/{s3_segment}/{cycle}/{step}_{layer}.json"
+
+    @classmethod
+    def build_gfs_barb_tile_key(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        cls, s3_segment: str, cycle: str, fxxx: str, z: int, x: int, y: int
+    ) -> str:
+        """Build S3 key for one GFS wind-barb GeoJSON tile.
+
+        Barbs are the one overlay stored per tile rather than as a single
+        document, so the viewport only pulls the barbs it draws.
+        """
+        step = cls._gfs_step_id(cycle, fxxx)
+        return f"geojson/models/gfs/{s3_segment}/{cycle}/{step}_barbs/{z}/{x}/{y}.json"
 
     async def list_object_basenames(
         self, prefix: str, suffix: str, delimiter: str = ""

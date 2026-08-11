@@ -105,6 +105,7 @@ class Settings:
     ecmwf_tp_sync_lock_path: str = "/tmp/ecmwf_tp_sync.lock"
     ecmwf_mslp_sync_lock_path: str = "/tmp/ecmwf_mslp_sync.lock"
     wrf_sync_lock_path: str = "/tmp/wrf_sync.lock"
+    gfs_sync_lock_path: str = "/tmp/gfs_sync.lock"
     s3_max_concurrent_downloads: int = 5
     # S3 client timeouts + bounded retry. Without these botocore can hang a
     # request indefinitely on a stalled endpoint, wedging the whole sync loop
@@ -133,6 +134,19 @@ class Settings:
     # tiles (separate pipeline steps) are picked up within the hour; without
     # it, every overlay-less step is re-listed on every cycle forever.
     wrf_overlay_recheck_ttl: int = 3600
+    # GFS model (loaded from settings.json, env overrides).
+    # Only listings and single-file overlays are mirrored to Redis: one cycle is
+    # ~75k raster tiles across 500/250 hPa, so tiles and barb tiles are read on
+    # demand from S3. `gfs_tile_ttl` is therefore the TTL of that lazy cache,
+    # not of a pre-warmed set.
+    gfs_tile_ttl: int = 64800
+    gfs_geojson_ttl: int = 64800
+    # Cycles walked per product each pass (newest-first), bounding the scan as
+    # runs accumulate in S3. NOTE: tiles-processor keeps 3 cycles in S3 and the
+    # API deliberately exposes fewer, so the oldest cycle exists but is unlisted.
+    gfs_cycles_to_keep: int = 2
+    gfs_sync_interval_seconds: int = 120
+    gfs_sync_timeout_seconds: int = 900
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -312,6 +326,7 @@ class Settings:
         "basemap",
         "ecmwf",
         "ecmwf_mslp",
+        "gfs",
         "radar",
         "weather_stations",
         "wrf",
@@ -364,6 +379,11 @@ class Settings:
             "wrf_overlay_recheck_ttl",
             "wrf_sync_interval_seconds",
             "wrf_sync_timeout_seconds",
+            "gfs_tile_ttl",
+            "gfs_geojson_ttl",
+            "gfs_cycles_to_keep",
+            "gfs_sync_interval_seconds",
+            "gfs_sync_timeout_seconds",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -552,6 +572,17 @@ class Settings:
         )
         self.wrf_sync_interval_seconds = self._env_int(
             "WRF_SYNC_INTERVAL_SECONDS", self.wrf_sync_interval_seconds
+        )
+        self.gfs_tile_ttl = self._env_int("GFS_TILE_TTL", self.gfs_tile_ttl)
+        self.gfs_geojson_ttl = self._env_int("GFS_GEOJSON_TTL", self.gfs_geojson_ttl)
+        self.gfs_cycles_to_keep = self._env_int(
+            "GFS_CYCLES_TO_KEEP", self.gfs_cycles_to_keep
+        )
+        self.gfs_sync_interval_seconds = self._env_int(
+            "GFS_SYNC_INTERVAL_SECONDS", self.gfs_sync_interval_seconds
+        )
+        self.gfs_sync_timeout_seconds = self._env_int(
+            "GFS_SYNC_TIMEOUT_SECONDS", self.gfs_sync_timeout_seconds
         )
         self.wrf_sync_timeout_seconds = self._env_int(
             "WRF_SYNC_TIMEOUT_SECONDS", self.wrf_sync_timeout_seconds
