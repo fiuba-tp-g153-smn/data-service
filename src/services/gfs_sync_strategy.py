@@ -7,11 +7,18 @@ barb tiles are read straight from S3 and cached lazily on first hit.
 
 import asyncio
 import json
-from typing import List, Optional, Protocol
+import logging
+from typing import List, Optional, Protocol, Set
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.gfs_config import get_product, leaf_segment, step_from_basename
+
+logger = logging.getLogger(__name__)
+
+# Bound on concurrent deferred Redis cache writes, so a burst of tile misses
+# cannot queue an unbounded number of them behind the request path.
+_CACHE_WRITE_CONCURRENCY = 8
 
 
 class GfsSyncStrategy(Protocol):
@@ -69,6 +76,8 @@ class GfsOnDemandStrategy:
         self._tile_ttl = tile_ttl
         self._geojson_ttl = geojson_ttl
         self._listing_ttl = listing_ttl
+        self._cache_tasks: Set[asyncio.Task] = set()
+        self._cache_semaphore = asyncio.Semaphore(_CACHE_WRITE_CONCURRENCY)
 
     async def get_tile(
         self, product_id: str, cycle: str, fxxx: str, z: int, x: int, y: int
@@ -86,10 +95,11 @@ class GfsOnDemandStrategy:
         s3_key = S3Client.build_gfs_tile_key(segment, cycle, fxxx, z, x, y)
         data = await self._s3.download_tile(s3_key)
         if data:
-            asyncio.create_task(
+            self._schedule_cache_write(
                 self._redis.store_gfs_tile(
                     product_id, cycle, fxxx, z, x, y, data, ttl=self._tile_ttl
-                )
+                ),
+                label=f"tile {s3_key}",
             )
         return data
 
@@ -108,10 +118,11 @@ class GfsOnDemandStrategy:
         s3_key = S3Client.build_gfs_geojson_key(segment, cycle, fxxx, layer)
         data = await self._s3.download_tile(s3_key)
         if data:
-            asyncio.create_task(
+            self._schedule_cache_write(
                 self._redis.store_gfs_geojson(
                     product_id, cycle, fxxx, layer, data, ttl=self._geojson_ttl
-                )
+                ),
+                label=f"geojson {s3_key}",
             )
         return data
 
@@ -205,6 +216,34 @@ class GfsOnDemandStrategy:
             layers.append("barbs")
         return sorted(layers)
 
+
+
+    def _schedule_cache_write(self, coro, label: str) -> None:
+        """Spawn a throttled, tracked background cache write.
+
+        Tracked because the loop only holds a weak reference to a bare task: an
+        untracked one can be collected before it runs, silently dropping the
+        write that is the entire tile cache for this domain.
+        """
+        task = asyncio.create_task(self._run_throttled(coro, label))
+        self._cache_tasks.add(task)
+        task.add_done_callback(self._cache_tasks.discard)
+
+    async def _run_throttled(self, coro, label: str) -> None:
+        """Run a cache write under the semaphore, surfacing any failure."""
+        async with self._cache_semaphore:
+            try:
+                await coro
+            except (OSError, asyncio.TimeoutError) as exc:
+                logger.warning("GFS cache write failed (%s): %s", label, exc)
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                # Never let a cache write take down the request that spawned it.
+                logger.error(
+                    "Unexpected GFS cache-write failure (%s): %s",
+                    label,
+                    exc,
+                    exc_info=True,
+                )
 
 class GfsFullSyncStrategy:
     """Redis-first for what the background loop mirrors, S3 for the rest.

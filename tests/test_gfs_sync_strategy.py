@@ -134,6 +134,47 @@ class TestOnDemandOverlays:
         redis.store_gfs_geojson.assert_not_awaited()
 
 
+class TestDeferredCacheWrites:
+    """Tiles are cached off the request path, so a failure there must be loud
+    but harmless: the reader still gets its bytes, and the loss is logged."""
+
+    @pytest.mark.asyncio
+    async def test_a_failing_write_does_not_break_the_read(self, caplog):
+        redis, s3 = _redis(), _s3()
+        redis.store_gfs_tile = AsyncMock(side_effect=OSError("redis down"))
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        assert await strategy.get_tile("500hpa", CYCLE, FXXX, 5, 9, 17) == b"payload"
+        await _settle()
+        await _settle()
+        assert "cache write failed" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_an_unexpected_write_failure_is_logged_not_swallowed(self, caplog):
+        redis, s3 = _redis(), _s3()
+        redis.store_gfs_tile = AsyncMock(side_effect=ValueError("bug"))
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        await strategy.get_tile("500hpa", CYCLE, FXXX, 5, 9, 17)
+        await _settle()
+        await _settle()
+        assert "unexpected gfs cache-write failure" in caplog.text.lower()
+
+    @pytest.mark.asyncio
+    async def test_the_write_task_is_tracked_until_it_finishes(self):
+        """An untracked task can be collected before it runs, silently dropping
+        the write that is this domain's entire tile cache."""
+        redis, s3 = _redis(), _s3()
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        await strategy.get_tile("500hpa", CYCLE, FXXX, 5, 9, 17)
+        assert strategy._cache_tasks  # pylint: disable=protected-access
+        await _settle()
+        await _settle()
+        assert not strategy._cache_tasks  # pylint: disable=protected-access
+        redis.store_gfs_tile.assert_awaited_once()
+
+
 class TestOnDemandListings:
     @pytest.mark.asyncio
     async def test_cycles_are_discovered_from_the_cog_prefix(self):
