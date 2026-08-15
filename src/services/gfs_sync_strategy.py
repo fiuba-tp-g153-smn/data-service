@@ -110,7 +110,16 @@ class GfsOnDemandStrategy:
         data = await self._redis.get_gfs_geojson(product_id, cycle, fxxx, layer)
         if data:
             return data
+        return await self.geojson_from_s3(product_id, cycle, fxxx, layer)
 
+    async def geojson_from_s3(
+        self, product_id: str, cycle: str, fxxx: str, layer: str
+    ) -> Optional[bytes]:
+        """S3 leg of the overlay read, skipping the Redis lookup.
+
+        Split out so `GfsFullSyncStrategy` — which has already missed on Redis
+        before delegating here — does not pay for a second identical GET.
+        """
         segment = _s3_segment(product_id)
         if not self._s3 or segment is None:
             return None
@@ -278,11 +287,11 @@ class GfsFullSyncStrategy:
     async def get_geojson(
         self, product_id: str, cycle: str, fxxx: str, layer: str
     ) -> Optional[bytes]:
-        """Pre-warmed by the sync loop, so Redis first."""
+        """Pre-warmed by the sync loop, so Redis first, then straight to S3."""
         data = await self._redis.get_gfs_geojson(product_id, cycle, fxxx, layer)
         if data:
             return data
-        return await self._fallback.get_geojson(product_id, cycle, fxxx, layer)
+        return await self._fallback.geojson_from_s3(product_id, cycle, fxxx, layer)
 
     async def get_barb_tile(
         self, product_id: str, cycle: str, fxxx: str, z: int, x: int, y: int
