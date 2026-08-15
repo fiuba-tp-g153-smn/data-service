@@ -1,9 +1,8 @@
 """Read strategies for GFS tiles, overlays and listings.
 
-Unlike the other model domains, GFS raster tiles are **never** pre-synced: one
-cycle is ~75k tiles across the two raster products, well past what belongs in
-Redis. The background loop mirrors only listings and the single-file overlays;
-tiles and barb tiles are read straight from S3 and cached lazily on first hit.
+Unlike the other model domains, GFS raster tiles are **never** pre-synced The
+background loop mirrors only listings and the single-file overlays; tiles and
+barb tiles are read straight from S3 and cached lazily on first hit.
 """
 
 import asyncio

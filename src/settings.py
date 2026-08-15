@@ -135,10 +135,9 @@ class Settings:
     # it, every overlay-less step is re-listed on every cycle forever.
     wrf_overlay_recheck_ttl: int = 3600
     # GFS model (loaded from settings.json, env overrides).
-    # Only listings and single-file overlays are mirrored to Redis: one cycle is
-    # ~75k raster tiles across 500/250 hPa, so tiles and barb tiles are read on
-    # demand from S3. `gfs_tile_ttl` is therefore the TTL of that lazy cache,
-    # not of a pre-warmed set.
+    # Only listings and single-file overlays are mirrored to Redis: only tiles
+    # and barb tiles are read on demand from S3. `gfs_tile_ttl` is therefore the
+    # TTL of that lazy cache, not of a pre-warmed set.
     gfs_tile_ttl: int = 64800
     gfs_geojson_ttl: int = 64800
     # Cycles walked per product each pass (newest-first), bounding the scan as

@@ -5,14 +5,6 @@ Provides sync functionality to download tiles from S3 bucket and store
 them directly in Redis. Used by SyncService for periodic satellite tile sync.
 """
 
-# TECH DEBT: the module crossed pylint's 1000-line limit when GFS was added, and
-# `S3Client` sits at 39 public methods against a limit of 20 (already over at 33
-# before GFS). Both point at the same thing: this is a *client* — connections,
-# downloads, uploads, lifecycle — that has also accumulated the `build_*_key`
-# builders for six domains, which are pure functions doing no I/O. Extracting
-# every key builder into its own module is the real fix, but it touches all six
-# domains and deserves its own commit and test pass rather than riding along
-# with a feature.
 # pylint: disable=too-many-lines
 
 import asyncio
@@ -537,12 +529,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
 
     @staticmethod
     def gfs_cog_cycle_prefix(s3_segment: str) -> str:
-        """Prefix holding every COG of one product, for listing cycles.
-
-        The COG is the only artifact every product has — `mslp` produces no
-        raster pyramid — so cycle/step discovery reads this prefix rather than
-        the tiles one.
-        """
+        """Prefix holding every COG of one product, for listing cycles."""
         return f"cog/models/gfs/{s3_segment}/"
 
     @classmethod
@@ -571,11 +558,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     def build_gfs_barb_tile_key(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         cls, s3_segment: str, cycle: str, fxxx: str, z: int, x: int, y: int
     ) -> str:
-        """Build S3 key for one GFS wind-barb GeoJSON tile.
-
-        Barbs are the one overlay stored per tile rather than as a single
-        document, so the viewport only pulls the barbs it draws.
-        """
+        """Build S3 key for one GFS wind-barb GeoJSON tile."""
         step = cls._gfs_step_id(cycle, fxxx)
         return f"geojson/models/gfs/{s3_segment}/{cycle}/{step}_barbs/{z}/{x}/{y}.json"
 
