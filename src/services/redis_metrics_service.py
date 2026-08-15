@@ -40,6 +40,8 @@ _PREFIX_DOMAINS = (
     ("geojson:ecmwf_mslp:", "ecmwf_mslp"),
     ("tile:wrf:", "wrf"),
     ("geojson:wrf:", "wrf"),
+    ("tile:gfs:", "gfs"),
+    ("geojson:gfs:", "gfs"),
     ("tile:basemap:", "basemap"),
     ("basemap:availability:", "basemap"),
     ("cache:ws:", "weather_stations"),

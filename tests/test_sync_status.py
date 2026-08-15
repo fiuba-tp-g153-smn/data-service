@@ -25,6 +25,7 @@ def test_sync_status_empty():
             "ecmwf_tp",
             "ecmwf_mslp",
             "wrf",
+            "gfs",
         }
         assert domains["satellite"]["total_cycles"] == 0
         assert domains["satellite"]["is_running"] is False
