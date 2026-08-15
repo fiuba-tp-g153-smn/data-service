@@ -62,9 +62,6 @@ GFS_ZOOM_MAX = 7
 # deepest one. Mirrors `BARB_ZOOM_STRIDES` in tiles-processor.
 GFS_BARB_ZOOM_LEVELS: Tuple[int, ...] = (2, 4, 6, 8)
 
-# Cycles are issued at these UTC hours; steps run 3-hourly to +48h then 6-hourly.
-GFS_CYCLE_HOURS: Tuple[int, ...] = (0, 6, 12, 18)
-
 
 def get_product(product_id: str) -> Optional[GfsProduct]:
     """Look up a product by its API id, or None when unknown."""
@@ -85,3 +82,24 @@ def layers_for(product_id: str) -> List[str]:
     if product.has_barbs:
         layers.append("barbs")
     return layers
+
+
+# ============== S3 object-name parsing ==============
+#
+# tiles-processor names every object of a step `{cycle}_{fxxx}` while nesting it
+# under the cycle. Both the sync loop and the read strategy have to undo that,
+# so the rule lives here once: a rename upstream is a one-line fix, not a hunt.
+
+
+def leaf_segment(prefix: str) -> str:
+    """Last path segment of an S3 common prefix."""
+    return prefix.rstrip("/").split("/")[-1]
+
+
+def step_from_basename(basename: str, cycle: str) -> Optional[str]:
+    """Turn `{cycle}_{fxxx}` back into `{fxxx}`, or None if it does not match."""
+    marker = f"{cycle}_"
+    if not basename.startswith(marker):
+        return None
+    step = basename[len(marker) :]
+    return step or None

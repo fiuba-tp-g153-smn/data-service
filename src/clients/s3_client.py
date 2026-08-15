@@ -523,11 +523,6 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         return f"{cycle}_{fxxx}"
 
     @staticmethod
-    def gfs_cycle_prefix(s3_segment: str) -> str:
-        """Prefix holding every cycle of a product, for listing cycles."""
-        return f"tiles/models/gfs/{s3_segment}/"
-
-    @staticmethod
     def gfs_cog_cycle_prefix(s3_segment: str) -> str:
         """Prefix holding every COG of one product, for listing cycles."""
         return f"cog/models/gfs/{s3_segment}/"

@@ -11,7 +11,7 @@ from typing import List, Optional, Protocol
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
-from services.gfs_config import get_product
+from services.gfs_config import get_product, leaf_segment, step_from_basename
 
 
 class GfsSyncStrategy(Protocol):
@@ -150,7 +150,7 @@ class GfsOnDemandStrategy:
             S3Client.gfs_cog_cycle_prefix(segment)
         )
         cycles = sorted(
-            (name for name in (_leaf(s) for s in subdirs) if name), reverse=True
+            (name for name in (leaf_segment(s) for s in subdirs) if name), reverse=True
         )
 
         await self._redis.cache_listing(
@@ -178,7 +178,7 @@ class GfsOnDemandStrategy:
         )
         steps = sorted(
             step
-            for step in (_step_from_basename(name, cycle) for name in basenames)
+            for step in (step_from_basename(name, cycle) for name in basenames)
             if step
         )
 
@@ -272,17 +272,3 @@ class GfsFullSyncStrategy:
         if layers:
             return layers
         return await self._fallback.list_layers(product_id, cycle, fxxx)
-
-
-def _leaf(prefix: str) -> str:
-    """Last path segment of an S3 common prefix."""
-    return prefix.rstrip("/").split("/")[-1]
-
-
-def _step_from_basename(basename: str, cycle: str) -> Optional[str]:
-    """Turn `{cycle}_{fxxx}` back into `{fxxx}`, or None if it does not match."""
-    marker = f"{cycle}_"
-    if not basename.startswith(marker):
-        return None
-    step = basename[len(marker) :]
-    return step or None

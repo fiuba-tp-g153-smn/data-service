@@ -15,7 +15,12 @@ from typing import List, Optional, Tuple
 
 from clients.s3_client import S3Client
 from services.domain_sync_service import DomainSyncService
-from services.gfs_config import GFS_PRODUCTS, GfsProduct
+from services.gfs_config import (
+    GFS_PRODUCTS,
+    GfsProduct,
+    leaf_segment,
+    step_from_basename,
+)
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -98,7 +103,7 @@ class GfsSyncService(DomainSyncService):
         # Cycle tags are fixed-width `YYYYMMDDTHHmmZ`, so lexicographic order
         # equals chronological order.
         cycles = sorted(
-            (name for name in (_leaf(p) for p in prefixes) if name), reverse=True
+            (name for name in (leaf_segment(p) for p in prefixes) if name), reverse=True
         )
         return cycles[: self._settings.gfs_cycles_to_keep]
 
@@ -112,7 +117,7 @@ class GfsSyncService(DomainSyncService):
         )
         return sorted(
             step
-            for step in (_step_from_basename(name, cycle) for name in basenames)
+            for step in (step_from_basename(name, cycle) for name in basenames)
             if step
         )
 
@@ -163,20 +168,6 @@ class GfsSyncService(DomainSyncService):
             )
             copied += 1
         return copied
-
-
-def _leaf(prefix: str) -> str:
-    """Last path segment of an S3 common prefix."""
-    return prefix.rstrip("/").split("/")[-1]
-
-
-def _step_from_basename(basename: str, cycle: str) -> Optional[str]:
-    """Turn `{cycle}_{fxxx}` back into `{fxxx}`, or None if it does not match."""
-    marker = f"{cycle}_"
-    if not basename.startswith(marker):
-        return None
-    step = basename[len(marker) :]
-    return step or None
 
 
 def _cycle_score(cycle: str) -> float:
