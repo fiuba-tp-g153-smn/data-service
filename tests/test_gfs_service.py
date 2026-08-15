@@ -15,6 +15,8 @@ class FakeStrategy:
         self._steps = steps if steps is not None else ["f000", "f003"]
         self._payload = payload
         self.calls: list[tuple] = []
+        # Per-step overlay index; empty means "this step has no overlays yet".
+        self.layers_by_step: dict[str, list[str]] = {}
 
     async def list_cycles(self, product_id):
         self.calls.append(("list_cycles", product_id))
@@ -25,7 +27,8 @@ class FakeStrategy:
         return list(self._steps)
 
     async def list_layers(self, product_id, cycle, fxxx):
-        return []
+        self.calls.append(("list_layers", product_id, cycle, fxxx))
+        return list(self.layers_by_step.get(fxxx, []))
 
     async def get_tile(self, product_id, cycle, fxxx, z, x, y):
         self.calls.append(("get_tile", product_id))
@@ -94,10 +97,27 @@ class TestListCycles:
         assert data.cycles[0].step_count == 3
 
     @pytest.mark.asyncio
-    async def test_advertises_the_products_layers(self):
+    async def test_advertises_only_single_file_layers(self):
+        """`layers` must never hold `barbs`: it 404s as `barbs.json`."""
         data = await _service().list_cycles("500hpa")
         assert data is not None
-        assert data.layers == ["heights", "isotherms", "barbs"]
+        assert data.layers == ["heights", "isotherms"]
+
+    @pytest.mark.asyncio
+    async def test_barbs_are_advertised_through_their_own_fields(self):
+        data = await _service().list_cycles("500hpa")
+        assert data is not None
+        assert data.barb_tile_url_pattern is not None
+        assert "barbs/{z}/{x}/{y}.json" in data.barb_tile_url_pattern
+        assert data.barb_zoom_levels == [2, 4, 6, 8]
+
+    @pytest.mark.asyncio
+    async def test_products_without_barbs_advertise_no_barb_pattern(self):
+        for product_id in ("250hpa", "mslp"):
+            data = await _service().list_cycles(product_id)
+            assert data is not None
+            assert data.barb_tile_url_pattern is None
+            assert data.barb_zoom_levels == []
 
     @pytest.mark.asyncio
     async def test_mslp_advertises_no_tile_pattern(self):
@@ -139,10 +159,18 @@ class TestListSteps:
         assert [s.valid_ts for s in data.steps] == [CYCLE, "20260808T0300Z"]
 
     @pytest.mark.asyncio
-    async def test_steps_carry_the_products_layers(self):
-        data = await _service().list_steps("250hpa", CYCLE)
+    async def test_steps_carry_the_layers_the_index_reports(self):
+        """Per-step, from the index — not the catalogue.
+
+        A cycle fills in gradually, so the listing must reflect what each step
+        actually has or the frontend fetches overlays that 404.
+        """
+        strategy = FakeStrategy(steps=["f000", "f003"])
+        strategy.layers_by_step = {"f000": ["heights", "isotherms"], "f003": []}
+        data = await _service(strategy).list_steps("500hpa", CYCLE)
         assert data is not None
-        assert data.steps[0].layers == ["heights"]
+        assert data.steps[0].layers == ["heights", "isotherms"]
+        assert data.steps[1].layers == []
 
 
 # ---------------------------------------------------------------------------

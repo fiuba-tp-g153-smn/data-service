@@ -8,16 +8,19 @@ barb tiles are read straight from S3 and cached lazily on first hit.
 import asyncio
 import json
 import logging
-from typing import List, Optional, Protocol, Set
+from typing import Dict, List, Optional, Protocol, Set
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
-from services.gfs_config import get_product, leaf_segment, step_from_basename
+from services.gfs_config import (
+    get_product,
+    leaf_segment,
+    step_and_layer_from_basename,
+    step_from_basename,
+)
 
 logger = logging.getLogger(__name__)
 
-# Bound on concurrent deferred Redis cache writes, so a burst of tile misses
-# cannot queue an unbounded number of them behind the request path.
 _CACHE_WRITE_CONCURRENCY = 8
 
 
@@ -83,6 +86,7 @@ class GfsOnDemandStrategy:
         self._cycles_to_keep = cycles_to_keep
         self._cache_tasks: Set[asyncio.Task] = set()
         self._cache_semaphore = asyncio.Semaphore(_CACHE_WRITE_CONCURRENCY)
+        self._layer_map_lock = asyncio.Lock()
 
     async def get_tile(
         self, product_id: str, cycle: str, fxxx: str, z: int, x: int, y: int
@@ -217,24 +221,56 @@ class GfsOnDemandStrategy:
         return steps
 
     async def list_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
-        # `cycle` and `fxxx` are unused: they belong to the Protocol signature,
-        # which the Redis-backed strategy does need.
-        # pylint: disable=unused-argument
-        """Layers come from the catalogue, not from a per-step S3 listing.
+        """Overlays a step actually has, discovered from S3.
 
-        Which overlays a product carries is fixed by the processor that writes
-        them, so probing S3 for every step would spend one LIST per step to
-        rediscover a constant.
+        Not the catalogue: a cycle fills in gradually, so a step listed from its
+        COG can exist before its overlays do. Advertising the catalogue would
+        make the frontend fetch layers that 404.
         """
-        product = get_product(product_id)
-        if product is None:
-            return []
-        layers = list(product.layers)
-        if product.has_barbs:
-            layers.append("barbs")
-        return sorted(layers)
+        by_step = await self._cycle_layer_map(product_id, cycle)
+        return sorted(by_step.get(fxxx, []))
 
+    async def _cycle_layer_map(
+        self, product_id: str, cycle: str
+    ) -> Dict[str, List[str]]:
+        """Map `fxxx -> [layer]` for a whole cycle, from one delimited LIST.
 
+        Every overlay of every step is a flat `{cycle}_{fxxx}_{layer}.json`
+        sibling, so the whole cycle costs a single LIST instead of one per step.
+        The lock collapses the concurrent calls that `list_steps` fans out into
+        one fetch rather than one per step.
+        """
+        cache_key = f"cache:listing:gfs:{product_id}:{cycle}:layers"
+        cached = await self._redis.get_cached_listing(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        segment = _s3_segment(product_id)
+        if not self._s3 or segment is None:
+            return {}
+
+        async with self._layer_map_lock:
+            cached = await self._redis.get_cached_listing(cache_key)
+            if cached:
+                return json.loads(cached)
+
+            basenames = await self._s3.list_object_basenames(
+                S3Client.gfs_geojson_cycle_prefix(segment, cycle),
+                ".json",
+                delimiter="/",
+            )
+            by_step: Dict[str, List[str]] = {}
+            for name in basenames:
+                parsed = step_and_layer_from_basename(name, cycle)
+                if parsed is None:
+                    continue
+                step, layer = parsed
+                by_step.setdefault(step, []).append(layer)
+
+            await self._redis.cache_listing(
+                cache_key, json.dumps(by_step).encode(), self._listing_ttl
+            )
+            return by_step
 
     def _schedule_cache_write(self, coro, label: str) -> None:
         """Spawn a throttled, tracked background cache write.
@@ -262,6 +298,7 @@ class GfsOnDemandStrategy:
                     exc,
                     exc_info=True,
                 )
+
 
 class GfsFullSyncStrategy:
     """Redis-first for what the background loop mirrors, S3 for the rest.
@@ -325,7 +362,7 @@ class GfsFullSyncStrategy:
         return await self._fallback.list_steps(product_id, cycle)
 
     async def list_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
-        """Redis index first, then the catalogue via the on-demand path."""
+        """Redis index first, S3 discovery when it is cold or evicted."""
         layers = await self._redis.get_gfs_layers(product_id, cycle, fxxx)
         if layers:
             return layers

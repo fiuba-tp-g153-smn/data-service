@@ -141,18 +141,32 @@ class GfsSyncService(DomainSyncService):
             ttl=self._settings.gfs_geojson_ttl,
         )
 
-        # Barbs are excluded on purpose: they live one object per tile and are
-        # served straight from S3.
-        layers = list(product.layers)
-        await self._redis_client.add_gfs_layers(
-            product.product_id, cycle, fxxx, layers, ttl=self._settings.gfs_geojson_ttl
-        )
+        present, copied = await self._mirror_overlays(product, cycle, fxxx)
 
+        # Index only the overlays that are actually retrievable, so the step
+        # listing advertises what a client can really fetch. Registering the
+        # catalogue instead would make a mid-run step claim overlays that
+        # tiles-processor has not uploaded yet, and every one of them would 404.
+        # Barbs are absent by construction: they live one object per tile, are
+        # never mirrored, and have their own route.
+        await self._redis_client.add_gfs_layers(
+            product.product_id, cycle, fxxx, present, ttl=self._settings.gfs_geojson_ttl
+        )
+        return copied
+
+    async def _mirror_overlays(
+        self, product: GfsProduct, cycle: str, fxxx: str
+    ) -> Tuple[List[str], int]:
+        """Copy the overlays Redis lacks. Returns (retrievable layers, copied)."""
+        assert self._client is not None and self._redis_client is not None  # mypy
+
+        present: List[str] = []
         copied = 0
-        for layer in layers:
+        for layer in product.layers:
             if await self._redis_client.get_gfs_geojson(
                 product.product_id, cycle, fxxx, layer
             ):
+                present.append(layer)
                 continue
             key = S3Client.build_gfs_geojson_key(product.s3_segment, cycle, fxxx, layer)
             data = await self._client.download_tile(key)
@@ -168,8 +182,9 @@ class GfsSyncService(DomainSyncService):
                 data,
                 ttl=self._settings.gfs_geojson_ttl,
             )
+            present.append(layer)
             copied += 1
-        return copied
+        return present, copied
 
 
 def _cycle_score(cycle: str) -> float:

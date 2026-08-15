@@ -24,6 +24,26 @@ def _redis() -> AsyncMock:
     return redis
 
 
+def _redis_with_listing_cache() -> AsyncMock:
+    """Redis double whose listing cache actually round-trips.
+
+    Needed wherever the code under test relies on a second reader observing the
+    first writer — a plain AsyncMock would keep missing and hide the dedup.
+    """
+    redis = _redis()
+    store: dict[str, bytes] = {}
+
+    async def _get(cache_key):
+        return store.get(cache_key)
+
+    async def _set(cache_key, data, _ttl):
+        store[cache_key] = data
+
+    redis.get_cached_listing = AsyncMock(side_effect=_get)
+    redis.cache_listing = AsyncMock(side_effect=_set)
+    return redis
+
+
 def _s3() -> AsyncMock:
     s3 = AsyncMock()
     s3.download_tile = AsyncMock(return_value=b"payload")
@@ -243,18 +263,55 @@ class TestOnDemandListings:
         s3.get_subdirectories.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_layers_come_from_the_catalogue_not_from_s3(self):
-        """Which overlays exist is fixed by the writer; probing S3 per step
-        would spend one LIST to rediscover a constant."""
+    async def test_layers_are_discovered_from_s3_not_the_catalogue(self):
+        """A cycle fills in gradually, so only what exists may be advertised."""
         redis, s3 = _redis(), _s3()
+        s3.list_object_basenames = AsyncMock(
+            return_value=[f"{CYCLE}_{FXXX}_heights", f"{CYCLE}_{FXXX}_isotherms"]
+        )
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
         assert await strategy.list_layers("500hpa", CYCLE, FXXX) == [
-            "barbs",
             "heights",
             "isotherms",
         ]
-        s3.list_object_basenames.assert_not_awaited()
+        prefix = s3.list_object_basenames.await_args.args[0]
+        assert prefix == f"geojson/models/gfs/500hpa/{CYCLE}/"
+        # Delimited: the `{step}_barbs/z/x/y` subtrees hold thousands of keys.
+        assert s3.list_object_basenames.await_args.kwargs["delimiter"] == "/"
+
+    @pytest.mark.asyncio
+    async def test_a_step_without_overlays_advertises_none(self):
+        redis, s3 = _redis(), _s3()
+        s3.list_object_basenames = AsyncMock(return_value=[f"{CYCLE}_f000_heights"])
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        assert await strategy.list_layers("500hpa", CYCLE, "f003") == []
+
+    @pytest.mark.asyncio
+    async def test_barbs_are_never_reported_as_a_layer(self):
+        """`{step}_barbs/` is a subtree, so a delimited LIST cannot surface it."""
+        redis, s3 = _redis(), _s3()
+        s3.list_object_basenames = AsyncMock(return_value=[f"{CYCLE}_{FXXX}_heights"])
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        assert "barbs" not in await strategy.list_layers("500hpa", CYCLE, FXXX)
+
+    @pytest.mark.asyncio
+    async def test_the_whole_cycle_costs_one_list(self):
+        """`list_steps` fans out one call per step; they must share the LIST."""
+        redis, s3 = _redis_with_listing_cache(), _s3()
+        s3.list_object_basenames = AsyncMock(
+            return_value=[f"{CYCLE}_f000_heights", f"{CYCLE}_f003_heights"]
+        )
+        strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
+
+        results = await asyncio.gather(
+            strategy.list_layers("500hpa", CYCLE, "f000"),
+            strategy.list_layers("500hpa", CYCLE, "f003"),
+        )
+        assert results == [["heights"], ["heights"]]
+        assert s3.list_object_basenames.await_count == 1
 
 
 class TestFullSyncStrategy:

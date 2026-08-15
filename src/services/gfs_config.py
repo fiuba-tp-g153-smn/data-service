@@ -74,14 +74,18 @@ def product_ids() -> List[str]:
 
 
 def layers_for(product_id: str) -> List[str]:
-    """Every overlay layer a product can carry, barbs included."""
+    """Single-file overlay layers a product can carry.
+
+    Barbs are deliberately excluded: unlike WRF, GFS has no `{step}_barbs.json`
+    document — barbs exist only as per-tile objects under `{step}_barbs/z/x/y`
+    and have their own route. Listing them here would advertise a name that
+    404s when fetched as `{layer}.json`. They are reported instead through
+    `barb_tile_url_pattern` / `barb_zoom_levels`.
+    """
     product = GFS_PRODUCTS.get(product_id)
     if product is None:
         return []
-    layers = list(product.layers)
-    if product.has_barbs:
-        layers.append("barbs")
-    return layers
+    return list(product.layers)
 
 
 # ============== S3 object-name parsing ==============
@@ -103,3 +107,20 @@ def step_from_basename(basename: str, cycle: str) -> Optional[str]:
         return None
     step = basename[len(marker) :]
     return step or None
+
+
+def step_and_layer_from_basename(
+    basename: str, cycle: str
+) -> Optional[Tuple[str, str]]:
+    """Split an overlay basename `{cycle}_{fxxx}_{layer}` into `(fxxx, layer)`.
+
+    Neither a step tag (`f003`) nor a layer name carries an underscore, so the
+    first separator after the cycle is the boundary.
+    """
+    tail = step_from_basename(basename, cycle)
+    if tail is None or "_" not in tail:
+        return None
+    fxxx, layer = tail.split("_", 1)
+    if not fxxx or not layer:
+        return None
+    return fxxx, layer

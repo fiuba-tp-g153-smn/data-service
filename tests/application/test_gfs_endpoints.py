@@ -89,6 +89,42 @@ class TestListings:
         assert response.status_code == 200
         assert response.headers.get("ETag")
 
+    def test_step_listing_is_served_with_an_etag(self, app_client, service):
+        from models.base import BoundingBox, ZoomLevels  # pylint: disable=C0415
+        from models.gfs import (  # pylint: disable=C0415
+            GfsStepInfo,
+            GfsStepListResponse,
+        )
+
+        service.list_steps = AsyncMock(
+            return_value=GfsStepListResponse(
+                product_id="500hpa",
+                cycle=CYCLE,
+                steps=[
+                    GfsStepInfo(
+                        fxxx=FXXX, valid_ts="20260808T0300Z", layers=["heights"]
+                    )
+                ],
+                tile_url_pattern="/x/{z}/{x}/{y}.webp",
+                barb_tile_url_pattern="/x/barbs/{z}/{x}/{y}.json",
+                barb_zoom_levels=[2, 4, 6, 8],
+                zoom_levels=ZoomLevels(min=3, max=7),
+                bounding_box=BoundingBox(minx=-110, miny=-60, maxx=-30, maxy=-15),
+            )
+        )
+        response = app_client.get(f"/products/gfs/500hpa/{CYCLE}")
+        assert response.status_code == 200
+        assert response.headers.get("ETag")
+        body = response.json()
+        assert body["steps"][0]["layers"] == ["heights"]
+        assert body["barb_zoom_levels"] == [2, 4, 6, 8]
+
+        cached = app_client.get(
+            f"/products/gfs/500hpa/{CYCLE}",
+            headers={"If-None-Match": response.headers["ETag"]},
+        )
+        assert cached.status_code == 304
+
     def test_matching_etag_returns_304(self, app_client, service):
         from models.base import BoundingBox, ZoomLevels  # pylint: disable=C0415
         from models.gfs import GfsCycleListResponse  # pylint: disable=C0415
