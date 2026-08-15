@@ -48,9 +48,9 @@ async def get_sync_status(
     """
     Get the live status of every product's background sync loop.
 
-    Each product (satellite, radar, ECMWF-TP, ECMWF-MSLP, WRF) syncs on its own
-    independent loop, so the response is a per-domain list plus an `any_running`
-    rollup.
+    Each product (satellite, radar, ECMWF-TP, ECMWF-MSLP, WRF, GFS) syncs on its
+    own independent loop, so the response is a per-domain list plus an
+    `any_running` rollup.
     """
     domains = []
     for domain in SYNC_DOMAINS:

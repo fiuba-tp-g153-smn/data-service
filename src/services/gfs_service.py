@@ -1,5 +1,6 @@
 """Service exposing GFS tiles, overlays and listings."""
 
+import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -11,7 +12,13 @@ from models.gfs import (
     GfsStepInfo,
     GfsStepListResponse,
 )
-from services.gfs_config import GFS_ZOOM_MAX, GFS_ZOOM_MIN, get_product, layers_for
+from services.gfs_config import (
+    GFS_BARB_ZOOM_LEVELS,
+    GFS_ZOOM_MAX,
+    GFS_ZOOM_MIN,
+    get_product,
+    layers_for,
+)
 from services.gfs_sync_strategy import GfsSyncStrategy
 
 _CYCLE_FORMAT = "%Y%m%dT%H%MZ"
@@ -24,6 +31,9 @@ class GfsService:
     ZOOM_LEVELS = ZoomLevels(min=GFS_ZOOM_MIN, max=GFS_ZOOM_MAX)
     BOUNDING_BOX = BoundingBox(minx=-110.0, miny=-60.0, maxx=-30.0, maxy=-15.0)
     TILE_URL_PATTERN = "/products/gfs/{product_id}/{cycle}/{fxxx}/{z}/{x}/{y}.webp"
+    BARB_TILE_URL_PATTERN = (
+        "/products/gfs/{product_id}/{cycle}/{fxxx}/barbs/{z}/{x}/{y}.json"
+    )
 
     def __init__(self) -> None:
         self._strategy: Optional[GfsSyncStrategy] = None
@@ -49,6 +59,8 @@ class GfsService:
             cycles=infos,
             layers=layers_for(product_id),
             tile_url_pattern=self._tile_url_pattern(product_id),
+            barb_tile_url_pattern=self._barb_url_pattern(product_id),
+            barb_zoom_levels=self._barb_zoom_levels(product_id),
             zoom_levels=self.ZOOM_LEVELS,
             bounding_box=self.BOUNDING_BOX,
         )
@@ -65,7 +77,14 @@ class GfsService:
         if not steps:
             return None
 
-        layers = layers_for(product_id)
+        # Hydrate each step's overlay list from the index, concurrently. Reading
+        # it per step (rather than reusing the product catalogue) is what keeps
+        # the listing honest while a cycle is still filling in: an overlay that
+        # tiles-processor has not uploaded yet is simply not advertised, so the
+        # frontend never asks for a layer that would 404.
+        layer_lists = await asyncio.gather(
+            *(self._strategy.list_layers(product_id, cycle, s) for s in steps)
+        )
         return GfsStepListResponse(
             product_id=product_id,
             cycle=cycle,
@@ -75,9 +94,11 @@ class GfsService:
                     valid_ts=valid_timestamp(cycle, fxxx) or "",
                     layers=layers,
                 )
-                for fxxx in steps
+                for fxxx, layers in zip(steps, layer_lists)
             ],
             tile_url_pattern=self._tile_url_pattern(product_id),
+            barb_tile_url_pattern=self._barb_url_pattern(product_id),
+            barb_zoom_levels=self._barb_zoom_levels(product_id),
             zoom_levels=self.ZOOM_LEVELS,
             bounding_box=self.BOUNDING_BOX,
         )
@@ -117,6 +138,20 @@ class GfsService:
         if product is None or not product.has_tiles:
             return None
         return self.TILE_URL_PATTERN
+
+    def _barb_url_pattern(self, product_id: str) -> Optional[str]:
+        """Barb-tile pattern, or None for a product that carries no barbs."""
+        product = get_product(product_id)
+        if product is None or not product.has_barbs:
+            return None
+        return self.BARB_TILE_URL_PATTERN
+
+    def _barb_zoom_levels(self, product_id: str) -> List[int]:
+        """Native barb zooms, or empty for a product that carries no barbs."""
+        product = get_product(product_id)
+        if product is None or not product.has_barbs:
+            return []
+        return list(GFS_BARB_ZOOM_LEVELS)
 
 
 def valid_timestamp(cycle: str, fxxx: str) -> Optional[str]:

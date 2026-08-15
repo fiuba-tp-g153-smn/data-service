@@ -89,6 +89,42 @@ class TestListings:
         assert response.status_code == 200
         assert response.headers.get("ETag")
 
+    def test_step_listing_is_served_with_an_etag(self, app_client, service):
+        from models.base import BoundingBox, ZoomLevels  # pylint: disable=C0415
+        from models.gfs import (  # pylint: disable=C0415
+            GfsStepInfo,
+            GfsStepListResponse,
+        )
+
+        service.list_steps = AsyncMock(
+            return_value=GfsStepListResponse(
+                product_id="500hpa",
+                cycle=CYCLE,
+                steps=[
+                    GfsStepInfo(
+                        fxxx=FXXX, valid_ts="20260808T0300Z", layers=["heights"]
+                    )
+                ],
+                tile_url_pattern="/x/{z}/{x}/{y}.webp",
+                barb_tile_url_pattern="/x/barbs/{z}/{x}/{y}.json",
+                barb_zoom_levels=[2, 4, 6, 8],
+                zoom_levels=ZoomLevels(min=3, max=7),
+                bounding_box=BoundingBox(minx=-110, miny=-60, maxx=-30, maxy=-15),
+            )
+        )
+        response = app_client.get(f"/products/gfs/500hpa/{CYCLE}")
+        assert response.status_code == 200
+        assert response.headers.get("ETag")
+        body = response.json()
+        assert body["steps"][0]["layers"] == ["heights"]
+        assert body["barb_zoom_levels"] == [2, 4, 6, 8]
+
+        cached = app_client.get(
+            f"/products/gfs/500hpa/{CYCLE}",
+            headers={"If-None-Match": response.headers["ETag"]},
+        )
+        assert cached.status_code == 304
+
     def test_matching_etag_returns_304(self, app_client, service):
         from models.base import BoundingBox, ZoomLevels  # pylint: disable=C0415
         from models.gfs import GfsCycleListResponse  # pylint: disable=C0415
@@ -128,6 +164,54 @@ class TestTiles:
         assert response.status_code == 200
         assert response.content == b"RIFF....WEBP"
 
+    def test_matching_etag_returns_304(self, app_client, service):
+        service.get_tile_data = AsyncMock(return_value=b"RIFF....WEBP")
+        first = app_client.get(f"{BASE}/5/9/17.webp")
+        second = app_client.get(
+            f"{BASE}/5/9/17.webp", headers={"If-None-Match": first.headers["ETag"]}
+        )
+        assert second.status_code == 304
+
+
+class TestTileGapCaching:
+    """A gap and the tile that later fills it share a URL but must not share an
+    ETag, or the client's revalidation matches its own cached gap forever."""
+
+    def test_gap_and_hit_use_different_etags(self, app_client, service):
+        gap = app_client.get(f"{BASE}/5/9/17.webp")
+        service.get_tile_data = AsyncMock(return_value=b"RIFF....WEBP")
+        hit = app_client.get(f"{BASE}/5/9/17.webp")
+        assert gap.headers["ETag"] != hit.headers["ETag"]
+
+    def test_gap_is_not_cached_as_immutable(self, app_client, service):
+        """`cache_control_tile` is 12 h + immutable; a gap is temporary."""
+        response = app_client.get(f"{BASE}/5/9/17.webp")
+        cache_control = response.headers["Cache-Control"]
+        assert "immutable" not in cache_control
+        assert "max-age=300" in cache_control
+
+    def test_a_client_holding_the_gap_etag_still_gets_the_tile(
+        self, app_client, service
+    ):
+        """The regression this guards: revalidating a cached gap must not 304
+        once tiles-processor has written the pyramid."""
+        gap_etag = app_client.get(f"{BASE}/5/9/17.webp").headers["ETag"]
+
+        service.get_tile_data = AsyncMock(return_value=b"RIFF....WEBP")
+        revalidated = app_client.get(
+            f"{BASE}/5/9/17.webp", headers={"If-None-Match": gap_etag}
+        )
+        assert revalidated.status_code == 200
+        assert revalidated.content == b"RIFF....WEBP"
+
+    def test_a_still_missing_tile_revalidates_to_304(self, app_client, service):
+        gap_etag = app_client.get(f"{BASE}/5/9/17.webp").headers["ETag"]
+        again = app_client.get(
+            f"{BASE}/5/9/17.webp", headers={"If-None-Match": gap_etag}
+        )
+        assert again.status_code == 304
+        assert "max-age=300" in again.headers["Cache-Control"]
+
 
 class TestOverlays:
     def test_missing_overlay_is_404(self, app_client, service):
@@ -139,6 +223,14 @@ class TestOverlays:
         response = app_client.get(f"{BASE}/heights.json")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/geo+json")
+
+    def test_matching_etag_returns_304(self, app_client, service):
+        service.get_geojson = AsyncMock(return_value=b'{"type":"FeatureCollection"}')
+        first = app_client.get(f"{BASE}/heights.json")
+        second = app_client.get(
+            f"{BASE}/heights.json", headers={"If-None-Match": first.headers["ETag"]}
+        )
+        assert second.status_code == 304
 
 
 class TestBarbTiles:
@@ -159,6 +251,39 @@ class TestBarbTiles:
         response = app_client.get(f"{BASE}/barbs/4/5/9.json")
         assert response.status_code == 200
         assert response.content == b'{"features":[1]}'
+
+    def test_matching_etag_returns_304(self, app_client, service):
+        service.get_barb_tile = AsyncMock(return_value=b'{"features":[1]}')
+        first = app_client.get(f"{BASE}/barbs/4/5/9.json")
+        second = app_client.get(
+            f"{BASE}/barbs/4/5/9.json", headers={"If-None-Match": first.headers["ETag"]}
+        )
+        assert second.status_code == 304
+
+    def test_empty_collection_does_not_mask_barbs_that_appear_later(
+        self, app_client, service
+    ):
+        empty_etag = app_client.get(f"{BASE}/barbs/4/5/9.json").headers["ETag"]
+
+        service.get_barb_tile = AsyncMock(return_value=b'{"features":[1]}')
+        revalidated = app_client.get(
+            f"{BASE}/barbs/4/5/9.json", headers={"If-None-Match": empty_etag}
+        )
+        assert revalidated.status_code == 200
+        assert revalidated.content == b'{"features":[1]}'
+
+    def test_empty_collection_is_not_cached_as_immutable(self, app_client, service):
+        response = app_client.get(f"{BASE}/barbs/4/5/9.json")
+        assert "immutable" not in response.headers["Cache-Control"]
+        assert "max-age=300" in response.headers["Cache-Control"]
+
+    def test_a_still_empty_barb_tile_revalidates_to_304(self, app_client, service):
+        empty_etag = app_client.get(f"{BASE}/barbs/4/5/9.json").headers["ETag"]
+        again = app_client.get(
+            f"{BASE}/barbs/4/5/9.json", headers={"If-None-Match": empty_etag}
+        )
+        assert again.status_code == 304
+        assert "max-age=300" in again.headers["Cache-Control"]
 
 
 class TestPointValue:

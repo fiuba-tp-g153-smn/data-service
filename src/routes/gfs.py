@@ -7,6 +7,7 @@ listing endpoints report per product.
 
 import hashlib
 import json
+from typing import Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
@@ -34,6 +35,24 @@ _STEP_DESC = "Forecast step (e.g. f003)"
 def _etag(payload: dict) -> str:
     return (
         f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
+    )
+
+
+def _etag_pair(identity: str) -> Tuple[str, str]:
+    """`(hit, miss)` ETags for one tile identity.
+
+    They must differ. A gap and the object that later fills it share a URL, so a
+    single ETag would make the client's revalidation match its own cached gap
+    and answer 304 forever — the tile would never arrive.
+    """
+    return f'"{identity}"', f'"{identity}-miss"'
+
+
+def _not_modified(cache_control: str) -> Response:
+    """304 that restates the Cache-Control, so a gap keeps its short freshness."""
+    return Response(
+        status_code=status.HTTP_304_NOT_MODIFIED,
+        headers={"Cache-Control": cache_control},
     )
 
 
@@ -158,19 +177,26 @@ async def get_barb_tile(
             f"Valid: {sorted(GFS_BARB_ZOOM_LEVELS)}",
         )
 
-    etag = f'"{product_id}-{cycle}-{fxxx}-barbs-{z}-{x}-{y}"'
-    if request.headers.get("if-none-match") == etag:
+    etag, miss_etag = _etag_pair(f"{product_id}-{cycle}-{fxxx}-barbs-{z}-{x}-{y}")
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     data = await gfs_service.get_barb_tile(product_id, cycle, fxxx, z, x, y)
     if not data:
         # Empty FeatureCollection rather than 404: most tiles of a viewport hold
         # no barbs, and a 404 per tile would fill the browser console with noise
-        # for a completely normal case.
+        # for a completely normal case. Its own ETag + short TTL, so a tile that
+        # gains barbs later is not masked by the client's cached empty one.
+        if if_none_match == miss_etag:
+            return _not_modified(settings.gfs_cache_control_tile_miss)
         return Response(
             content=b'{"type":"FeatureCollection","features":[]}',
             media_type="application/geo+json",
-            headers={"Cache-Control": settings.cache_control_tile, "ETag": etag},
+            headers={
+                "Cache-Control": settings.gfs_cache_control_tile_miss,
+                "ETag": miss_etag,
+            },
         )
 
     return Response(
@@ -244,15 +270,23 @@ async def get_tile(
             f"Valid range: {GFS_ZOOM_MIN}-{GFS_ZOOM_MAX}",
         )
 
-    etag = f'"{product_id}-{cycle}-{fxxx}-{z}-{x}-{y}"'
-    if request.headers.get("if-none-match") == etag:
+    etag, miss_etag = _etag_pair(f"{product_id}-{cycle}-{fxxx}-{z}-{x}-{y}")
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     tile_data = await gfs_service.get_tile_data(product_id, cycle, fxxx, z, x, y)
     if not tile_data:
-        # gdal2tiles only emits tiles the model actually covers, so a gap at the
-        # domain edge is normal. A transparent tile keeps Leaflet quiet instead
-        # of tripping the frontend's "layer down" handler.
-        return make_transparent_tile_response(etag, settings.cache_control_tile)
+        # Two different gaps land here. gdal2tiles only emits tiles the model
+        # covers, so a hole at the domain edge is permanent; but a step is
+        # advertised as soon as its COG lands, so a hole can also just mean the
+        # pyramid is still being written. A transparent tile keeps Leaflet quiet
+        # instead of tripping the frontend's "layer down" handler, and its own
+        # ETag + short TTL keep the second case from being cached as the first.
+        if if_none_match == miss_etag:
+            return _not_modified(settings.gfs_cache_control_tile_miss)
+        return make_transparent_tile_response(
+            miss_etag, settings.gfs_cache_control_tile_miss
+        )
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)

@@ -53,9 +53,19 @@ class TestCatalogue:
         assert not product.has_tiles
 
     def test_only_500hpa_carries_barbs(self):
-        assert layers_for("500hpa") == ["heights", "isotherms", "barbs"]
-        assert "barbs" not in layers_for("250hpa")
-        assert "barbs" not in layers_for("mslp")
+        assert GFS_PRODUCTS["500hpa"].has_barbs
+        assert not GFS_PRODUCTS["250hpa"].has_barbs
+        assert not GFS_PRODUCTS["mslp"].has_barbs
+
+    def test_layers_never_advertise_barbs(self):
+        """`layers` must only hold names that resolve as `{layer}.json`.
+
+        GFS has no `{step}_barbs.json` document — barbs exist only per tile —
+        so listing them here would advertise a layer that 404s.
+        """
+        for product_id in product_ids():
+            assert "barbs" not in layers_for(product_id)
+        assert layers_for("500hpa") == ["heights", "isotherms"]
 
     def test_units_match_what_the_cogs_hold(self):
         assert GFS_PRODUCTS["mslp"].unit == "hPa"

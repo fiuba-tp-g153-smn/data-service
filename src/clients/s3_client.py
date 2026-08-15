@@ -523,11 +523,6 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         return f"{cycle}_{fxxx}"
 
     @staticmethod
-    def gfs_cycle_prefix(s3_segment: str) -> str:
-        """Prefix holding every cycle of a product, for listing cycles."""
-        return f"tiles/models/gfs/{s3_segment}/"
-
-    @staticmethod
     def gfs_cog_cycle_prefix(s3_segment: str) -> str:
         """Prefix holding every COG of one product, for listing cycles."""
         return f"cog/models/gfs/{s3_segment}/"
@@ -546,13 +541,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         step = cls._gfs_step_id(cycle, fxxx)
         return f"cog/models/gfs/{s3_segment}/{cycle}/{step}.tif"
 
+    @staticmethod
+    def gfs_geojson_cycle_prefix(s3_segment: str, cycle: str) -> str:
+        """Prefix holding every single-file overlay of one cycle."""
+        return f"geojson/models/gfs/{s3_segment}/{cycle}/"
+
     @classmethod
     def build_gfs_geojson_key(
         cls, s3_segment: str, cycle: str, fxxx: str, layer: str
     ) -> str:
         """Build S3 key for a single-file GFS overlay (isobars, heights, ...)."""
         step = cls._gfs_step_id(cycle, fxxx)
-        return f"geojson/models/gfs/{s3_segment}/{cycle}/{step}_{layer}.json"
+        return f"{cls.gfs_geojson_cycle_prefix(s3_segment, cycle)}{step}_{layer}.json"
 
     @classmethod
     def build_gfs_barb_tile_key(  # pylint: disable=too-many-arguments,too-many-positional-arguments
