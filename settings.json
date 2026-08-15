@@ -63,7 +63,7 @@
     "online_fallback_enabled": true,
     "provider_availability_ttl": 240,
     "cache_control_tile": "public, max-age=2592000, immutable",
-    "cache_control_tile_miss": "public, max-age=300, immutable",
+    "cache_control_tile_miss": "public, max-age=300",
     "provider_unhealthy_threshold": 5,
     "provider_cooldown_schedule": [300, 900, 3600, 10800, 21600],
     "providers": [
@@ -108,7 +108,6 @@
     "redis_series_ttl_seconds": 3600,
     "redis_animation_warm_buckets": 24,
     "series_hours": 48,
-    "api_key_auth_enabled": true,
-    "keystore_db_path": "data/weather_stations_keys.sqlite"
+    "api_key_auth_enabled": true
   }
 }

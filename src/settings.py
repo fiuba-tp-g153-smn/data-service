@@ -446,7 +446,6 @@ class Settings:
             "weather_stations_redis_animation_warm_buckets",
             "weather_stations_series_hours",
             "weather_stations_api_key_auth_enabled",
-            "weather_stations_keystore_db_path",
             "metrics_enabled",
             "metrics_db_path",
             "metrics_retention_days",
@@ -510,8 +509,8 @@ class Settings:
         self.s3_tiles_data_bucket_name = os.getenv(
             "S3_TILES_DATA_BUCKET_NAME", self.s3_tiles_data_bucket_name
         )
-        self.s3_tiles_data_secure = (
-            os.getenv("S3_TILES_DATA_SECURE", "false").lower() == "true"
+        self.s3_tiles_data_secure = self._env_bool(
+            "S3_TILES_DATA_SECURE", self.s3_tiles_data_secure
         )
 
         # Redis
@@ -524,7 +523,7 @@ class Settings:
         self.gdal_curl_use_head = os.getenv(
             "CPL_VSIL_CURL_USE_HEAD", self.gdal_curl_use_head
         )
-        self.gdal_vsi_cache = os.getenv("VSI_CACHE", "TRUE").upper() == "TRUE"
+        self.gdal_vsi_cache = self._env_bool("VSI_CACHE", self.gdal_vsi_cache)
         self.gdal_vsi_cache_size = os.getenv("VSI_CACHE_SIZE", self.gdal_vsi_cache_size)
         self.gdal_vsicurl_cache_size = os.getenv(
             "CPL_VSIL_CURL_CACHE_SIZE", self.gdal_vsicurl_cache_size
