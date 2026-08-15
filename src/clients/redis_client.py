@@ -6,6 +6,7 @@ and sync observability. Replaces filesystem storage for satellite tiles
 and provides a shared cache for radar tiles.
 """
 
+import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -24,14 +25,47 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     index management, and sync status tracking.
     """
 
-    def __init__(self, redis_url: str):
+    def __init__(
+        self,
+        redis_url: str,
+        *,
+        max_connections: int = 100,
+        socket_timeout_seconds: float = 5.0,
+        socket_connect_timeout_seconds: float = 2.0,
+        health_check_interval_seconds: int = 30,
+    ) -> None:
+        # pylint: disable=too-many-arguments
         self._redis_url = redis_url
+        self._max_connections = max_connections
+        self._socket_timeout_seconds = socket_timeout_seconds
+        self._socket_connect_timeout_seconds = socket_connect_timeout_seconds
+        self._health_check_interval_seconds = health_check_interval_seconds
         self._redis: Optional[aioredis.Redis] = None
+        self._connect_lock = asyncio.Lock()
 
     async def connect(self) -> None:
-        """Connect to Redis."""
-        self._redis = aioredis.from_url(self._redis_url, decode_responses=False)
-        logger.info("Connected to Redis at %s", self._redis_url)
+        """Connect to Redis (idempotent; race-safe under concurrent first-use).
+
+        The pool is bounded and every socket op is time-bounded, so a hung or
+        swapping Redis fails fast instead of blocking every awaiting coroutine
+        — sync loop and request serving alike — indefinitely. The lock + double
+        check make a first-use race build a single pool rather than leaking one.
+        """
+        if self._redis is not None:
+            return
+        async with self._connect_lock:
+            if self._redis is not None:
+                return
+            self._redis = aioredis.from_url(
+                self._redis_url,
+                decode_responses=False,
+                max_connections=self._max_connections,
+                socket_timeout=self._socket_timeout_seconds,
+                socket_connect_timeout=self._socket_connect_timeout_seconds,
+                socket_keepalive=True,
+                health_check_interval=self._health_check_interval_seconds,
+            )
+            logger.info("Connected to Redis at %s", self._redis_url)
 
     async def close(self) -> None:
         """Close the Redis connection."""
@@ -72,7 +106,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments
         """Store a satellite tile in Redis, optionally with TTL."""
         key = f"tile:sat:{channel_dir}/{tileset_id}/{z}/{x}/{y}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -106,12 +140,14 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         return [m.decode() for m in members]
 
     async def delete_satellite_tileset(self, channel_dir: str, tileset_id: str) -> None:
-        """Delete a tileset from Redis: remove index entry and all tile keys."""
-        # Remove from index
-        idx_key = f"idx:sat:{channel_dir}"
-        await self._conn.zrem(idx_key, tileset_id.encode())
+        """Delete a tileset from Redis: all tile keys first, then the index entry.
 
-        # Delete all tile keys for this tileset
+        Data-before-index ordering means a crash mid-delete leaves an index entry
+        pointing at already-removed tiles (a harmless re-delete next cycle) rather
+        than orphaned tile bytes with no index pointer, which — since tiles carry
+        a TTL but the orphan is no longer trimmed via the index — would linger.
+        """
+        # Delete all tile keys for this tileset first
         pattern = f"tile:sat:{channel_dir}/{tileset_id}/*"
         cursor = 0
         while True:
@@ -120,6 +156,10 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
                 await self._conn.delete(*keys)
             if cursor == 0:
                 break
+
+        # Then remove the index entry
+        idx_key = f"idx:sat:{channel_dir}"
+        await self._conn.zrem(idx_key, tileset_id.encode())
 
     async def trim_satellite_index(self, channel_dir: str, min_score: float) -> int:
         """Drop tilesets older than min_score (epoch seconds) from the index.
@@ -274,7 +314,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments
         """Store an ECMWF total precipitation tile in Redis, optionally with TTL."""
         key = f"tile:ecmwf_tp:{forecast_ts}/{period_ts}/{z}/{x}/{y}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -347,7 +387,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     ) -> None:
         """Store an ECMWF MSLP isobars GeoJSON in Redis, optionally with TTL."""
         key = f"geojson:ecmwf_mslp:{forecast_ts}/{timestamp_ts}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -407,7 +447,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments
         """Store a WRF tile in Redis, optionally with TTL."""
         key = f"tile:wrf:{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -494,7 +534,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Store a WRF GeoJSON layer (barbs / contours) in Redis."""
         key = f"geojson:wrf:{product_id}/{init_tag}/{fxxx}/{layer}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -621,7 +661,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Store a single-file GFS overlay (isobars, thickness, heights, ...)."""
         key = f"geojson:gfs:{product_id}/{cycle}/{fxxx}/{layer}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -674,7 +714,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Cache one raster tile fetched on demand from S3."""
         key = f"tile:gfs:{product_id}/{cycle}/{fxxx}/{z}/{x}/{y}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)
@@ -706,7 +746,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     ) -> None:
         """Store a base map tile in Redis, optionally with TTL."""
         key = f"tile:basemap:{provider_id}:{z}:{x}:{y}"
-        if ttl:
+        if ttl is not None:
             await self._conn.set(key, data, ex=ttl)
         else:
             await self._conn.set(key, data)

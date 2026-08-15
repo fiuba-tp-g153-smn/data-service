@@ -40,6 +40,13 @@ class Settings:
     # of either bucket independently.
     s3_api_keys_bucket_name: str = "api-keys"
     redis_url: str = ""
+    # Redis connection-pool bounds + socket timeouts. A hung/swapping Redis must
+    # fail fast rather than block every awaiting coroutine forever; the pool is
+    # capped so a full-sync fan-out can't balloon FDs on the shared box.
+    redis_max_connections: int = 100
+    redis_socket_timeout_seconds: float = 5.0
+    redis_socket_connect_timeout_seconds: float = 2.0
+    redis_health_check_interval_seconds: int = 30
     # SMN API credentials + base URL (env-only). The base is shared by the
     # token endpoint (`/api-token/auth`) and the stations endpoint
     # (`/weather/station`); SmnApiClient appends the path.

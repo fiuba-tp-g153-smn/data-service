@@ -11,12 +11,28 @@ async def test_connect_and_close():
         mock_redis = AsyncMock()
         mock_aioredis.from_url.return_value = mock_redis
 
-        client = RedisClient("redis://localhost:6379/0")
+        client = RedisClient(
+            "redis://localhost:6379/0",
+            max_connections=100,
+            socket_timeout_seconds=5.0,
+            socket_connect_timeout_seconds=2.0,
+            health_check_interval_seconds=30,
+        )
         await client.connect()
 
         mock_aioredis.from_url.assert_called_once_with(
-            "redis://localhost:6379/0", decode_responses=False
+            "redis://localhost:6379/0",
+            decode_responses=False,
+            max_connections=100,
+            socket_timeout=5.0,
+            socket_connect_timeout=2.0,
+            socket_keepalive=True,
+            health_check_interval=30,
         )
+
+        # connect() is idempotent: a second call must not build a second pool.
+        await client.connect()
+        mock_aioredis.from_url.assert_called_once()
 
         await client.close()
         mock_redis.close.assert_awaited_once()
@@ -90,6 +106,12 @@ async def test_delete_satellite_tileset():
 
     client._redis.zrem.assert_awaited_once()
     client._redis.delete.assert_awaited_once()
+
+    # Tile data must be deleted before the index entry (orphan-on-crash safety):
+    # a crash between the two should leave a stale index pointer, never orphaned
+    # tile bytes with no index to trim them.
+    call_names = [c[0] for c in client._redis.mock_calls if c[0] in ("delete", "zrem")]
+    assert call_names.index("delete") < call_names.index("zrem")
 
 
 @pytest.mark.asyncio

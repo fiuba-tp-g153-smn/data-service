@@ -67,6 +67,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         self._session = aioboto3.Session()
         self._exit_stack: Optional[AsyncExitStack] = None
         self._client: Optional[S3ClientType] = None
+        self._connect_lock = asyncio.Lock()
 
     @staticmethod
     def _build_config(
@@ -94,21 +95,30 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         return f"{protocol}://{self._endpoint}"
 
     async def connect(self) -> None:
-        """Create persistent S3 client connection."""
+        """Create persistent S3 client connection (idempotent, race-safe).
+
+        The lock + double check ensure two coroutines racing first-use build a
+        single client; without it the second overwrites the first, leaking an
+        aioboto3 client that is never aclose()d.
+        """
         if self._client:
             return
-        self._exit_stack = AsyncExitStack()
-        client_kwargs: dict = {
-            "endpoint_url": self._get_endpoint_url(),
-            "aws_access_key_id": self._access_key,
-            "aws_secret_access_key": self._secret_key,
-        }
-        if self._config is not None:
-            client_kwargs["config"] = self._config
-        ctx = self._session.client("s3", **client_kwargs)
+        async with self._connect_lock:
+            if self._client:
+                return
+            exit_stack = AsyncExitStack()
+            client_kwargs: dict = {
+                "endpoint_url": self._get_endpoint_url(),
+                "aws_access_key_id": self._access_key,
+                "aws_secret_access_key": self._secret_key,
+            }
+            if self._config is not None:
+                client_kwargs["config"] = self._config
+            ctx = self._session.client("s3", **client_kwargs)
 
-        self._client = await self._exit_stack.enter_async_context(ctx)
-        logger.info("S3 client connected to %s", self._get_endpoint_url())
+            self._client = await exit_stack.enter_async_context(ctx)
+            self._exit_stack = exit_stack
+            logger.info("S3 client connected to %s", self._get_endpoint_url())
 
     async def close(self) -> None:
         """Close the S3 client connection."""
