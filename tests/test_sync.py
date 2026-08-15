@@ -82,6 +82,68 @@ async def test_sync_prefix_to_redis_no_objects(mock_redis_client):
     mock_redis_client.store_satellite_tile.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_sync_releases_download_slot_before_redis_write(mock_redis_client):
+    """A blocked Redis write must not hold an S3 download slot (decoupling).
+
+    With max_concurrent_downloads=1, both tiles must still get *downloaded*
+    while their Redis writes are blocked — proving the download semaphore is
+    released before the write. Under the old coupled code only one tile would
+    download (the single slot stays held through the blocked store).
+    """
+    client = S3Client(
+        "endpoint", "access", "secret", "bucket", max_concurrent_downloads=1
+    )
+    client._list_objects = AsyncMock(
+        return_value=[
+            {"Key": "tiles/band_13/tileset1/5/10/15.webp", "Size": 100},
+            {"Key": "tiles/band_13/tileset1/5/10/16.webp", "Size": 100},
+        ]
+    )
+
+    get_calls = 0
+
+    async def fake_get_object(**_kwargs):
+        nonlocal get_calls
+        get_calls += 1
+        body = AsyncMock()
+        body.read = AsyncMock(return_value=b"tile")
+        return {"Body": body}
+
+    mock_s3_client = AsyncMock()
+    mock_s3_client.get_object = AsyncMock(side_effect=fake_get_object)
+    client._session.client = MagicMock()
+    client._session.client.return_value.__aenter__ = AsyncMock(
+        return_value=mock_s3_client
+    )
+    client._session.client.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    release = asyncio.Event()
+
+    async def blocking_store(*_args, **_kwargs):
+        await release.wait()
+
+    mock_redis_client.store_satellite_tile = AsyncMock(side_effect=blocking_store)
+
+    task = asyncio.create_task(
+        client.sync_prefix_to_redis(
+            mock_redis_client, "tiles/band_13/tileset1/", "band_13", "tileset1"
+        )
+    )
+    # Pump the loop (no wall-clock sleeps) while both Redis writes stay blocked.
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if get_calls >= 2:
+            break
+
+    assert get_calls == 2, "both tiles should download while Redis writes are blocked"
+
+    release.set()
+    downloaded = await task
+    assert downloaded == 2
+    assert mock_redis_client.store_satellite_tile.await_count == 2
+
+
 def test_build_satellite_tile_key_uses_tiles_root():
     """Satellite tile keys must be rooted at tiles/<band_id>/..."""
     key = S3Client.build_satellite_tile_key("band_13", "20260740300213", 5, 10, 15)
