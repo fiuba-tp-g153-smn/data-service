@@ -69,6 +69,7 @@ class GfsOnDemandStrategy:
         tile_ttl: int,
         geojson_ttl: int,
         listing_ttl: int,
+        cycles_to_keep: int = 0,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
@@ -76,6 +77,10 @@ class GfsOnDemandStrategy:
         self._tile_ttl = tile_ttl
         self._geojson_ttl = geojson_ttl
         self._listing_ttl = listing_ttl
+        # 0 = no cap (the S3 listing is served whole). Set from
+        # `gfs_cycles_to_keep` so this path and the sync loop agree on how many
+        # cycles the API exposes.
+        self._cycles_to_keep = cycles_to_keep
         self._cache_tasks: Set[asyncio.Task] = set()
         self._cache_semaphore = asyncio.Semaphore(_CACHE_WRITE_CONCURRENCY)
 
@@ -172,6 +177,10 @@ class GfsOnDemandStrategy:
         cycles = sorted(
             (name for name in (leaf_segment(s) for s in subdirs) if name), reverse=True
         )
+        # Same cap the sync loop applies, so a cold or evicted index does not
+        # start advertising a cycle the warm path deliberately hides.
+        if self._cycles_to_keep > 0:
+            cycles = cycles[: self._cycles_to_keep]
 
         await self._redis.cache_listing(
             cache_key, json.dumps(cycles).encode(), self._listing_ttl
@@ -270,11 +279,12 @@ class GfsFullSyncStrategy:
         tile_ttl: int = 0,
         geojson_ttl: int = 0,
         listing_ttl: int = 0,
+        cycles_to_keep: int = 0,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
         self._fallback = GfsOnDemandStrategy(
-            redis_client, s3_client, tile_ttl, geojson_ttl, listing_ttl
+            redis_client, s3_client, tile_ttl, geojson_ttl, listing_ttl, cycles_to_keep
         )
 
     async def get_tile(
