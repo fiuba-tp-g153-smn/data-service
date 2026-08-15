@@ -146,6 +146,11 @@ class Settings:
     gfs_cycles_to_keep: int = 2
     gfs_sync_interval_seconds: int = 120
     gfs_sync_timeout_seconds: int = 900
+    # Cache-Control for a *missing* GFS tile / empty barb tile: short and NOT
+    # `immutable`, unlike `cache_control_tile`. A step is advertised as soon as
+    # its COG lands, often before the raster pyramid is written, so a gap is
+    # normal AND temporary.
+    gfs_cache_control_tile_miss: str = "public, max-age=300"
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -383,6 +388,7 @@ class Settings:
             "gfs_cycles_to_keep",
             "gfs_sync_interval_seconds",
             "gfs_sync_timeout_seconds",
+            "gfs_cache_control_tile_miss",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -579,6 +585,9 @@ class Settings:
         )
         self.gfs_sync_interval_seconds = self._env_int(
             "GFS_SYNC_INTERVAL_SECONDS", self.gfs_sync_interval_seconds
+        )
+        self.gfs_cache_control_tile_miss = os.getenv(
+            "GFS_CACHE_CONTROL_TILE_MISS", self.gfs_cache_control_tile_miss
         )
         self.gfs_sync_timeout_seconds = self._env_int(
             "GFS_SYNC_TIMEOUT_SECONDS", self.gfs_sync_timeout_seconds
