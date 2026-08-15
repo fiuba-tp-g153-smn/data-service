@@ -70,6 +70,7 @@ class GfsSyncService(DomainSyncService):
 
     async def _sync_product(self, product: GfsProduct) -> int:
         """Mirror the newest cycles of one product. Returns overlays copied."""
+        # for mypy: `_sync_gfs` raises before reaching here if either is None.
         assert self._client is not None and self._redis_client is not None
 
         cycles = await self._active_cycles(product)
@@ -96,7 +97,7 @@ class GfsSyncService(DomainSyncService):
         produces no raster, so listing tiles would make it look like it has no
         cycles at all.
         """
-        assert self._client is not None
+        assert self._client is not None  # for mypy: guarded in `_sync_gfs`
         prefixes = await self._client.get_subdirectories(
             S3Client.gfs_cog_cycle_prefix(product.s3_segment)
         )
@@ -109,7 +110,7 @@ class GfsSyncService(DomainSyncService):
 
     async def _list_steps(self, product: GfsProduct, cycle: str) -> List[str]:
         """Steps of a cycle, recovered from the COG basenames."""
-        assert self._client is not None
+        assert self._client is not None  # for mypy: guarded in `_sync_gfs`
         basenames = await self._client.list_object_basenames(
             f"{S3Client.gfs_cog_cycle_prefix(product.s3_segment)}{cycle}/",
             ".tif",
@@ -128,6 +129,7 @@ class GfsSyncService(DomainSyncService):
         the TTL), while overlays are only fetched when absent — so a re-scan of
         an already-mirrored cycle costs no S3 GETs.
         """
+        # for mypy: `_sync_gfs` raises before reaching here if either is None.
         assert self._client is not None and self._redis_client is not None
 
         await self._redis_client.add_gfs_index(

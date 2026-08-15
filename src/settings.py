@@ -917,6 +917,9 @@ class Settings:
                 f"Invalid app_role={self.app_role!r}; "
                 f"expected one of {self._APP_ROLES}"
             )
+        for _name in ("gfs_cycles_to_keep", "gfs_tile_ttl", "gfs_geojson_ttl"):
+            if getattr(self, _name) < 1:
+                raise ValueError(f"{_name} must be >= 1 (got {getattr(self, _name)})")
         if self.weather_stations_scrape_interval_seconds < 60:
             raise ValueError(
                 "weather_stations_scrape_interval_seconds must be >= 60 "
