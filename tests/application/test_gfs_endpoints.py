@@ -224,6 +224,14 @@ class TestOverlays:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/geo+json")
 
+    def test_matching_etag_returns_304(self, app_client, service):
+        service.get_geojson = AsyncMock(return_value=b'{"type":"FeatureCollection"}')
+        first = app_client.get(f"{BASE}/heights.json")
+        second = app_client.get(
+            f"{BASE}/heights.json", headers={"If-None-Match": first.headers["ETag"]}
+        )
+        assert second.status_code == 304
+
 
 class TestBarbTiles:
     def test_missing_barb_tile_is_an_empty_collection(self, app_client, service):
