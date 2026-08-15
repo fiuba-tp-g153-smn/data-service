@@ -60,7 +60,7 @@ x-ds-common: &ds-common
   volumes:
     - dataservice_data:/app/data
   healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
     interval: 10s
     timeout: 10s
     retries: 5

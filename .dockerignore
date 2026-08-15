@@ -1,6 +1,6 @@
 Dockerfile
 Dockerfile.dev
-Dockerfile.run_Test
+Dockerfile.run_test
 .dockerignore
 
 __pycache__
