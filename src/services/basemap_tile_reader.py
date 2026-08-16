@@ -58,6 +58,8 @@ class BasemapTileReader:
         request_deadline_seconds: float = 4.0,
         redis_cache_enabled: bool = True,
         s3_cache_enabled: bool = True,
+        negative_cache_enabled: bool = True,
+        negative_cache_ttl: int = 300,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
@@ -67,6 +69,11 @@ class BasemapTileReader:
         self._tile_ttl = tile_ttl
         self._online_fallback = online_fallback
         self._redis_cache_enabled = redis_cache_enabled
+        # The miss tombstone lives in Redis, so it can only work when the Redis
+        # tier is enabled. Short-circuits repeat requests for a tile that missed
+        # the whole chain, sparing upstream a relay per request.
+        self._negative_cache_enabled = negative_cache_enabled and redis_cache_enabled
+        self._negative_cache_ttl = negative_cache_ttl
         # An s3_client of None is only valid if S3 is off in both read and
         # write directions (relay_only mode). Enforce the invariant here.
         self._s3_cache_enabled = s3_cache_enabled and s3_client is not None
@@ -133,6 +140,15 @@ class BasemapTileReader:
         """Run the prod → Redis → S3 chain; return the first hit or None."""
         s3_key = S3Client.build_basemap_tile_key(provider_id, z, x, y)
 
+        # Tier 0 — negative cache. A recent full-chain miss short-circuits here
+        # so a tile that legitimately doesn't exist upstream isn't relayed on
+        # every repeat request (empty-ocean / above-coverage panning).
+        if self._negative_cache_enabled and await self._safe_get_miss(
+            provider_id, z, x, y
+        ):
+            self._log_served("miss-cache", provider_id, z, x, y)
+            return None
+
         # Tier 1 — external provider (upstream). Only HTTP errors count as
         # failure; a 200 with bytes is success even if visually empty.
         prod_data = await self._try_provider(provider_id, z, x, y)
@@ -171,6 +187,15 @@ class BasemapTileReader:
                 self._log_served("s3", provider_id, z, x, y)
                 return s3_data
 
+        # Confirmed full-chain miss — tombstone it so repeats short-circuit at
+        # tier 0 until the TTL lapses or the scraper stores the tile.
+        if self._negative_cache_enabled:
+            self._schedule_cache_write(
+                self._redis.mark_basemap_tile_miss(
+                    provider_id, z, x, y, self._negative_cache_ttl
+                ),
+                label=f"miss-mark {s3_key}",
+            )
         return None
 
     async def _try_provider(
@@ -209,6 +234,25 @@ class BasemapTileReader:
                 "Redis lookup failed for %s/%d/%d/%d: %s", provider_id, z, x, y, exc
             )
             return None
+
+    async def _safe_get_miss(self, provider_id: str, z: int, x: int, y: int) -> bool:
+        """Check the miss tombstone, swallowing transport errors as 'no tombstone'.
+
+        A Redis hiccup must never turn into a short-circuit that hides a tile —
+        on any error we fall through to the normal provider/S3 chain.
+        """
+        try:
+            return await self._redis.get_basemap_tile_miss(provider_id, z, x, y)
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
+            logger.warning(
+                "Miss-cache lookup failed for %s/%d/%d/%d: %s",
+                provider_id,
+                z,
+                x,
+                y,
+                exc,
+            )
+            return False
 
     async def _safe_s3_get(self, s3_key: str) -> Optional[bytes]:
         """S3 GET that swallows transport errors and returns None."""

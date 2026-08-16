@@ -387,6 +387,8 @@ async def configure_basemap(
         request_deadline_seconds=settings.basemap_request_deadline_seconds,
         redis_cache_enabled=redis_cache_enabled,
         s3_cache_enabled=s3_cache_enabled,
+        negative_cache_enabled=settings.basemap_negative_cache_enabled,
+        negative_cache_ttl=settings.basemap_negative_cache_ttl,
     )
 
     scraper_http_client: Optional[HttpTileClient] = None
