@@ -20,7 +20,7 @@
 services:
   redis:
     container_name: data-service-redis-dev
-    image: redis:8.6-alpine
+    image: redis:8.10-trixie
     command: redis-server --maxmemory 7gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
     restart: unless-stopped
     # Published to the host so the cache is reachable from another host
