@@ -73,6 +73,9 @@ class GfsService:
         if product is None or self._strategy is None:
             return None
 
+        if cycle not in await self._strategy.list_cycles(product_id):
+            return None
+
         steps = await self._strategy.list_steps(product_id, cycle)
         if not steps:
             return None

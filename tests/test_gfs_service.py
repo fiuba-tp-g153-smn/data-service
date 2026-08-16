@@ -152,6 +152,19 @@ class TestListSteps:
         )
 
     @pytest.mark.asyncio
+    async def test_cycle_outside_the_advertised_window_returns_none(self):
+        """tiles-processor keeps more cycles in S3 than the API advertises."""
+        strategy = FakeStrategy(cycles=["20260808T1200Z"], steps=["f000"])
+        assert await _service(strategy).list_steps("500hpa", CYCLE) is None
+
+    @pytest.mark.asyncio
+    async def test_retired_cycle_never_reaches_the_strategy_listing(self):
+        """The guard must cut before the S3 fallback can resurrect the cycle."""
+        strategy = FakeStrategy(cycles=["20260808T1200Z"], steps=["f000"])
+        await _service(strategy).list_steps("500hpa", CYCLE)
+        assert not [call for call in strategy.calls if call[0] == "list_steps"]
+
+    @pytest.mark.asyncio
     async def test_each_step_carries_its_valid_timestamp(self):
         strategy = FakeStrategy(steps=["f000", "f003"])
         data = await _service(strategy).list_steps("500hpa", CYCLE)
