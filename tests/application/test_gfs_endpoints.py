@@ -61,6 +61,94 @@ class TestRouteResolution:
         service.get_tile_data.assert_awaited_once()
         service.get_geojson.assert_not_called()
 
+    def test_secondary_point_is_not_swallowed_by_the_tile_route(
+        self, app_client, service
+    ):
+        """It carries the same segment count as `{z}/{x}/{y}.webp`."""
+        with patch("routes.gfs.point_value_service") as pvs:
+            pvs.sample_gfs_secondary_point = AsyncMock(
+                side_effect=RuntimeError("reached")
+            )
+            with pytest.raises(RuntimeError, match="reached"):
+                app_client.get(f"{BASE}/secondary/temperature/point?lat=-34&lon=-64")
+        service.get_tile_data.assert_not_called()
+        service.get_geojson.assert_not_called()
+
+    def test_secondary_point_does_not_shadow_the_primary_point(
+        self, app_client, service
+    ):
+        with patch("routes.gfs.point_value_service") as pvs:
+            pvs.sample_gfs_point = AsyncMock(side_effect=RuntimeError("primary"))
+            pvs.sample_gfs_secondary_point = AsyncMock(
+                side_effect=RuntimeError("secondary")
+            )
+            with pytest.raises(RuntimeError, match="primary"):
+                app_client.get(f"{BASE}/point?lat=-34&lon=-64")
+
+
+class TestSecondaryPointEndpoint:
+    """`/{product}/{cycle}/{fxxx}/secondary/{variable}/point`."""
+
+    def test_returns_value_and_unit(self, app_client, service):
+        from services.point_value_service import PointSample  # pylint: disable=C0415
+
+        with patch("routes.gfs.point_value_service") as pvs:
+            pvs.sample_gfs_secondary_point = AsyncMock(
+                return_value=PointSample(value=5520.0, unit="gpm")
+            )
+            response = app_client.get(
+                f"{BASE}/secondary/geopotential/point?lat=-34&lon=-64"
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["value"] == 5520.0
+        assert body["unit"] == "gpm"
+        assert body["variable"] == "geopotential"
+
+    def test_passes_the_variable_through_to_the_service(self, app_client, service):
+        from services.point_value_service import PointSample  # pylint: disable=C0415
+
+        with patch("routes.gfs.point_value_service") as pvs:
+            pvs.sample_gfs_secondary_point = AsyncMock(
+                return_value=PointSample(value=-18.0, unit="°C")
+            )
+            app_client.get(f"{BASE}/secondary/temperature/point?lat=-34&lon=-64")
+            args = pvs.sample_gfs_secondary_point.await_args.args
+
+        assert args[0] == "500hpa"
+        assert args[3] == "temperature"
+
+    def test_unknown_variable_is_404(self, app_client, service):
+        """Rejected by the catalogue whitelist, never sent to S3."""
+        response = app_client.get(f"{BASE}/secondary/vorticity/point?lat=-34&lon=-64")
+        assert response.status_code == 404
+        assert response.json()["detail"] == "cog_not_found"
+
+    def test_temperature_is_404_at_250(self, app_client, service):
+        """250 hPa never loads temperature, so the variable does not exist there."""
+        base_250 = f"/products/gfs/250hpa/{CYCLE}/{FXXX}"
+        response = app_client.get(
+            f"{base_250}/secondary/temperature/point?lat=-34&lon=-64"
+        )
+        assert response.status_code == 404
+
+    def test_missing_cog_is_404(self, app_client, service):
+        from services.point_value_service import (  # pylint: disable=C0415
+            CogNotFoundError,
+        )
+
+        with patch("routes.gfs.point_value_service") as pvs:
+            pvs.sample_gfs_secondary_point = AsyncMock(side_effect=CogNotFoundError())
+            response = app_client.get(
+                f"{BASE}/secondary/geopotential/point?lat=-34&lon=-64"
+            )
+        assert response.status_code == 404
+
+    def test_invalid_latlon_is_422(self, app_client, service):
+        response = app_client.get(f"{BASE}/secondary/geopotential/point?lat=99&lon=-64")
+        assert response.status_code == 422
+
 
 class TestListings:
     def test_unknown_product_is_404(self, app_client, service):

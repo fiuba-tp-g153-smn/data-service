@@ -541,6 +541,14 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         step = cls._gfs_step_id(cycle, fxxx)
         return f"cog/models/gfs/{s3_segment}/{cycle}/{step}.tif"
 
+    @classmethod
+    def build_gfs_secondary_cog_key(
+        cls, s3_segment: str, cycle: str, variable: str, fxxx: str
+    ) -> str:
+        """Build S3 key for a GFS secondary point-query COG."""
+        step = cls._gfs_step_id(cycle, fxxx)
+        return f"cog/models/gfs/{s3_segment}/{cycle}/{variable}/{step}.tif"
+
     @staticmethod
     def gfs_geojson_cycle_prefix(s3_segment: str, cycle: str) -> str:
         """Prefix holding every single-file overlay of one cycle."""

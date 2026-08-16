@@ -72,3 +72,16 @@ class GfsPointValueResponse(BaseModel):
     lon: float
     value: float
     unit: str
+
+
+class GfsSecondaryPointValueResponse(BaseModel):
+    """Response for a point-value query on a GFS secondary-variable COG."""
+
+    product_id: str
+    cycle: str
+    fxxx: str
+    variable: str
+    lat: float
+    lon: float
+    value: float
+    unit: str
