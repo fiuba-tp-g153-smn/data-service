@@ -198,7 +198,9 @@ async def test_ensure_lifecycle_expiration_scopes_rule_to_given_prefix():
     client._ensure_connected = AsyncMock(return_value=fake)  # type: ignore[assignment]
 
     await client.ensure_lifecycle_expiration(
-        days=2, rule_id="weather-stations-expiration", prefix="weather-stations/snapshots/"
+        days=2,
+        rule_id="weather-stations-expiration",
+        prefix="weather-stations/snapshots/",
     )
 
     _, kwargs = fake.put_bucket_lifecycle_configuration.call_args
@@ -347,3 +349,50 @@ async def test_has_any_object_returns_false_on_client_error(monkeypatch, caplog)
         "S3 unavailable while checking prefix" in record.message
         for record in caplog.records
     )
+
+
+# --------------------------------------------------------------------------- #
+# Listing contract: raise on infra error (sync counts it) vs tolerant try_* / #
+# list_object_keys (read paths degrade to []) — BUG-03.                        #
+# --------------------------------------------------------------------------- #
+
+
+def _client_with_failing_paginator() -> S3Client:
+    """S3Client whose paginator errors like a transient S3 outage."""
+    client = _make_client()
+    fake = MagicMock()
+    fake.get_paginator = MagicMock(
+        side_effect=EndpointConnectionError(endpoint_url="http://127.0.0.1:1")
+    )
+    client._client = fake  # type: ignore[assignment]
+    return client
+
+
+@pytest.mark.asyncio
+async def test_list_objects_raises_on_infra_error():
+    """A real S3 outage must surface, not be masked as an empty listing."""
+    client = _client_with_failing_paginator()
+    with pytest.raises(EndpointConnectionError):
+        await client._list_objects("tiles/")
+
+
+@pytest.mark.asyncio
+async def test_get_subdirectories_raises_on_infra_error():
+    """Sync loops rely on this raising so an outage is counted, not 'no dirs'."""
+    client = _client_with_failing_paginator()
+    with pytest.raises(EndpointConnectionError):
+        await client.get_subdirectories("tiles/")
+
+
+@pytest.mark.asyncio
+async def test_try_get_subdirectories_degrades_to_empty():
+    """Read paths degrade to [] rather than 5xx on a transient S3 error."""
+    client = _client_with_failing_paginator()
+    assert await client.try_get_subdirectories("tiles/") == []
+
+
+@pytest.mark.asyncio
+async def test_list_object_keys_degrades_to_empty():
+    """list_object_keys keeps its documented '[] on error' read tolerance."""
+    client = _client_with_failing_paginator()
+    assert await client.list_object_keys("tiles/") == []

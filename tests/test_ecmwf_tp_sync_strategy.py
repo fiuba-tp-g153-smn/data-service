@@ -138,7 +138,7 @@ async def test_on_demand_list_forecasts_s3_fallback(mock_redis_client):
     mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
 
     mock_s3 = MagicMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    mock_s3.try_get_subdirectories = AsyncMock(
         return_value=[
             f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T1200Z/",
             f"{S3Client.ECMWF_TP_TILES_PREFIX}/20260330T0000Z/",
@@ -182,7 +182,7 @@ async def test_on_demand_list_periods_s3_fallback(mock_redis_client):
     mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
 
     mock_s3 = MagicMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    mock_s3.try_get_subdirectories = AsyncMock(
         return_value=[
             f"{S3Client.ECMWF_TP_TILES_PREFIX}/{FORECAST_TS}/{PERIOD_TS}/",
         ]
@@ -212,7 +212,7 @@ async def test_on_demand_list_periods_filters_old_format(mock_redis_client):
     mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
 
     mock_s3 = MagicMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    mock_s3.try_get_subdirectories = AsyncMock(
         return_value=[
             f"{S3Client.ECMWF_TP_TILES_PREFIX}/{FORECAST_TS}/20260330T1500Z/",
             f"{S3Client.ECMWF_TP_TILES_PREFIX}/{FORECAST_TS}/20260330T1200Z-20260330T1500Z/",

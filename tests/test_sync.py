@@ -165,7 +165,8 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
     mock_redis_client.cache_listing = AsyncMock()
 
     mock_s3 = AsyncMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    # On-demand read strategies use the tolerant listing variant.
+    mock_s3.try_get_subdirectories = AsyncMock(
         side_effect=[
             [
                 "tiles/radar/RMA1/DBZH/elev0/",

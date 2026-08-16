@@ -30,7 +30,9 @@ def _s3_with_tile(data=TILE) -> MagicMock:
 
 def _s3_listing(prefixes) -> MagicMock:
     s3 = MagicMock()
-    s3.get_subdirectories = AsyncMock(return_value=prefixes)
+    # Read strategies use the tolerant listing variant (degrades to [] on an S3
+    # blip instead of 5xx); the raising get_subdirectories is for the sync loops.
+    s3.try_get_subdirectories = AsyncMock(return_value=prefixes)
     return s3
 
 

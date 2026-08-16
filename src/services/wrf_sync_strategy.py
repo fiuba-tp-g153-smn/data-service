@@ -232,7 +232,7 @@ class WrfOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(f"{WRF_S3_PREFIX}/{product_id}")
+        subdirs = await self._s3.try_get_subdirectories(f"{WRF_S3_PREFIX}/{product_id}")
         init_runs = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -256,7 +256,7 @@ class WrfOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(
+        subdirs = await self._s3.try_get_subdirectories(
             f"{WRF_S3_PREFIX}/{product_id}/{init_tag}"
         )
         steps = sorted(

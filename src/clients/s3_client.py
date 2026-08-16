@@ -270,7 +270,11 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         instead of raising, mirroring the other read-path tolerance in this
         client.
         """
-        objects = await self._list_objects(prefix)
+        try:
+            objects = await self._list_objects(prefix)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.error("Error listing keys under %s: %s", prefix, e)
+            return []
         return [obj["Key"] for obj in objects]
 
     async def _list_objects(self, prefix: str, delimiter: str = "") -> List[dict]:
@@ -299,13 +303,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                         objects.append(obj)
             return objects
         except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            # Infra failure: return an empty (never partially-paginated) list so
-            # a transient outage can't masquerade as a complete-but-truncated
-            # listing that callers then act on (e.g. retention pruning against a
-            # partial universe). Programming errors are intentionally not caught
-            # here — they must surface, not be swallowed as "empty".
+            # Infra failure: raise so callers can tell "couldn't list" from
+            # "listed nothing". Sync loops (which wrap the cycle in
+            # except → errors += 1) count it as a real failure instead of an
+            # empty-but-healthy cycle; read-path callers use the tolerant
+            # `try_*` variants / `list_object_keys` that degrade to []. Never
+            # return a partial page as if complete, and let programming errors
+            # surface too rather than be swallowed as "empty".
             logger.error("Error listing objects under %s: %s", prefix, e)
-            return []
+            raise
 
     WRF_TILES_PREFIX = "tiles/wrf"
     WRF_COG_PREFIX = "cog/wrf"
@@ -609,6 +615,20 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                 continue
             names.append(tail[: -len(suffix)])
         return names
+
+    async def try_list_object_basenames(
+        self, prefix: str, suffix: str, delimiter: str = ""
+    ) -> List[str]:
+        """Read-path variant of ``list_object_basenames``: ``[]`` on infra error.
+
+        Read endpoints degrade to an empty list on a transient S3 outage; sync
+        loops call ``list_object_basenames`` (which raises) so the outage counts.
+        """
+        try:
+            return await self.list_object_basenames(prefix, suffix, delimiter=delimiter)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("Basename listing degraded to [] for %s: %s", prefix, e)
+            return []
 
     async def sync_ecmwf_mslp_forecast_to_redis(
         self,
@@ -975,9 +995,23 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                     subdirs.append(common_prefix["Prefix"])
             return subdirs
         except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            # Return empty (not partial) on an infra failure; let programming
-            # errors propagate rather than be masked as "no subdirectories".
+            # Raise on an infra failure so a real outage isn't masked as "no
+            # subdirectories". Sync loops count it (except → errors += 1); read
+            # paths use try_get_subdirectories, which degrades to [].
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
+            raise
+
+    async def try_get_subdirectories(self, prefix: str) -> List[str]:
+        """Read-path variant of ``get_subdirectories``: ``[]`` on infra error.
+
+        On-demand listing endpoints must degrade to an empty list rather than
+        surface a 5xx when S3 is briefly unavailable. The sync loops call
+        ``get_subdirectories`` (which raises) so an outage is counted, not masked.
+        """
+        try:
+            return await self.get_subdirectories(prefix)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("Subdirectory listing degraded to [] for %s: %s", prefix, e)
             return []
 
     async def delete_object(self, key: str) -> bool:

@@ -120,7 +120,7 @@ class SatelliteOnDemandStrategy:
 
         # Cache miss: list from S3
         prefix = f"tiles/{channel_dir}/"
-        subdirs = await self._s3.get_subdirectories(prefix)
+        subdirs = await self._s3.try_get_subdirectories(prefix)
 
         # Extract tileset IDs from subdirectory prefixes (now just timestamps)
         tileset_ids = []

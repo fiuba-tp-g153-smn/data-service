@@ -84,9 +84,10 @@ class GfsSyncService(DomainSyncService):
 
         # Reconcile the cycle index to the active set. The sorted set has its
         # whole-key TTL refreshed on every new step, so retired cycles would
-        # never expire on their own. Guarded on a non-empty listing so a
-        # transient S3 error (which yields []) cannot wipe the index — same
-        # guard ECMWF and WRF use.
+        # never expire on their own. A transient S3 error now raises out of the
+        # listing above (caught by _sync_gfs as an error cycle) and never reaches
+        # this prune, so the index survives; the `if not cycles` guard above
+        # still handles the legitimately-empty case.
         await self._redis_client.prune_gfs_cycles(product.product_id, cycles)
         return copied
 
