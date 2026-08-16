@@ -82,7 +82,10 @@ services:
   redis:
     container_name: data-service-redis-dev
     image: redis:8.6-alpine
-    command: redis-server --maxmemory 5gb --maxmemory-policy allkeys-lru --save 300 1 --appendonly no
+    # Match prod's volatile-ttl (see docker-compose.yaml / .redis.yaml) so the
+    # always-warm no-TTL caches (weather-stations) are protected from eviction
+    # here too — otherwise eviction-dependent bugs never reproduce in dev.
+    command: redis-server --maxmemory 5gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
     restart: unless-stopped
     ports:
       - "6389:6379"
