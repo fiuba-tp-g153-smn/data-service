@@ -10,10 +10,41 @@ from clients.smn_api_client import SmnApiError
 from clients.smn_registry_client import SmnRegistryBlockedError, SmnRegistryError
 from datetime import timezone
 
-from services.weather_stations_cache import parse_observed_at
+from services.weather_stations_cache import parse_observed_at, to_float
 from services.weather_stations_scraper_service import (
     WeatherStationsScraperService,
 )
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (18.4, 18.4),
+        (62, 62.0),
+        ("18,4", 18.4),  # es-AR comma decimal
+        ("1.013,2", 1013.2),  # es-AR grouped: dot thousands, comma decimal
+        ("1013.2", 1013.2),
+        ("-", None),
+        ("", None),
+        ("   ", None),
+        ("N/A", None),
+        (None, None),
+        (True, None),  # bool is guarded out
+    ],
+)
+def test_to_float_normalizes_es_ar_and_rejects_junk(value, expected):
+    assert to_float(value) == expected
+
+
+def test_normalize_wind_coerces_speed_and_deg():
+    out = WeatherStationsScraperService._normalize_wind(
+        {"direction": "Norte", "deg": "5", "speed": "8,2", "extra": "x"}
+    )
+    assert out == {"direction": "Norte", "deg": 5.0, "speed": 8.2}
+
+
+def test_normalize_wind_passes_through_non_dict():
+    assert WeatherStationsScraperService._normalize_wind(None) is None
 
 
 @pytest.mark.parametrize(
@@ -205,6 +236,40 @@ async def test_cold_cycle_writes_registry_snapshot_and_meta():
     # snapshot meta carries scraped_at + station_count.
     meta_body = json.loads(s3.uploads[meta_keys[0]][0])
     assert meta_body["station_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_normalizes_es_ar_numeric_values():
+    """Raw es-AR/placeholder SMN values are coerced to float/None at ingest so
+    they can't break the Optional[float] models downstream (BUG-15)."""
+    smn = _FakeSmn(
+        stations=[
+            {
+                "station_id": 87344,
+                "date": "2026-05-17T13:00:00Z",
+                "temperature": "18,4",  # comma decimal
+                "pressure": "-",  # placeholder
+                "humidity": 62.0,
+                "wind": {"direction": "Norte", "deg": 5, "speed": "8,2"},
+            }
+        ]
+    )
+    s3, reg = _FakeS3(), _FakeRegistry(_REGISTRY_TXT)
+    scraper = _make_scraper(s3, smn, reg)
+
+    await scraper._run_sync()
+
+    snap_keys = [
+        k
+        for k in s3.uploads
+        if k.startswith("weather-stations/snapshots/") and not k.endswith(".meta.json")
+    ]
+    station = json.loads(s3.uploads[snap_keys[0]][0])["stations"][0]
+    assert station["temperature"] == 18.4
+    assert station["pressure"] is None
+    assert station["humidity"] == 62.0
+    assert station["wind"]["speed"] == 8.2
+    assert station["wind"]["deg"] == 5.0
 
 
 @pytest.mark.asyncio

@@ -251,6 +251,35 @@ def parse_observed_at(value: object) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
+def to_float(value: object) -> Optional[float]:
+    """Coerce an SMN numeric field to ``float``, or ``None`` if not a number.
+
+    SMN is an es-AR feed and its values arrive un-normalized: a comma decimal
+    (``"18,4"``), a comma decimal with a dot thousands separator (``"1.013,2"``),
+    a placeholder (``"-"``), or an empty string can all appear. Left raw they
+    break the ``Optional[float]`` models downstream (or the dew-point math), so
+    normalize at ingest and drop anything that isn't a real number to ``None``.
+    """
+    if isinstance(value, bool):  # bool is an int subclass — never a measurement
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if "," in text and "." in text:
+        # es-AR grouped number: dot = thousands separator, comma = decimal.
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
 # Magnus (Magnus-Tetens) dew-point: empirically accurate roughly over -45..60 °C.
 _DEW_T_MIN, _DEW_T_MAX = -45.0, 60.0
 _DEW_HR_TOLERANCE = 100.5  # accept + clamp slight sensor over-read (e.g. 100.3 %)

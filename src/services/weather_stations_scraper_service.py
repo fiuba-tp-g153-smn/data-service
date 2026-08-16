@@ -31,6 +31,7 @@ from services.weather_stations_cache import (
     series_key,
     snap_body_key,
     tilesets_key,
+    to_float,
 )
 from settings import Settings
 
@@ -443,6 +444,23 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             return value
         return parsed.isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _normalize_wind(value: object) -> object:
+        """Coerce SMN's wind sub-object to numeric speed/deg at ingest.
+
+        Non-dict values (e.g. missing wind) pass through untouched; a dict is
+        reduced to the fields the models consume, with speed/deg run through
+        ``to_float`` so an es-AR comma decimal can't break them downstream.
+        """
+        if not isinstance(value, dict):
+            return value
+        direction = value.get("direction")
+        return {
+            "direction": direction if isinstance(direction, str) else None,
+            "deg": to_float(value.get("deg")),
+            "speed": to_float(value.get("speed")),
+        }
+
     def _build_snapshot(
         self, scraped_at: datetime, raw: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -459,13 +477,13 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
                 {
                     "station_id": station_id,
                     "observed_at": self._normalize_observed_at(item.get("date")),
-                    "temperature": item.get("temperature"),
-                    "feels_like": item.get("feels_like"),
-                    "humidity": item.get("humidity"),
-                    "pressure": item.get("pressure"),
-                    "visibility": item.get("visibility"),
+                    "temperature": to_float(item.get("temperature")),
+                    "feels_like": to_float(item.get("feels_like")),
+                    "humidity": to_float(item.get("humidity")),
+                    "pressure": to_float(item.get("pressure")),
+                    "visibility": to_float(item.get("visibility")),
                     "weather": item.get("weather"),
-                    "wind": item.get("wind"),
+                    "wind": self._normalize_wind(item.get("wind")),
                 }
             )
         return {
