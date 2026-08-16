@@ -305,9 +305,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                 for obj in page.get("Contents", []):
                     if not obj["Key"].endswith("/"):
                         objects.append(obj)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Error listing objects: %s", e)
-        return objects
+            return objects
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            # Infra failure: return an empty (never partially-paginated) list so
+            # a transient outage can't masquerade as a complete-but-truncated
+            # listing that callers then act on (e.g. retention pruning against a
+            # partial universe). Programming errors are intentionally not caught
+            # here — they must surface, not be swallowed as "empty".
+            logger.error("Error listing objects under %s: %s", prefix, e)
+            return []
 
     WRF_TILES_PREFIX = "tiles/wrf"
     WRF_COG_PREFIX = "cog/wrf"
@@ -627,13 +633,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         forecast_ts: str,
         timestamps: List[str],
         geojson_ttl: int,
-    ) -> int:
+    ) -> List[str]:
         """Download all GeoJSON files for a forecast from S3 and store in Redis.
 
-        Returns the count of GeoJSONs successfully stored.
+        Returns the timestamps whose GeoJSON was actually stored, so the caller
+        indexes only what landed — not the full COG listing, which would
+        advertise timestamps that return no isobars.
         """
         if not timestamps:
-            return 0
+            return []
 
         await self._ensure_connected()
         logger.info(
@@ -649,7 +657,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             for timestamp_ts in timestamps
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return sum(1 for r in results if r is True)
+        return [ts for ts, ok in zip(timestamps, results) if ok is True]
 
     async def _download_ecmwf_mslp_geojson_to_redis(
         self,
@@ -982,10 +990,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             ):
                 for common_prefix in page.get("CommonPrefixes", []):
                     subdirs.append(common_prefix["Prefix"])
-        except Exception as e:  # pylint: disable=broad-exception-caught
+            return subdirs
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            # Return empty (not partial) on an infra failure; let programming
+            # errors propagate rather than be masked as "no subdirectories".
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
-
-        return subdirs
+            return []
 
     async def delete_object(self, key: str) -> bool:
         """Delete a single object. Returns True on success, False on error."""

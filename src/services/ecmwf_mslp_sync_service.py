@@ -1,7 +1,7 @@
 """Independent background sync loop for ECMWF mean-sea-level-pressure GeoJSON."""
 
 import logging
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from clients.s3_client import S3Client
 from services.domain_sync_service import DomainSyncService
@@ -68,20 +68,35 @@ class EcmwfMslpSyncService(DomainSyncService):
                 )
                 new_timestamps = [t for t in timestamps if t not in known_timestamps]
 
+                stored_timestamps: List[str] = []
                 if new_timestamps:
-                    stored = await self._client.sync_ecmwf_mslp_forecast_to_redis(
-                        self._redis_client,
-                        forecast_ts,
-                        new_timestamps,
-                        self._settings.ecmwf_mslp_geojson_ttl,
+                    stored_timestamps = (
+                        await self._client.sync_ecmwf_mslp_forecast_to_redis(
+                            self._redis_client,
+                            forecast_ts,
+                            new_timestamps,
+                            self._settings.ecmwf_mslp_geojson_ttl,
+                        )
                     )
-                    total_downloaded += stored
+                    total_downloaded += len(stored_timestamps)
                     logger.info(
-                        "ECMWF-MSLP synced %d geojsons for %s", stored, forecast_ts
+                        "ECMWF-MSLP synced %d geojsons for %s",
+                        len(stored_timestamps),
+                        forecast_ts,
                     )
 
+                # Index only timestamps backed by a stored GeoJSON: those already
+                # indexed and still present in the COG listing, plus the ones
+                # actually stored this cycle. A new timestamp whose GeoJSON is
+                # missing/late is left unindexed and retried next cycle, instead
+                # of being advertised forever with no isobars behind it.
+                timestamp_set = set(timestamps)
+                indexed = sorted(
+                    {t for t in known_timestamps if t in timestamp_set}
+                    | set(stored_timestamps)
+                )
                 await self._redis_client.store_ecmwf_mslp_index(
-                    forecast_ts, timestamps, self._settings.ecmwf_mslp_geojson_ttl
+                    forecast_ts, indexed, self._settings.ecmwf_mslp_geojson_ttl
                 )
 
             # Reconcile the forecasts index to the active set so it can't

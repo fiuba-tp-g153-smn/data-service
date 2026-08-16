@@ -657,7 +657,9 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
         ]
     )
     mock_s3.list_object_basenames = AsyncMock(return_value=["20260330T1500Z"])
-    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(return_value=1)
+    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(
+        return_value=["20260330T1500Z"]
+    )
     mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
 
     service = _make_ecmwf_mslp(mock_s3, mock_redis_client)
@@ -667,6 +669,37 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
     assert errors == 0
     mock_redis_client.prune_ecmwf_mslp_forecasts.assert_awaited_once_with(
         ["20260330T1200Z", "20260330T0000Z"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_mslp_indexes_only_stored_timestamps(mock_redis_client):
+    """A COG timestamp whose GeoJSON did not land must not be indexed (BUG-02).
+
+    The COG listing has two timestamps but only one GeoJSON stores; the index
+    must advertise only the stored one, leaving the other to retry next cycle
+    instead of advertising a timestamp with no isobars behind it.
+    """
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=[f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260330T1200Z/"]
+    )
+    mock_s3.list_object_basenames = AsyncMock(
+        return_value=["20260330T1500Z", "20260330T1800Z"]
+    )
+    # COG lists two timestamps; only the first GeoJSON actually stored.
+    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(
+        return_value=["20260330T1500Z"]
+    )
+    mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
+
+    service = _make_ecmwf_mslp(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf_mslp()
+
+    assert (downloaded, errors) == (1, 0)
+    mock_redis_client.store_ecmwf_mslp_index.assert_awaited_once_with(
+        "20260330T1200Z", ["20260330T1500Z"], service._settings.ecmwf_mslp_geojson_ttl
     )
 
 
