@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Optional
 
 import uvloop
 from fastapi import FastAPI
@@ -586,20 +586,38 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     )
 
 
+async def _safe_shutdown(step: Awaitable[None], label: str) -> None:
+    """Await one teardown step, logging and swallowing any failure.
+
+    Shutdown must be best-effort: a single ``close()`` that raises can't be
+    allowed to skip every remaining teardown (which would leak the other
+    connections and leave SQLite unclosed). Isolating each step guarantees the
+    rest always run.
+    """
+    try:
+        await step
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Shutdown step '%s' failed: %s", label, exc)
+
+
 async def shutdown_weather_stations(runtime: WeatherStationsRuntime) -> None:
     """Tear down weather-stations resources in reverse startup order."""
     if runtime.scraper is not None:
-        await runtime.scraper.stop(logger)
+        await _safe_shutdown(runtime.scraper.stop(logger), "weather_stations.scraper")
     if runtime.smn_client is not None:
-        await runtime.smn_client.close()
+        await _safe_shutdown(runtime.smn_client.close(), "weather_stations.smn_client")
     if runtime.registry_client is not None:
-        await runtime.registry_client.close()
+        await _safe_shutdown(
+            runtime.registry_client.close(), "weather_stations.registry_client"
+        )
     if runtime.s3_client is not None:
-        await runtime.s3_client.close()
+        await _safe_shutdown(runtime.s3_client.close(), "weather_stations.s3_client")
     if runtime.keystore is not None:
-        await runtime.keystore.close()
+        await _safe_shutdown(runtime.keystore.close(), "weather_stations.keystore")
     if runtime.api_keys_s3_client is not None:
-        await runtime.api_keys_s3_client.close()
+        await _safe_shutdown(
+            runtime.api_keys_s3_client.close(), "weather_stations.api_keys_s3_client"
+        )
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
@@ -607,22 +625,28 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     if not runtime:
         return
     if runtime.scraper is not None:
-        await runtime.scraper.stop(logger)
+        await _safe_shutdown(runtime.scraper.stop(logger), "basemap.scraper")
     if runtime.state_store is not None:
-        await runtime.state_store.close()
-    await runtime.reader.close()
-    await runtime.reader_http_client.close()
+        await _safe_shutdown(runtime.state_store.close(), "basemap.state_store")
+    await _safe_shutdown(runtime.reader.close(), "basemap.reader")
+    await _safe_shutdown(
+        runtime.reader_http_client.close(), "basemap.reader_http_client"
+    )
     if runtime.scraper_http_client is not None:
-        await runtime.scraper_http_client.close()
+        await _safe_shutdown(
+            runtime.scraper_http_client.close(), "basemap.scraper_http_client"
+        )
     if runtime.s3_client is not None:
-        await runtime.s3_client.close()
+        await _safe_shutdown(runtime.s3_client.close(), "basemap.s3_client")
 
 
 async def shutdown_services():
     """Stop the per-product background sync loops if sync mode is full."""
     if settings.sync_mode == "full":
         for service in _SYNC_SERVICES:
-            await service.stop(logger)
+            await _safe_shutdown(
+                service.stop(logger), f"sync:{service.__class__.__name__}"
+            )
 
 
 # In production, cap the total wait for S3 at startup: a real outage should fail
@@ -737,18 +761,20 @@ async def lifespan(_app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown — each step is isolated so one failing close can't skip the rest.
     logger.info("Shutting down data-service...")
     if redis_metrics_service is not None:
-        await redis_metrics_service.stop(logger)
+        await _safe_shutdown(
+            redis_metrics_service.stop(logger), "redis_metrics_service"
+        )
     await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
     if s3_client:
-        await s3_client.close()
-    await metrics_store.close()
-    await redis_client.close()
+        await _safe_shutdown(s3_client.close(), "s3_client")
+    await _safe_shutdown(metrics_store.close(), "metrics_store")
+    await _safe_shutdown(redis_client.close(), "redis_client")
 
 
 app: FastAPI = FastAPI(
