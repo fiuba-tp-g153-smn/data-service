@@ -621,13 +621,22 @@ async def shutdown_services():
             await service.stop(logger)
 
 
-async def _wait_for_s3_reachable() -> None:
-    """Block startup until S3 answers, retrying without limit with capped backoff.
+# In production, cap the total wait for S3 at startup: a real outage should fail
+# the process so the orchestrator restarts/alerts, rather than leaving a
+# container stuck "starting" forever and never binding /health. Dev keeps waiting
+# indefinitely — its `--reload` reloader won't respawn a child that died, so a
+# hard crash there wedges the container until a file change.
+_S3_STARTUP_WAIT_MAX_SECONDS = 120.0
 
-    Keeps the process alive instead of crashing on a cold/slow S3. In dev the
-    `--reload` reloader does not respawn a child that died, so a hard crash here
-    would wedge the container until a file change; waiting lets it self-heal when
-    S3 comes up (prod already self-heals via uvicorn's worker respawn).
+
+async def _wait_for_s3_reachable() -> None:
+    """Block startup until S3 answers, with capped backoff.
+
+    In production the total wait is bounded by ``_S3_STARTUP_WAIT_MAX_SECONDS``,
+    after which it raises so the orchestrator can restart/alert. In development it
+    retries without limit and self-heals when S3 returns (the `--reload` reloader
+    does not respawn a child that died, so a hard crash would wedge the container
+    until a file change).
     """
     probe = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
@@ -640,10 +649,18 @@ async def _wait_for_s3_reachable() -> None:
         read_timeout=settings.s3_read_timeout_seconds,
         max_attempts=settings.s3_max_attempts,
     )
+    bounded = settings.app_env == "production"
     try:
         await probe.connect()
         backoff = 1.0
+        waited = 0.0
         while not await probe.is_reachable():
+            if bounded and waited >= _S3_STARTUP_WAIT_MAX_SECONDS:
+                raise RuntimeError(
+                    f"S3 endpoint {settings.s3_tiles_data_endpoint} unreachable "
+                    f"after {waited:.0f}s; failing startup so the orchestrator "
+                    "can restart."
+                )
             logger.warning(
                 "S3 endpoint %s not reachable; retrying in %.0fs "
                 "(startup blocked until S3 is available)",
@@ -651,6 +668,7 @@ async def _wait_for_s3_reachable() -> None:
                 backoff,
             )
             await asyncio.sleep(backoff)
+            waited += backoff
             backoff = min(backoff * 2, 30.0)
     finally:
         await probe.close()
@@ -674,10 +692,11 @@ async def lifespan(_app: FastAPI):
     await asyncio.to_thread(ensure_migrations, settings)
     await metrics_store.connect()
 
-    # S3 is a hard dependency. Block here until it answers (unlimited retry with
-    # capped backoff) instead of crashing — so dev (`--reload`, whose reloader
-    # won't respawn a dead child) recovers automatically when S3 returns, the
-    # same way prod's worker respawn already does.
+    # S3 is a hard dependency. Block here until it answers (capped backoff)
+    # instead of crashing — so dev (`--reload`, whose reloader won't respawn a
+    # dead child) recovers automatically when S3 returns. In production the wait
+    # is bounded and then raises, so a real outage fails startup (orchestrator
+    # restart/alert) rather than wedging the container as "starting" forever.
     if settings.is_s3_configured():
         await _wait_for_s3_reachable()
 
