@@ -35,9 +35,10 @@ async def test_timed_domain_records_ok_cycle(store):
     async def domain_cycle():
         return (7, 0)
 
-    downloaded, errors = await svc._timed_domain(domain_cycle())
+    downloaded, errors, timed_out = await svc._timed_domain(domain_cycle())
 
     assert (downloaded, errors) == (7, 0)
+    assert timed_out is False
     rows = await store.get_latest_sync_per_domain()
     assert len(rows) == 1
     assert rows[0].domain == "satellite"
@@ -72,11 +73,16 @@ async def test_timed_domain_records_timeout_outcome(store):
         await asyncio.sleep(5)
         return (1, 0)
 
-    downloaded, errors = await svc._timed_domain(slow_cycle())
+    downloaded, errors, timed_out = await svc._timed_domain(slow_cycle())
 
-    assert (downloaded, errors) == (0, 1)  # timeout counts as one error
+    # A timeout preempts a resumable cycle: recorded with errors=0 and flagged
+    # via timed_out, distinguished only by the "timeout" outcome — never counted
+    # as a hard error.
+    assert (downloaded, errors) == (0, 0)
+    assert timed_out is True
     rows = {r.domain: r for r in await store.get_latest_sync_per_domain()}
     assert rows["satellite"].outcome == "timeout"
+    assert rows["satellite"].errors == 0
 
 
 @pytest.mark.asyncio

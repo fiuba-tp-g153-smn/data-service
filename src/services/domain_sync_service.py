@@ -59,6 +59,7 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
         self._redis_client: Optional[RedisClient] = None
         self._metrics_store: Optional[MetricsStore] = None
         self._consecutive_failures = 0
+        self._consecutive_timeouts = 0
         self._total_cycles = 0
 
     def set_redis_client(self, redis_client: RedisClient) -> None:
@@ -128,19 +129,28 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("Failed to record sync metrics for %s", self._domain)
 
-    async def _timed_domain(self, coro: Awaitable[Tuple[int, int]]) -> Tuple[int, int]:
+    async def _timed_domain(
+        self, coro: Awaitable[Tuple[int, int]]
+    ) -> Tuple[int, int, bool]:
         """Run the domain sync under a watchdog and record a cycle row.
 
-        A timeout is recorded as a ``timeout`` outcome and the loop continues —
-        the next cycle resumes the un-indexed work. ``CancelledError`` (from
-        shutdown) is NOT caught, so ``stop()`` cancels the loop cleanly.
+        Returns ``(downloaded, errors, timed_out)``. A watchdog timeout preempts
+        a *resumable* cycle — every unit (tileset / period / step) is indexed
+        only after it fully downloads, so the work done before the deadline is
+        already persisted and picked up next cycle. That makes a timeout a
+        pacing signal, not a sync failure, so it is recorded with ``errors=0``
+        and surfaced via ``timed_out`` rather than being logged as an error.
+        ``CancelledError`` (from shutdown) is NOT caught, so ``stop()`` cancels
+        the loop cleanly.
         """
         start = datetime.now(timezone.utc)
+        timed_out = False
         try:
             downloaded, errors = await asyncio.wait_for(coro, timeout=self._timeout)
             outcome: Optional[str] = None
         except asyncio.TimeoutError:
-            downloaded, errors, outcome = 0, 1, "timeout"
+            downloaded, errors, outcome = 0, 0, "timeout"
+            timed_out = True
             logger.warning(
                 "%s sync timed out after %ss; recording timeout and continuing",
                 self._domain,
@@ -156,7 +166,7 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
             errors,
             outcome,
         )
-        return downloaded, errors
+        return downloaded, errors, timed_out
 
     async def _run_single_domain(self, coro: Awaitable[Tuple[int, int]]) -> None:
         """Template ``_run_sync`` body: guard, run with watchdog, write status."""
@@ -175,11 +185,17 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
             self._domain, {"is_running": "true", "last_sync_start": str(sync_start)}
         )
 
-        downloaded, errors = await self._timed_domain(coro)
+        downloaded, errors, timed_out = await self._timed_domain(coro)
 
         self._total_cycles += 1
-        if errors == 0:
+        if timed_out:
+            # A preempted-but-resumable cycle is a pacing signal, tracked in its
+            # own counter so a genuinely wedged domain (perpetual timeouts) stays
+            # visible without inflating the hard-failure count.
+            self._consecutive_timeouts += 1
+        elif errors == 0:
             self._consecutive_failures = 0
+            self._consecutive_timeouts = 0
         else:
             self._consecutive_failures += 1
 
@@ -193,6 +209,7 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
                 "last_sync_downloaded": str(downloaded),
                 "last_sync_errors": str(errors),
                 "consecutive_failures": str(self._consecutive_failures),
+                "consecutive_timeouts": str(self._consecutive_timeouts),
                 "total_cycles": str(self._total_cycles),
             },
         )
@@ -201,4 +218,12 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
                 "%s sync has %d consecutive failure(s)",
                 self._domain,
                 self._consecutive_failures,
+            )
+        if self._consecutive_timeouts > 0:
+            logger.warning(
+                "%s sync has %d consecutive watchdog timeout(s); cycle work "
+                "exceeds the %ss budget",
+                self._domain,
+                self._consecutive_timeouts,
+                self._timeout,
             )
