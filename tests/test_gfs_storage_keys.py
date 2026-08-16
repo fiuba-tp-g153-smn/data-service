@@ -18,6 +18,8 @@ from services.gfs_config import (
     get_product,
     layers_for,
     product_ids,
+    secondary_unit,
+    secondary_vars_for,
 )
 
 CYCLE = "20260808T0000Z"
@@ -82,6 +84,44 @@ class TestCatalogue:
         assert GFS_BARB_ZOOM_LEVELS == (2, 4, 6, 8)
 
 
+class TestSecondaryVariables:
+    """The point-query COGs tiles-processor writes beside the primary one."""
+
+    def test_each_product_carries_what_tiles_processor_uploads(self):
+        assert secondary_vars_for("mslp") == ["thickness"]
+        assert sorted(secondary_vars_for("500hpa")) == ["geopotential", "temperature"]
+        assert secondary_vars_for("250hpa") == ["geopotential"]
+
+    def test_250_has_no_temperature(self):
+        """`GfsUpperLevelProcessor` only loads `t` at 500 hPa."""
+        assert secondary_unit("250hpa", "temperature") is None
+
+    def test_units_mirror_the_overlays_they_twin(self):
+        assert secondary_unit("mslp", "thickness") == "gpm"
+        assert secondary_unit("500hpa", "geopotential") == "gpm"
+        assert secondary_unit("500hpa", "temperature") == "°C"
+
+    def test_unknown_variable_has_no_unit(self):
+        """`None` is what stops an arbitrary segment reaching the key builder."""
+        assert secondary_unit("500hpa", "../../etc") is None
+        assert secondary_unit("500hpa", "vorticity") is None
+
+    def test_unknown_product_has_no_secondary_variables(self):
+        assert secondary_vars_for("850hpa") == []
+        assert secondary_unit("850hpa", "geopotential") is None
+
+    def test_secondary_names_never_collide_with_overlay_names(self):
+        """Both live under the same cycle; a shared name would be ambiguous.
+
+        `thickness` is the deliberate exception: in MSLP the COG and the GeoJSON
+        are the same field in two formats, and they sit under different top-level
+        prefixes (`cog/` vs `geojson/`), so the name is reused on purpose.
+        """
+        for product_id in product_ids():
+            shared = set(layers_for(product_id)) & set(secondary_vars_for(product_id))
+            assert shared <= {"thickness"}
+
+
 # ---------------------------------------------------------------------------
 # S3 keys
 # ---------------------------------------------------------------------------
@@ -135,6 +175,46 @@ class TestS3Keys:
             S3Client.gfs_cog_cycle_prefix(p.s3_segment) for p in GFS_PRODUCTS.values()
         }
         assert len(prefixes) == len(GFS_PRODUCTS)
+
+    def test_secondary_cog_key(self):
+        assert (
+            S3Client.build_gfs_secondary_cog_key("500hpa", CYCLE, "temperature", FXXX)
+            == f"cog/models/gfs/500hpa/{CYCLE}/temperature/{STEP_ID}.tif"
+        )
+
+    def test_secondary_cog_is_nested_not_flat(self):
+        """The whole point of the layout, and the easiest thing to "simplify".
+
+        `list_steps` lists the cycle prefix with `delimiter="/"` and strips the
+        cycle off each basename without validating the rest. A flat sibling —
+        `{STEP_ID}.temperature.tif` — would come back as the phantom forecast
+        step `f003.temperature` and reach the frontend as a real timestep.
+        """
+        cycle_prefix = f"cog/models/gfs/500hpa/{CYCLE}/"
+        key = S3Client.build_gfs_secondary_cog_key("500hpa", CYCLE, "temperature", FXXX)
+        assert "/" in key[len(cycle_prefix) :]
+
+    def test_secondary_cog_never_collides_with_the_primary(self):
+        primary = S3Client.build_gfs_cog_key("500hpa", CYCLE, FXXX)
+        keys = {
+            S3Client.build_gfs_secondary_cog_key("500hpa", CYCLE, variable, FXXX)
+            for variable in secondary_vars_for("500hpa")
+        }
+        assert primary not in keys
+        assert len(keys) == len(secondary_vars_for("500hpa"))
+
+    def test_secondary_cog_shares_the_cycle_prefix(self):
+        """Same product folder and cycle, so one lifecycle rule covers both."""
+        key = S3Client.build_gfs_secondary_cog_key(
+            "250hpa", CYCLE, "geopotential", FXXX
+        )
+        assert key.startswith(S3Client.gfs_cog_cycle_prefix("250hpa"))
+
+    def test_secondary_cog_uses_the_joined_step_id(self):
+        key = S3Client.build_gfs_secondary_cog_key(
+            "mean_sea_level_pressure", CYCLE, "thickness", FXXX
+        )
+        assert key.endswith(f"/thickness/{CYCLE}_{FXXX}.tif")
 
 
 # ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ from typing import Optional
 from clients.s3_client import S3Client
 from services.base_service import BaseProductService
 from services.gfs_config import get_product as get_gfs_product
+from services.gfs_config import secondary_unit as gfs_secondary_unit
 from services.point_value_strategy import (
     CogObjectNotFoundError,
     NoDataOrOutsideSampleError,
@@ -190,6 +191,32 @@ class PointValueService(BaseProductService):
         cog_key = S3Client.build_gfs_cog_key(product.s3_segment, cycle, fxxx)
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=product.unit)
+
+    async def sample_gfs_secondary_point(
+        self,
+        product_id: str,
+        cycle: str,
+        fxxx: str,
+        variable: str,
+        lat: float,
+        lon: float,
+    ) -> PointSample:
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Sample a GFS secondary-variable COG (thickness / temperature / height).
+
+        The unit lookup doubles as validation: `variable` arrives as a URL
+        segment and is interpolated into an S3 key, so an unrecognised one is
+        rejected here rather than turned into a request for an arbitrary object.
+        """
+        product = get_gfs_product(product_id)
+        unit = gfs_secondary_unit(product_id, variable)
+        if product is None or unit is None:
+            raise CogNotFoundError()
+        cog_key = S3Client.build_gfs_secondary_cog_key(
+            product.s3_segment, cycle, variable, fxxx
+        )
+        value = await self._sample_value(cog_key, lat, lon)
+        return PointSample(value=value, unit=unit)
 
     async def _sample_value(self, cog_key: str, lat: float, lon: float) -> float:
         strategy = self._get_strategy()

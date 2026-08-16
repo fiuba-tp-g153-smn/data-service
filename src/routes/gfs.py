@@ -15,7 +15,12 @@ from fastapi import Request, Response, status
 from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
-from models.gfs import GfsCycleListResponse, GfsPointValueResponse, GfsStepListResponse
+from models.gfs import (
+    GfsCycleListResponse,
+    GfsPointValueResponse,
+    GfsSecondaryPointValueResponse,
+    GfsStepListResponse,
+)
 from routes.utils import create_tile_response, make_transparent_tile_response
 from services.gfs_config import GFS_BARB_ZOOM_LEVELS, GFS_ZOOM_MAX, GFS_ZOOM_MIN
 from services.gfs_service import gfs_service
@@ -30,6 +35,7 @@ router = APIRouter(prefix="/products/gfs", tags=["GFS Model"])
 _PRODUCT_DESC = "GFS product ID: mslp, 500hpa or 250hpa"
 _CYCLE_DESC = "Model run timestamp (e.g. 20260808T0000Z)"
 _STEP_DESC = "Forecast step (e.g. f003)"
+_VARIABLE_DESC = "Secondary variable: thickness, temperature or geopotential"
 
 
 def _etag(payload: dict) -> str:
@@ -143,6 +149,51 @@ async def get_point_value(
         product_id=product_id,
         cycle=cycle,
         fxxx=fxxx,
+        lat=lat,
+        lon=lon,
+        value=sample.value,
+        unit=sample.unit,
+    )
+
+
+@router.get(
+    "/{product_id}/{cycle}/{fxxx}/secondary/{variable}/point",
+    status_code=status.HTTP_200_OK,
+    summary="Get GFS Secondary Variable Point Value",
+    response_model=GfsSecondaryPointValueResponse,
+)
+async def get_secondary_point_value(
+    product_id: str = PathParam(..., description=_PRODUCT_DESC),
+    cycle: str = PathParam(..., description=_CYCLE_DESC),
+    fxxx: str = PathParam(..., description=_STEP_DESC),
+    variable: str = PathParam(..., description=_VARIABLE_DESC),
+    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
+    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
+):
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
+    """Sample the nearest value from a GFS secondary-variable COG at a point.
+
+    These mirror the contour overlays: `thickness` and `geopotential` return
+    gpm, `temperature` returns °C.
+    """
+    try:
+        sample = await point_value_service.sample_gfs_secondary_point(
+            product_id, cycle, fxxx, variable, lat, lon
+        )
+    except CogNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="cog_not_found"
+        ) from exc
+    except NoDataOrOutsideError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="nodata_or_outside"
+        ) from exc
+
+    return GfsSecondaryPointValueResponse(
+        product_id=product_id,
+        cycle=cycle,
+        fxxx=fxxx,
+        variable=variable,
         lat=lat,
         lon=lon,
         value=sample.value,

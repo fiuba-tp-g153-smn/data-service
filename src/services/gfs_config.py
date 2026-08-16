@@ -6,8 +6,8 @@ Everything downstream (key builders, sync, routes) reads it from here so the
 three descriptions cannot drift apart.
 """
 
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,7 @@ class GfsProduct:
     unit: str  # unit a point query returns
     has_tiles: bool  # whether a raster pyramid exists
     has_barbs: bool = False  # whether per-tile wind barbs exist
+    secondary_vars: Mapping[str, str] = field(default_factory=dict)
 
 
 # `mslp` is abbreviated in the URL but keeps the long S3 segment written by
@@ -31,6 +32,7 @@ GFS_MSLP = GfsProduct(
     unit="hPa",
     # The SMN's `slpb.gs` chart is pure contours, so no raster is produced.
     has_tiles=False,
+    secondary_vars={"thickness": "gpm"},
 )
 
 GFS_500HPA = GfsProduct(
@@ -40,6 +42,7 @@ GFS_500HPA = GfsProduct(
     unit="kt",
     has_tiles=True,
     has_barbs=True,
+    secondary_vars={"temperature": "°C", "geopotential": "gpm"},
 )
 
 GFS_250HPA = GfsProduct(
@@ -48,6 +51,7 @@ GFS_250HPA = GfsProduct(
     layers=("heights",),
     unit="kt",
     has_tiles=True,
+    secondary_vars={"geopotential": "gpm"},
 )
 
 GFS_PRODUCTS: Dict[str, GfsProduct] = {
@@ -86,6 +90,26 @@ def layers_for(product_id: str) -> List[str]:
     if product is None:
         return []
     return list(product.layers)
+
+
+def secondary_vars_for(product_id: str) -> List[str]:
+    """Secondary point-query variables a product carries."""
+    product = GFS_PRODUCTS.get(product_id)
+    if product is None:
+        return []
+    return list(product.secondary_vars)
+
+
+def secondary_unit(product_id: str, variable: str) -> Optional[str]:
+    """Unit a secondary point query returns, or None when the pair is unknown.
+
+    `None` is what makes this the whitelist: an unrecognised variable never
+    reaches the S3 key builder.
+    """
+    product = GFS_PRODUCTS.get(product_id)
+    if product is None:
+        return None
+    return product.secondary_vars.get(variable)
 
 
 # ============== S3 object-name parsing ==============
