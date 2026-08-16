@@ -309,6 +309,40 @@ async def test_prune_wrf_inits_noop_when_all_active():
 
 
 @pytest.mark.asyncio
+async def test_prune_gfs_cycles_uses_the_sorted_set_commands():
+    """The cycle index is a ZSET: SMEMBERS/SREM on it answer WRONGTYPE, which
+    the sync loop swallows, leaving the index to grow forever."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(
+        return_value=[b"20260816T0000Z", b"20260815T1800Z", b"20260815T1200Z"]
+    )
+
+    removed = await client.prune_gfs_cycles(
+        "mslp", ["20260816T0000Z", "20260815T1800Z"]
+    )
+
+    assert removed == 1
+    client._redis.zrem.assert_awaited_once_with(
+        "idx:gfs:mslp:cycles", b"20260815T1200Z"
+    )
+    client._redis.smembers.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_prune_gfs_cycles_noop_when_all_active():
+    """No ZREM when every indexed cycle is still active."""
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.zrange = AsyncMock(return_value=[b"20260816T0000Z"])
+
+    removed = await client.prune_gfs_cycles("mslp", ["20260816T0000Z"])
+
+    assert removed == 0
+    client._redis.zrem.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wrf_overlays_complete_marker_roundtrip():
     """set_wrf_overlays_complete writes a TTL'd key; is_wrf_overlays_complete reads it."""
     client = RedisClient("redis://localhost:6379/0")

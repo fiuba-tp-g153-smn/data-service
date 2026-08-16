@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from dependencies import settings
 from models.base import BoundingBox, ZoomLevels
 from models.gfs import (
     GfsCycleInfo,
@@ -50,7 +51,7 @@ class GfsService:
 
         infos: List[GfsCycleInfo] = []
         if self._strategy is not None:
-            for cycle in await self._strategy.list_cycles(product_id):
+            for cycle in await self._advertised_cycles(product_id):
                 steps = await self._strategy.list_steps(product_id, cycle)
                 infos.append(GfsCycleInfo(cycle=cycle, step_count=len(steps)))
 
@@ -73,7 +74,7 @@ class GfsService:
         if product is None or self._strategy is None:
             return None
 
-        if cycle not in await self._strategy.list_cycles(product_id):
+        if cycle not in await self._advertised_cycles(product_id):
             return None
 
         steps = await self._strategy.list_steps(product_id, cycle)
@@ -105,6 +106,19 @@ class GfsService:
             zoom_levels=self.ZOOM_LEVELS,
             bounding_box=self.BOUNDING_BOX,
         )
+
+    async def _advertised_cycles(self, product_id: str) -> List[str]:
+        """The cycles the API publishes: the newest `gfs_cycles_to_keep`.
+
+        Capping here as well as in the read strategy keeps a stale index from
+        leaking a retired cycle into the contract — the sync loop prunes that
+        index, so a single failure there used to be enough to over-advertise.
+        Same belt-and-braces ECMWF applies before listing forecasts.
+        """
+        if self._strategy is None:
+            return []
+        cycles = await self._strategy.list_cycles(product_id)
+        return cycles[: settings.gfs_cycles_to_keep]
 
     async def get_tile_data(
         self, product_id: str, cycle: str, fxxx: str, z: int, x: int, y: int

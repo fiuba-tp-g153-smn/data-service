@@ -1,5 +1,7 @@
 """Unit tests for GfsService: listings, valid timestamps and product gating."""
 
+from unittest.mock import patch
+
 import pytest
 
 from services.gfs_service import GfsService, valid_timestamp
@@ -97,6 +99,23 @@ class TestListCycles:
         assert data.cycles[0].step_count == 3
 
     @pytest.mark.asyncio
+    async def test_never_advertises_more_than_cycles_to_keep(self):
+        """The index is pruned by the sync loop; if that ever fails, the
+        contract must still hold."""
+        strategy = FakeStrategy(
+            cycles=["20260816T0000Z", "20260815T1800Z", "20260815T1200Z"]
+        )
+        with patch("services.gfs_service.settings") as mock_settings:
+            mock_settings.gfs_cycles_to_keep = 2
+            data = await _service(strategy).list_cycles("500hpa")
+
+        assert data is not None
+        assert [c.cycle for c in data.cycles] == [
+            "20260816T0000Z",
+            "20260815T1800Z",
+        ]
+
+    @pytest.mark.asyncio
     async def test_advertises_only_single_file_layers(self):
         """`layers` must never hold `barbs`: it 404s as `barbs.json`."""
         data = await _service().list_cycles("500hpa")
@@ -156,6 +175,16 @@ class TestListSteps:
         """tiles-processor keeps more cycles in S3 than the API advertises."""
         strategy = FakeStrategy(cycles=["20260808T1200Z"], steps=["f000"])
         assert await _service(strategy).list_steps("500hpa", CYCLE) is None
+
+    @pytest.mark.asyncio
+    async def test_cycle_beyond_the_cap_returns_none_even_if_indexed(self):
+        """A stale index must not make a retired cycle reachable by tag."""
+        strategy = FakeStrategy(
+            cycles=["20260816T0000Z", "20260815T1800Z", CYCLE], steps=["f000"]
+        )
+        with patch("services.gfs_service.settings") as mock_settings:
+            mock_settings.gfs_cycles_to_keep = 2
+            assert await _service(strategy).list_steps("500hpa", CYCLE) is None
 
     @pytest.mark.asyncio
     async def test_retired_cycle_never_reaches_the_strategy_listing(self):

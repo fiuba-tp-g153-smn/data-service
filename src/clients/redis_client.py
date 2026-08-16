@@ -332,6 +332,21 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             await self._conn.srem(key, *stale)  # type: ignore[misc]
         return len(stale)
 
+    async def _prune_sorted_index(self, key: str, keep: List[str]) -> int:
+        """Remove members of a *sorted-set* index not present in `keep`.
+
+        The sorted-set sibling of `_prune_index_set`: applying the plain-set
+        commands to a ZSET makes Redis answer WRONGTYPE, which the sync loop
+        swallows as a per-domain error — the index then never shrinks, because
+        its whole-key TTL is refreshed on every pass. Returns members removed.
+        """
+        keepset = {k.encode() for k in keep}
+        members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
+        stale = [m for m in members if m not in keepset]
+        if stale:
+            await self._conn.zrem(key, *stale)  # type: ignore[misc]
+        return len(stale)
+
     async def prune_ecmwf_tp_forecasts(self, keep: List[str]) -> int:
         """Reconcile the ECMWF-TP forecasts index to the active forecasts."""
         return await self._prune_index_set("idx:ecmwf_tp:forecasts", keep)
@@ -472,13 +487,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         (:steps, :layers, :overlays_done) self-expire once no longer re-synced.
         Returns the number of inits removed.
         """
-        key = f"idx:wrf:{product_id}:init_runs"
-        keepset = {k.encode() for k in keep}
-        members = await self._conn.zrange(key, 0, -1)  # type: ignore[misc]
-        stale = [m for m in members if m not in keepset]
-        if stale:
-            await self._conn.zrem(key, *stale)  # type: ignore[misc]
-        return len(stale)
+        return await self._prune_sorted_index(f"idx:wrf:{product_id}:init_runs", keep)
 
     # ============== WRF GeoJSON / Layer Operations ==============
 
@@ -594,8 +603,12 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         return [m.decode() for m in members]
 
     async def prune_gfs_cycles(self, product_id: str, keep: List[str]) -> int:
-        """Reconcile a product's cycle index to the actively-synced cycles."""
-        return await self._prune_index_set(f"idx:gfs:{product_id}:cycles", keep)
+        """Reconcile a product's cycle index to the actively-synced cycles.
+
+        `idx:gfs:{product}:cycles` is a sorted set, so this must use the
+        sorted-set prune; the plain-set one raises WRONGTYPE.
+        """
+        return await self._prune_sorted_index(f"idx:gfs:{product_id}:cycles", keep)
 
     # ============== GFS GeoJSON / Layer Operations ==============
 
