@@ -1,6 +1,8 @@
-"""Tests for the BaseSyncService loop pacing (min-sleep floor + overrun warning)."""
+"""Tests for the BaseSyncService loop pacing (min-sleep floor + overrun warning)
+and lock-acquisition error handling (contention vs a broken lock subsystem)."""
 
-from unittest.mock import patch
+import errno
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -74,3 +76,49 @@ async def test_no_floor_when_min_sleep_zero_and_normal_cycle():
     svc = _StubSync(sync_interval=60, min_sleep=0)
     sleeps = await _drive_one_cycle(svc, [0.0, 5.0])
     assert sleeps == [55]  # 60 - 5, no flooring
+
+
+# ── Lock acquisition: contention vs broken subsystem (BUG-32) ─────────────────
+
+
+def _lockf_raiser(err_no):
+    """A fake fcntl.lockf that always fails with the given errno."""
+
+    def _raise(_handle, _flags):
+        raise OSError(err_no, "lockf")
+
+    return _raise
+
+
+@pytest.mark.asyncio
+async def test_start_disabled_quietly_on_lock_contention(monkeypatch):
+    """EAGAIN/EACCES = a sibling worker holds the lock: disable quietly, no raise."""
+    svc = _StubSync(sync_interval=60, min_sleep=0)
+    monkeypatch.setattr(
+        "services.base_sync_service.fcntl.lockf", _lockf_raiser(errno.EAGAIN)
+    )
+    app_logger = MagicMock()
+
+    await svc.start(app_logger)  # must not raise
+
+    assert svc._running is False  # pylint: disable=protected-access
+    assert svc._lock_file_handle is None  # pylint: disable=protected-access
+    app_logger.info.assert_called()  # "another worker is active"
+    app_logger.error.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_start_raises_on_broken_lock_subsystem(monkeypatch):
+    """A non-contention errno (ENOLCK) = the lock subsystem is broken: fail loud."""
+    svc = _StubSync(sync_interval=60, min_sleep=0)
+    monkeypatch.setattr(
+        "services.base_sync_service.fcntl.lockf", _lockf_raiser(errno.ENOLCK)
+    )
+    app_logger = MagicMock()
+
+    with pytest.raises(OSError):
+        await svc.start(app_logger)
+
+    assert svc._running is False  # pylint: disable=protected-access
+    assert svc._lock_file_handle is None  # pylint: disable=protected-access
+    app_logger.error.assert_called()  # surfaced, not silently disabled

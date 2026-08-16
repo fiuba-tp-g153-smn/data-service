@@ -6,6 +6,7 @@ and fixed-interval sync loop for sync service implementations.
 """
 
 import asyncio
+import errno
 import fcntl
 import logging
 import time
@@ -78,20 +79,47 @@ class BaseSyncService:
         if not self._pre_start_check(app_logger):
             return
 
-        # Attempt to acquire file lock (only one worker syncs)
+        # Attempt to acquire the file lock (only one worker syncs). Opening the
+        # lock file and taking the lock are handled separately so a broken lock
+        # subsystem is never mistaken for either an unwritable path or ordinary
+        # single-writer contention.
         try:
             self._lock_file_handle = open(  # pylint: disable=consider-using-with
                 self._get_lock_path(), "w", encoding="utf-8"
             )
-            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except IOError:
-            app_logger.info(
-                "%s disabled (another worker is active).", self._service_name
+        except OSError as exc:
+            app_logger.error(
+                "%s: cannot open lock file %s (%s); sync not started",
+                self._service_name,
+                self._get_lock_path(),
+                exc,
             )
-            if self._lock_file_handle:
-                self._lock_file_handle.close()
-                self._lock_file_handle = None
-            return
+            raise
+
+        try:
+            fcntl.lockf(self._lock_file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._lock_file_handle.close()
+            self._lock_file_handle = None
+            # EAGAIN/EACCES is the normal "already held by a sibling worker"
+            # result of a non-blocking lock — the expected single-writer path.
+            # Any other errno (ENOLCK, EINVAL, an NFS mount without lockd) means
+            # the locking subsystem itself is broken: fail loudly so the
+            # orchestrator restarts/alerts, rather than silently running with no
+            # background sync.
+            if exc.errno in (errno.EAGAIN, errno.EACCES):
+                app_logger.info(
+                    "%s disabled (another worker is active).", self._service_name
+                )
+                return
+            app_logger.error(
+                "%s: lock subsystem error on %s (errno=%s: %s); sync not started",
+                self._service_name,
+                self._get_lock_path(),
+                exc.errno,
+                exc,
+            )
+            raise
 
         self._running = True
         self._task = asyncio.create_task(self._sync_loop())
