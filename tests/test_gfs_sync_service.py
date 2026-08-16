@@ -157,6 +157,34 @@ class TestStepSync:
         assert copied == 0
         redis.store_gfs_geojson.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_an_unavailable_overlay_is_not_indexed(self):
+        """The index must describe what is retrievable, not what the catalogue
+        says: a step listing an overlay that is not there makes the frontend
+        fetch a 404 for the whole life of the cycle."""
+        s3, redis = _s3(payload=None), _redis()
+        await _make_service(s3, redis)._sync_step(GFS_MSLP, CYCLE_NEW, "f003")
+        # Nothing retrievable -> nothing registered at all.
+        assert redis.add_gfs_layers.await_args.args[3] == []
+
+    @pytest.mark.asyncio
+    async def test_only_the_retrievable_overlays_are_indexed(self):
+        """`isobars` is already mirrored, `thickness` is still missing."""
+        s3, redis = _s3(payload=None), _redis(existing_geojson=None)
+
+        async def _only_isobars(product_id, cycle, fxxx, layer):
+            return b"warm" if layer == "isobars" else None
+
+        redis.get_gfs_geojson = AsyncMock(side_effect=_only_isobars)
+        await _make_service(s3, redis)._sync_step(GFS_MSLP, CYCLE_NEW, "f003")
+        assert redis.add_gfs_layers.await_args.args[3] == ["isobars"]
+
+    @pytest.mark.asyncio
+    async def test_a_freshly_copied_overlay_is_indexed(self):
+        s3, redis = _s3(), _redis(existing_geojson=None)
+        await _make_service(s3, redis)._sync_step(GFS_MSLP, CYCLE_NEW, "f003")
+        assert redis.add_gfs_layers.await_args.args[3] == ["isobars", "thickness"]
+
 
 class TestPruning:
     @pytest.mark.asyncio

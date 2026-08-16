@@ -218,6 +218,7 @@ async def configure_strategies(
             settings.gfs_tile_ttl,
             settings.gfs_geojson_ttl,
             settings.tileset_listing_ttl,
+            settings.gfs_cycles_to_keep,
         )
 
         # Each product syncs on its own independent loop (own flock + S3 client
@@ -273,6 +274,7 @@ async def configure_strategies(
             settings.gfs_tile_ttl,
             settings.gfs_geojson_ttl,
             settings.tileset_listing_ttl,
+            settings.gfs_cycles_to_keep,
         )
 
     return (

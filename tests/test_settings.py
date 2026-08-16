@@ -347,3 +347,30 @@ def test_redis_metrics_memory_sample_negative_rejected(tmp_path):
 def test_wrf_overlay_recheck_ttl_loads_from_json(tmp_path):
     s = _load(tmp_path, {"wrf": {"overlay_recheck_ttl": 500}})
     assert s.wrf_overlay_recheck_ttl == 500
+
+
+def test_gfs_knobs_round_trip_from_their_namespace(tmp_path):
+    s = _built_settings(
+        tmp_path,
+        {"gfs": {"tile_ttl": 111, "geojson_ttl": 222, "cycles_to_keep": 3}},
+    )
+    assert s.gfs_tile_ttl == 111
+    assert s.gfs_geojson_ttl == 222
+    assert s.gfs_cycles_to_keep == 3
+
+
+def test_zero_gfs_cycles_to_keep_rejected(tmp_path):
+    """It would fail silently: the loop finds no active cycles, returns early
+    and never prunes, so a frozen index keeps being served with no error."""
+    import pytest
+
+    with pytest.raises(ValueError, match="gfs_cycles_to_keep"):
+        _built_settings(tmp_path, {"gfs": {"cycles_to_keep": 0}})
+
+
+def test_non_positive_gfs_ttls_rejected(tmp_path):
+    import pytest
+
+    for key, attr in (("tile_ttl", "gfs_tile_ttl"), ("geojson_ttl", "gfs_geojson_ttl")):
+        with pytest.raises(ValueError, match=attr):
+            _built_settings(tmp_path, {"gfs": {key: 0}})

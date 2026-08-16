@@ -5,7 +5,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 # The products that each run their own independent background sync loop.
-SYNC_DOMAINS = ["satellite", "radar", "ecmwf_tp", "ecmwf_mslp", "wrf"]
+SYNC_DOMAINS = ["satellite", "radar", "ecmwf_tp", "ecmwf_mslp", "wrf", "gfs"]
 
 
 class DomainSyncStatus(BaseModel):

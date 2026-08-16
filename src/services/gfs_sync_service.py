@@ -15,7 +15,12 @@ from typing import List, Optional, Tuple
 
 from clients.s3_client import S3Client
 from services.domain_sync_service import DomainSyncService
-from services.gfs_config import GFS_PRODUCTS, GfsProduct
+from services.gfs_config import (
+    GFS_PRODUCTS,
+    GfsProduct,
+    leaf_segment,
+    step_from_basename,
+)
 from settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +70,7 @@ class GfsSyncService(DomainSyncService):
 
     async def _sync_product(self, product: GfsProduct) -> int:
         """Mirror the newest cycles of one product. Returns overlays copied."""
+        # for mypy: `_sync_gfs` raises before reaching here if either is None.
         assert self._client is not None and self._redis_client is not None
 
         cycles = await self._active_cycles(product)
@@ -91,20 +97,20 @@ class GfsSyncService(DomainSyncService):
         produces no raster, so listing tiles would make it look like it has no
         cycles at all.
         """
-        assert self._client is not None
+        assert self._client is not None  # for mypy: guarded in `_sync_gfs`
         prefixes = await self._client.get_subdirectories(
             S3Client.gfs_cog_cycle_prefix(product.s3_segment)
         )
         # Cycle tags are fixed-width `YYYYMMDDTHHmmZ`, so lexicographic order
         # equals chronological order.
         cycles = sorted(
-            (name for name in (_leaf(p) for p in prefixes) if name), reverse=True
+            (name for name in (leaf_segment(p) for p in prefixes) if name), reverse=True
         )
         return cycles[: self._settings.gfs_cycles_to_keep]
 
     async def _list_steps(self, product: GfsProduct, cycle: str) -> List[str]:
         """Steps of a cycle, recovered from the COG basenames."""
-        assert self._client is not None
+        assert self._client is not None  # for mypy: guarded in `_sync_gfs`
         basenames = await self._client.list_object_basenames(
             f"{S3Client.gfs_cog_cycle_prefix(product.s3_segment)}{cycle}/",
             ".tif",
@@ -112,7 +118,7 @@ class GfsSyncService(DomainSyncService):
         )
         return sorted(
             step
-            for step in (_step_from_basename(name, cycle) for name in basenames)
+            for step in (step_from_basename(name, cycle) for name in basenames)
             if step
         )
 
@@ -123,6 +129,7 @@ class GfsSyncService(DomainSyncService):
         the TTL), while overlays are only fetched when absent — so a re-scan of
         an already-mirrored cycle costs no S3 GETs.
         """
+        # for mypy: `_sync_gfs` raises before reaching here if either is None.
         assert self._client is not None and self._redis_client is not None
 
         await self._redis_client.add_gfs_index(
@@ -134,18 +141,32 @@ class GfsSyncService(DomainSyncService):
             ttl=self._settings.gfs_geojson_ttl,
         )
 
-        # Barbs are excluded on purpose: they live one object per tile and are
-        # served straight from S3.
-        layers = list(product.layers)
-        await self._redis_client.add_gfs_layers(
-            product.product_id, cycle, fxxx, layers, ttl=self._settings.gfs_geojson_ttl
-        )
+        present, copied = await self._mirror_overlays(product, cycle, fxxx)
 
+        # Index only the overlays that are actually retrievable, so the step
+        # listing advertises what a client can really fetch. Registering the
+        # catalogue instead would make a mid-run step claim overlays that
+        # tiles-processor has not uploaded yet, and every one of them would 404.
+        # Barbs are absent by construction: they live one object per tile, are
+        # never mirrored, and have their own route.
+        await self._redis_client.add_gfs_layers(
+            product.product_id, cycle, fxxx, present, ttl=self._settings.gfs_geojson_ttl
+        )
+        return copied
+
+    async def _mirror_overlays(
+        self, product: GfsProduct, cycle: str, fxxx: str
+    ) -> Tuple[List[str], int]:
+        """Copy the overlays Redis lacks. Returns (retrievable layers, copied)."""
+        assert self._client is not None and self._redis_client is not None  # mypy
+
+        present: List[str] = []
         copied = 0
-        for layer in layers:
+        for layer in product.layers:
             if await self._redis_client.get_gfs_geojson(
                 product.product_id, cycle, fxxx, layer
             ):
+                present.append(layer)
                 continue
             key = S3Client.build_gfs_geojson_key(product.s3_segment, cycle, fxxx, layer)
             data = await self._client.download_tile(key)
@@ -161,22 +182,9 @@ class GfsSyncService(DomainSyncService):
                 data,
                 ttl=self._settings.gfs_geojson_ttl,
             )
+            present.append(layer)
             copied += 1
-        return copied
-
-
-def _leaf(prefix: str) -> str:
-    """Last path segment of an S3 common prefix."""
-    return prefix.rstrip("/").split("/")[-1]
-
-
-def _step_from_basename(basename: str, cycle: str) -> Optional[str]:
-    """Turn `{cycle}_{fxxx}` back into `{fxxx}`, or None if it does not match."""
-    marker = f"{cycle}_"
-    if not basename.startswith(marker):
-        return None
-    step = basename[len(marker) :]
-    return step or None
+        return present, copied
 
 
 def _cycle_score(cycle: str) -> float:

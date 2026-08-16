@@ -597,11 +597,6 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         return await self._prune_index_set("idx:ecmwf_mslp:forecasts", keep)
 
     # ============== GFS Index Operations ==============
-    #
-    # Only listings and single-file overlays are mirrored by the sync loop.
-    # Raster tiles and barb tiles are read on demand from S3 — a single cycle is
-    # ~75k tiles across the two raster products, far past what belongs in Redis
-    # — and cached lazily by the read strategy.
 
     async def add_gfs_index(
         self,
@@ -639,12 +634,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         return [m.decode() for m in members]
 
     async def prune_gfs_cycles(self, product_id: str, keep: List[str]) -> int:
-        """Reconcile a product's cycle index to the actively-synced cycles.
-
-        The cycles sorted set has its whole-key TTL refreshed on every new step,
-        so retired cycles would never expire on their own. The per-cycle
-        sub-keys (`:steps`, `:layers`) do self-expire once no longer re-synced.
-        """
+        """Reconcile a product's cycle index to the actively-synced cycles."""
         return await self._prune_index_set(f"idx:gfs:{product_id}:cycles", keep)
 
     # ============== GFS GeoJSON / Layer Operations ==============

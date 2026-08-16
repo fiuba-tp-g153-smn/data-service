@@ -183,12 +183,7 @@ class PointValueService(BaseProductService):
         lon: float,
     ) -> PointSample:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
-        """Sample a GFS COG at a coordinate.
-
-        The unit comes from the product catalogue rather than a table here, so
-        it cannot drift from what the processor actually wrote: hPa for `mslp`,
-        knots for the isobaric levels.
-        """
+        """Sample a GFS COG at a coordinate."""
         product = get_gfs_product(product_id)
         if product is None:
             raise CogNotFoundError()

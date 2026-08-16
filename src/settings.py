@@ -142,10 +142,9 @@ class Settings:
     # it, every overlay-less step is re-listed on every cycle forever.
     wrf_overlay_recheck_ttl: int = 3600
     # GFS model (loaded from settings.json, env overrides).
-    # Only listings and single-file overlays are mirrored to Redis: one cycle is
-    # ~75k raster tiles across 500/250 hPa, so tiles and barb tiles are read on
-    # demand from S3. `gfs_tile_ttl` is therefore the TTL of that lazy cache,
-    # not of a pre-warmed set.
+    # Only listings and single-file overlays are mirrored to Redis: only tiles
+    # and barb tiles are read on demand from S3. `gfs_tile_ttl` is therefore the
+    # TTL of that lazy cache, not of a pre-warmed set.
     gfs_tile_ttl: int = 64800
     gfs_geojson_ttl: int = 64800
     # Cycles walked per product each pass (newest-first), bounding the scan as
@@ -154,6 +153,11 @@ class Settings:
     gfs_cycles_to_keep: int = 2
     gfs_sync_interval_seconds: int = 120
     gfs_sync_timeout_seconds: int = 900
+    # Cache-Control for a *missing* GFS tile / empty barb tile: short and NOT
+    # `immutable`, unlike `cache_control_tile`. A step is advertised as soon as
+    # its COG lands, often before the raster pyramid is written, so a gap is
+    # normal AND temporary.
+    gfs_cache_control_tile_miss: str = "public, max-age=300"
     # Basemap scraper (loaded from settings.json, env overrides)
     # Default TTL is 30 days — upstream basemap tiles change at most at the
     # month scale, so long Redis TTL + matching Cache-Control cuts relay
@@ -391,6 +395,7 @@ class Settings:
             "gfs_cycles_to_keep",
             "gfs_sync_interval_seconds",
             "gfs_sync_timeout_seconds",
+            "gfs_cache_control_tile_miss",
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -586,6 +591,9 @@ class Settings:
         )
         self.gfs_sync_interval_seconds = self._env_int(
             "GFS_SYNC_INTERVAL_SECONDS", self.gfs_sync_interval_seconds
+        )
+        self.gfs_cache_control_tile_miss = os.getenv(
+            "GFS_CACHE_CONTROL_TILE_MISS", self.gfs_cache_control_tile_miss
         )
         self.gfs_sync_timeout_seconds = self._env_int(
             "GFS_SYNC_TIMEOUT_SECONDS", self.gfs_sync_timeout_seconds
@@ -924,6 +932,9 @@ class Settings:
                 f"Invalid app_role={self.app_role!r}; "
                 f"expected one of {self._APP_ROLES}"
             )
+        for _name in ("gfs_cycles_to_keep", "gfs_tile_ttl", "gfs_geojson_ttl"):
+            if getattr(self, _name) < 1:
+                raise ValueError(f"{_name} must be >= 1 (got {getattr(self, _name)})")
         if self.weather_stations_scrape_interval_seconds < 60:
             raise ValueError(
                 "weather_stations_scrape_interval_seconds must be >= 60 "
