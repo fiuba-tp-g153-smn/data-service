@@ -1,5 +1,11 @@
 """Configuration settings for the application."""
 
+# TECH DEBT: this module centralizes ALL config (CLAUDE.md forbids scattered
+# os.getenv), so it grows a few lines with every new tunable and now sits over
+# pylint's 1000-line module cap. Splitting into per-domain settings modules is
+# the real fix — tracked as its own commit rather than blocking each addition.
+# pylint: disable=too-many-lines
+
 import json
 import os
 from pathlib import Path
@@ -195,6 +201,13 @@ class Settings:
     # used by /basemap/providers. Each refresh actively probes upstream and
     # checks the S3 fallback, so the TTL is the freshness/cost trade-off.
     basemap_provider_availability_ttl: int = 240
+    # Negative (tile-miss) cache: the reader short-circuits a tile that recently
+    # missed the whole chain (provider + Redis + S3) with a transparent PNG for
+    # `ttl` seconds instead of re-hitting upstream every request — bounding the
+    # relay storms that empty-ocean / above-coverage panning would otherwise
+    # cause. The scraper clears the tombstone when it later stores the tile.
+    basemap_negative_cache_enabled: bool = True
+    basemap_negative_cache_ttl: int = 300
     # Resumable-scrape state (SQLite cold storage + checkpoint knobs)
     basemap_scrape_state_db_path: str = "data/basemap_scraper_state.sqlite"
     basemap_scrape_checkpoint_every: int = 200
@@ -248,6 +261,11 @@ class Settings:
     # compatibility but no longer drives tripping.
     basemap_provider_error_rate_threshold: float = 0.05
     basemap_provider_error_rate_min_samples: int = 50
+    # The error rate is measured over a rolling window of the most recent fetches
+    # (not the whole sweep), so an early transient outage ages out instead of
+    # pinning a recovered provider tripped. Large enough that rare scattered
+    # failures stay well under the threshold; must be >= error_rate_min_samples.
+    basemap_provider_error_rate_window: int = 200
 
     # --- Weather stations subsystem (loaded from settings.json, env overrides) ---
     # Operational knobs only — secrets (SMN_*, WEATHER_STATIONS_ADMIN_PASSWORD)
@@ -413,6 +431,8 @@ class Settings:
             "basemap_s3_object_ttl_days",
             "basemap_online_fallback_enabled",
             "basemap_provider_availability_ttl",
+            "basemap_negative_cache_enabled",
+            "basemap_negative_cache_ttl",
             "basemap_scrape_state_db_path",
             "basemap_scrape_checkpoint_every",
             "basemap_scrape_checkpoint_seconds",
@@ -429,6 +449,7 @@ class Settings:
             "basemap_provider_cooldown_schedule",
             "basemap_provider_error_rate_threshold",
             "basemap_provider_error_rate_min_samples",
+            "basemap_provider_error_rate_window",
             "weather_stations_sync_mode",
             "weather_stations_scrape_interval_seconds",
             "weather_stations_scrape_lock_path",
@@ -653,6 +674,12 @@ class Settings:
             "BASEMAP_PROVIDER_AVAILABILITY_TTL",
             self.basemap_provider_availability_ttl,
         )
+        self.basemap_negative_cache_enabled = self._env_bool(
+            "BASEMAP_NEGATIVE_CACHE_ENABLED", self.basemap_negative_cache_enabled
+        )
+        self.basemap_negative_cache_ttl = self._env_int(
+            "BASEMAP_NEGATIVE_CACHE_TTL", self.basemap_negative_cache_ttl
+        )
         self.basemap_scrape_state_db_path = os.getenv(
             "BASEMAP_SCRAPE_STATE_DB_PATH", self.basemap_scrape_state_db_path
         )
@@ -710,6 +737,10 @@ class Settings:
         self.basemap_provider_error_rate_min_samples = self._env_int(
             "BASEMAP_PROVIDER_ERROR_RATE_MIN_SAMPLES",
             self.basemap_provider_error_rate_min_samples,
+        )
+        self.basemap_provider_error_rate_window = self._env_int(
+            "BASEMAP_PROVIDER_ERROR_RATE_WINDOW",
+            self.basemap_provider_error_rate_window,
         )
 
         # SMN API + weather-stations subsystem
@@ -904,6 +935,21 @@ class Settings:
             raise ValueError(
                 "basemap_provider_error_rate_min_samples must be >= 1 "
                 f"(got {self.basemap_provider_error_rate_min_samples})"
+            )
+        if (
+            self.basemap_provider_error_rate_window
+            < self.basemap_provider_error_rate_min_samples
+        ):
+            raise ValueError(
+                "basemap_provider_error_rate_window must be >= "
+                "basemap_provider_error_rate_min_samples "
+                f"({self.basemap_provider_error_rate_window} < "
+                f"{self.basemap_provider_error_rate_min_samples})"
+            )
+        if self.basemap_negative_cache_ttl < 1:
+            raise ValueError(
+                "basemap_negative_cache_ttl must be >= 1 "
+                f"(got {self.basemap_negative_cache_ttl})"
             )
         schedule = self.basemap_provider_cooldown_schedule
         if not schedule:

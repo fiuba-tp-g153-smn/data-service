@@ -11,8 +11,17 @@ import pytest_asyncio
 
 from clients.basemap_state_store import BasemapStateStore, Cursor
 from clients.http_tile_client import ProviderUnavailableError
-from services.basemap_config import BasemapProvider, BoundingBox, count_tiles
-from services.basemap_scraper_service import BasemapScraperService
+from services.basemap_config import (
+    BasemapProvider,
+    BoundingBox,
+    count_tiles,
+    iter_tiles,
+)
+from services.basemap_scraper_service import (
+    BasemapScraperService,
+    _ProviderSweepState,
+    _TileOutcome,
+)
 
 
 def _make_provider(min_zoom: int = 5, max_zoom: int = 6) -> BasemapProvider:
@@ -50,6 +59,7 @@ def _make_settings(**overrides) -> SimpleNamespace:
         # the first cooldown short enough to exercise.
         "basemap_provider_error_rate_threshold": 0.95,
         "basemap_provider_error_rate_min_samples": 3,
+        "basemap_provider_error_rate_window": 200,
         "basemap_provider_cooldown_schedule": [300, 900, 3600, 10800, 21600],
     }
     base.update(overrides)
@@ -647,6 +657,86 @@ async def test_circuit_opens_when_error_rate_exceeds_threshold(store):
     assert await store.get_cursor(provider.provider_id) is not None
     # last_completed NOT stamped — the sweep didn't actually finish.
     assert await store.get_last_completed(provider.provider_id) is None
+
+
+@pytest.mark.asyncio
+async def test_progress_resets_trip_escalation(store):
+    """A sweep that still downloads tiles before tripping resets the cooldown
+    escalation to the base (BUG-09a) — a large-but-healthy provider must not
+    ratchet toward hours just because it can't finish in one window."""
+    provider = _make_provider(min_zoom=5, max_zoom=5)
+    bbox = _make_bbox()
+    tiles = list(iter_tiles(5, bbox))
+    n = count_tiles(5, bbox)
+    assert n >= 3
+    # First tile downloads OK, the rest are unavailable. min_samples = n means
+    # the breaker can only trip once every tile has been processed — so the OK
+    # tile is always counted (downloaded > 0) before the trip fires.
+    http = FakeHttp(unavailable_tiles=tiles[1:])
+    await store.open_circuit(
+        provider.provider_id,
+        consecutive_trips=3,
+        cooldown_until=int(time.time()) - 1,  # expired → the sweep runs
+        reason="seeded",
+    )
+    scraper = _make_scraper(
+        store,
+        http,
+        provider,
+        bbox,
+        basemap_provider_error_rate_threshold=0.5,
+        basemap_provider_error_rate_min_samples=n,
+    )
+
+    await scraper._run_sync()
+
+    health = await store.get_health(provider.provider_id)
+    assert health is not None
+    # Reset to the base (1), not ratcheted to prior_trips + 1 == 4.
+    assert health.consecutive_trips == 1
+
+
+def _feed_outcomes(scraper, state, failures):
+    for i, failed in enumerate(failures):
+        outcome = _TileOutcome.UNAVAILABLE if failed else _TileOutcome.OK
+        scraper._update_sweep_state(state, outcome, 5, i, 0)
+
+
+@pytest.mark.asyncio
+async def test_breaker_judges_recent_window_not_cumulative(store):
+    """A failure spread whose cumulative rate would trip but whose recent window
+    is under threshold must NOT trip (BUG-09b)."""
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        _make_provider(),
+        _make_bbox(),
+        basemap_provider_error_rate_threshold=0.5,
+        basemap_provider_error_rate_min_samples=4,
+        basemap_provider_error_rate_window=4,
+    )
+    state = _ProviderSweepState()
+    # F,F,S,S,F → cumulative 3/5 = 60% (old code trips); recent window (last 4)
+    # = [F,S,S,F] = 50% (not > 50% → new code holds).
+    _feed_outcomes(scraper, state, [True, True, False, False, True])
+    assert not state.tripped
+
+
+@pytest.mark.asyncio
+async def test_breaker_still_trips_a_broken_provider(store):
+    """A genuinely broken provider (all failures) still trips at min_samples."""
+    scraper = _make_scraper(
+        store,
+        FakeHttp(),
+        _make_provider(),
+        _make_bbox(),
+        basemap_provider_error_rate_threshold=0.5,
+        basemap_provider_error_rate_min_samples=4,
+        basemap_provider_error_rate_window=4,
+    )
+    state = _ProviderSweepState()
+    _feed_outcomes(scraper, state, [True, True, True, True])
+    assert state.tripped
 
 
 @pytest.mark.asyncio

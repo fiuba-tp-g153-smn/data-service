@@ -3,12 +3,12 @@
 import asyncio
 import logging
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from logging import Logger
-from typing import List, Optional, Set, Tuple
+from typing import Deque, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -72,6 +72,11 @@ class _ProviderSweepState:
     last_reason: str = ""
     failure_samples: List[str] = field(default_factory=list)
     storage_errors: int = 0
+    # Rolling window of the most recent fetch outcomes (True = UNAVAILABLE),
+    # bounded to `error_rate_min_samples`. The breaker trips on the *recent*
+    # failure rate, so an early outage that later recovers ages out of the
+    # window instead of pinning a healthy provider tripped for the whole sweep.
+    recent: Deque[bool] = field(default_factory=deque)
 
 
 @dataclass
@@ -180,6 +185,7 @@ class BasemapScraperService(BaseSyncService):
         # last element) so a repeatedly-flapping provider backs off exponentially.
         self._error_rate_threshold = settings.basemap_provider_error_rate_threshold
         self._error_rate_min_samples = settings.basemap_provider_error_rate_min_samples
+        self._error_rate_window = settings.basemap_provider_error_rate_window
         self._cooldown_schedule = list(settings.basemap_provider_cooldown_schedule)
         # Lifecycle policy is applied lazily inside the scrape loop (instead of
         # once at startup) so a transient S3 outage at boot self-heals on the
@@ -452,7 +458,11 @@ class BasemapScraperService(BaseSyncService):
             # Preserve cursor + failed queue so the next cycle (after the
             # cooldown) resumes from exactly where we left off.
             prior_trips = health.consecutive_trips if health else 0
-            trips = prior_trips + 1
+            # A cycle that still moved the frontier forward (downloaded new
+            # tiles) is a large-but-healthy provider, not a worsening one — reset
+            # the escalation to the base cooldown instead of ratcheting toward
+            # hours. Only a cycle that tripped without any progress escalates.
+            trips = 1 if downloaded > 0 else prior_trips + 1
             cooldown_seconds = self._compute_cooldown(trips)
             cooldown_until = int(time.time()) + cooldown_seconds
             await self._state.open_circuit(
@@ -637,11 +647,13 @@ class BasemapScraperService(BaseSyncService):
         y: int,
     ) -> None:
         # pylint: disable=too-many-arguments
-        """Accrue the sweep error rate and flip ``tripped`` once it's exceeded.
+        """Accrue the recent-window error rate and flip ``tripped`` once exceeded.
 
-        Trips only after `error_rate_min_samples` fetches AND when
-        `failed / attempted` exceeds `error_rate_threshold` — so scattered
-        failures ride through while a genuinely-broken provider still bails.
+        Trips only once the rolling window holds `error_rate_min_samples` fetches
+        AND their failure rate exceeds `error_rate_threshold` — so scattered
+        failures ride through, a genuinely-broken provider still bails early, and
+        an early outage that recovers ages out of the window instead of pinning
+        the provider tripped for the rest of the sweep.
         """
         if outcome is _TileOutcome.MISSING:
             # Legitimately-missing tiles (404/403) aren't health signals — a
@@ -656,22 +668,29 @@ class BasemapScraperService(BaseSyncService):
             return
 
         # OK and UNAVAILABLE are both definitive fetch attempts.
+        is_failure = outcome is _TileOutcome.UNAVAILABLE
         sweep_state.attempted += 1
-        if outcome is _TileOutcome.UNAVAILABLE:
+        if is_failure:
             sweep_state.failed += 1
             if len(sweep_state.failure_samples) < 3:
                 sweep_state.failure_samples.append(f"z={z} x={x} y={y}")
 
+        window = sweep_state.recent
+        window.append(is_failure)
+        if len(window) > self._error_rate_window:
+            window.popleft()
+
         if (
             not sweep_state.tripped
-            and sweep_state.attempted >= self._error_rate_min_samples
-            and sweep_state.failed / sweep_state.attempted > self._error_rate_threshold
+            and len(window) >= self._error_rate_min_samples
+            and sum(window) / len(window) > self._error_rate_threshold
         ):
             sweep_state.tripped = True
-            rate = sweep_state.failed / sweep_state.attempted
+            recent_failed = sum(window)
+            rate = recent_failed / len(window)
             sweep_state.last_reason = (
-                f"tasa de error {rate:.1%} "
-                f"({sweep_state.failed}/{sweep_state.attempted} fetches; "
+                f"tasa de error reciente {rate:.1%} "
+                f"({recent_failed}/{len(window)} de las últimas fetches; "
                 f"samples: {', '.join(sweep_state.failure_samples)})"
             )
 
