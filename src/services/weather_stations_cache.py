@@ -233,13 +233,22 @@ async def recent_snapshot_keys(
 
 
 def parse_observed_at(value: object) -> Optional[datetime]:
-    """Parse an ISO-8601 `observed_at` (with `Z` or offset) into a UTC datetime."""
+    """Parse an ISO-8601 `observed_at` into an aware UTC datetime.
+
+    The result is always timezone-aware: a naive value (SMN feeds sometimes omit
+    the offset) is assumed UTC, and any offset is converted to UTC. This is a
+    hard invariant — a naive datetime reaching the aware-UTC freshness comparison
+    in the read service raises ``TypeError`` and 500s the whole tileset response.
+    """
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # Magnus (Magnus-Tetens) dew-point: empirically accurate roughly over -45..60 °C.

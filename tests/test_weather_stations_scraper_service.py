@@ -8,9 +8,41 @@ import pytest
 
 from clients.smn_api_client import SmnApiError
 from clients.smn_registry_client import SmnRegistryBlockedError, SmnRegistryError
+from datetime import timezone
+
+from services.weather_stations_cache import parse_observed_at
 from services.weather_stations_scraper_service import (
     WeatherStationsScraperService,
 )
+
+
+@pytest.mark.parametrize(
+    "value,expected_iso",
+    [
+        ("2026-05-17T13:00:00Z", "2026-05-17T13:00:00+00:00"),
+        ("2026-05-17T13:00:00", "2026-05-17T13:00:00+00:00"),  # naive -> assume UTC
+        ("2026-05-17T13:00:00-03:00", "2026-05-17T16:00:00+00:00"),  # offset -> UTC
+    ],
+)
+def test_parse_observed_at_always_returns_aware_utc(value, expected_iso):
+    """parse_observed_at must never return a naive datetime — a naive value
+    reaching the freshness comparison raises TypeError and 500s the tileset."""
+    parsed = parse_observed_at(value)
+    assert parsed is not None
+    assert parsed.tzinfo == timezone.utc
+    assert parsed.isoformat() == expected_iso
+
+
+def test_normalize_observed_at_stamps_naive_dates_with_z():
+    """A naive SMN `date` is canonicalized to aware-UTC `...Z` at ingest."""
+    out = WeatherStationsScraperService._normalize_observed_at("2026-05-17T13:00:00")
+    assert out == "2026-05-17T13:00:00Z"
+
+
+def test_normalize_observed_at_passes_through_unparseable():
+    """Unparseable/missing values are left untouched (no data silently dropped)."""
+    assert WeatherStationsScraperService._normalize_observed_at("garbage") == "garbage"
+    assert WeatherStationsScraperService._normalize_observed_at(None) is None
 
 
 class _FakeS3:

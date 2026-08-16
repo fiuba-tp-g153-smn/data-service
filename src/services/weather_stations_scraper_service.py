@@ -24,6 +24,7 @@ from services.weather_stations_cache import (
     compute_tilesets_entries,
     latest_key,
     parse_json_or_none,
+    parse_observed_at,
     pivot_station_series,
     recent_snapshot_keys,
     registry_key,
@@ -428,6 +429,20 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         except Exception:  # pylint: disable=broad-exception-caught
             logger.exception("Failed to record weather_stations metrics")
 
+    @staticmethod
+    def _normalize_observed_at(value: object) -> object:
+        """Canonicalize SMN's ``date`` to aware-UTC ISO (``...Z``) at ingest.
+
+        A naive value is assumed UTC and stamped with ``Z`` so the freshness
+        comparison downstream never sees a naive timestamp. Unparseable/missing
+        values pass through untouched — the read side treats them as unknown
+        rather than crashing, so no observation is silently dropped here.
+        """
+        parsed = parse_observed_at(value)
+        if parsed is None:
+            return value
+        return parsed.isoformat().replace("+00:00", "Z")
+
     def _build_snapshot(
         self, scraped_at: datetime, raw: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
@@ -443,7 +458,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
             normalized.append(
                 {
                     "station_id": station_id,
-                    "observed_at": item.get("date"),
+                    "observed_at": self._normalize_observed_at(item.get("date")),
                     "temperature": item.get("temperature"),
                     "feels_like": item.get("feels_like"),
                     "humidity": item.get("humidity"),
