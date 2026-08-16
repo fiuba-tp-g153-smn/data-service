@@ -67,12 +67,19 @@ class WrfFullSyncStrategy:
         tile_ttl: int = 0,
         geojson_ttl: int = 0,
         listing_ttl: int = 0,
+        inits_to_keep: int = 0,
     ):
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
         self._s3 = s3_client
         self._fallback = (
             WrfOnDemandStrategy(
-                redis_client, s3_client, tile_ttl, geojson_ttl, listing_ttl
+                redis_client,
+                s3_client,
+                tile_ttl,
+                geojson_ttl,
+                listing_ttl,
+                inits_to_keep,
             )
             if s3_client is not None
             else None
@@ -154,6 +161,7 @@ class WrfOnDemandStrategy:
         tile_ttl: int,
         geojson_ttl: int,
         listing_ttl: int,
+        inits_to_keep: int = 0,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
@@ -161,6 +169,7 @@ class WrfOnDemandStrategy:
         self._tile_ttl = tile_ttl
         self._geojson_ttl = geojson_ttl
         self._listing_ttl = listing_ttl
+        self._inits_to_keep = inits_to_keep
 
     async def get_tile(
         self,
@@ -241,6 +250,8 @@ class WrfOnDemandStrategy:
             ),
             reverse=True,
         )
+        if self._inits_to_keep > 0:
+            init_runs = init_runs[: self._inits_to_keep]
 
         await self._redis.cache_listing(
             cache_key, json.dumps(init_runs).encode(), self._listing_ttl

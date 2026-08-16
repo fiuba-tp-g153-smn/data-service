@@ -181,3 +181,22 @@ async def test_wrf_list_init_runs_falls_back_to_s3(mock_redis_client):
         "20260603_060000",
         "20260603_000000",
     ]
+
+
+@pytest.mark.asyncio
+async def test_wrf_cold_listing_is_capped_at_inits_to_keep(mock_redis_client):
+    """The cold path must hide the same retired runs the sync loop prunes."""
+    mock_redis_client.get_wrf_init_runs = AsyncMock(return_value=[])
+    s3 = _s3_listing(
+        [
+            "tiles/wrf/Precipitacion1h/20260603_000000/",
+            "tiles/wrf/Precipitacion1h/20260603_060000/",
+            "tiles/wrf/Precipitacion1h/20260603_120000/",
+        ]
+    )
+    strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30, 2)
+
+    assert await strategy.list_init_runs("Precipitacion1h") == [
+        "20260603_120000",
+        "20260603_060000",
+    ]

@@ -211,6 +211,7 @@ async def configure_strategies(
             settings.wrf_tile_ttl,
             settings.wrf_geojson_ttl,
             settings.tileset_listing_ttl,
+            settings.wrf_inits_to_keep,
         )
         gfs_strategy = GfsFullSyncStrategy(
             client_redis,
@@ -267,6 +268,7 @@ async def configure_strategies(
             settings.wrf_tile_ttl,
             settings.wrf_geojson_ttl,
             settings.tileset_listing_ttl,
+            settings.wrf_inits_to_keep,
         )
         gfs_strategy = GfsOnDemandStrategy(
             client_redis,
