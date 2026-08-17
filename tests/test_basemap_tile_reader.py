@@ -28,6 +28,8 @@ def _make_redis() -> MagicMock:
     redis = MagicMock()
     redis.get_basemap_tile = AsyncMock(return_value=None)
     redis.store_basemap_tile = AsyncMock()
+    redis.get_basemap_tile_miss = AsyncMock(return_value=False)
+    redis.mark_basemap_tile_miss = AsyncMock()
     return redis
 
 
@@ -95,6 +97,55 @@ async def test_prod_hit_writes_through_to_redis_and_s3():
     await _drain(reader)
     redis.store_basemap_tile.assert_awaited()
     s3.upload_tile.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_miss_tombstone_short_circuits_relay():
+    """A live miss tombstone returns None without hitting the provider (BUG-07)."""
+    redis = _make_redis()
+    redis.get_basemap_tile_miss = AsyncMock(return_value=True)
+    http = _make_http(data=b"should-not-be-called")
+    reader = _make_reader(redis=redis, http=http)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+
+    assert got is None
+    http.download_tile.assert_not_called()  # relay skipped
+    redis.get_basemap_tile.assert_not_called()  # chain skipped entirely
+
+
+@pytest.mark.asyncio
+async def test_full_chain_miss_marks_tombstone():
+    """Provider + Redis + S3 all miss → the tile is tombstoned so the next
+    request short-circuits at tier 0 (BUG-07)."""
+    redis = _make_redis()  # get_basemap_tile_miss=False, get_basemap_tile=None
+    s3 = _make_s3(data=None)
+    http = _make_http(data=None)  # provider miss
+    reader = _make_reader(redis=redis, s3=s3, http=http)
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+
+    assert got is None
+    await _drain(reader)
+    redis.mark_basemap_tile_miss.assert_awaited_once()
+    args = redis.mark_basemap_tile_miss.await_args.args
+    assert args[:4] == ("fake", 5, 10, 20)
+
+
+@pytest.mark.asyncio
+async def test_negative_cache_disabled_when_redis_off():
+    """relay_only / no-redis wiring disables the tombstone (it lives in Redis)."""
+    redis = _make_redis()
+    http = _make_http(data=None)
+    reader = _make_reader(
+        redis=redis, http=http, redis_cache_enabled=False, s3_cache_enabled=False
+    )
+
+    got = await reader.get_tile("fake", 5, 10, 20)
+
+    assert got is None
+    redis.get_basemap_tile_miss.assert_not_called()
+    redis.mark_basemap_tile_miss.assert_not_called()
 
 
 @pytest.mark.asyncio

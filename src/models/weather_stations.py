@@ -1,6 +1,6 @@
 """Response models for the weather-stations endpoints."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -326,7 +326,7 @@ def make_admin_create_response(
         key_id=key_id,
         label=label,
         secret=secret,
-        created_at=datetime.fromtimestamp(created_at_epoch),
+        created_at=datetime.fromtimestamp(created_at_epoch, tz=timezone.utc),
     )
 
 
@@ -340,9 +340,9 @@ def make_admin_list_entry(
     return AdminKeyListEntry(
         key_id=key_id,
         label=label,
-        created_at=datetime.fromtimestamp(created_at_epoch),
+        created_at=datetime.fromtimestamp(created_at_epoch, tz=timezone.utc),
         last_used_at=(
-            datetime.fromtimestamp(last_used_at_epoch)
+            datetime.fromtimestamp(last_used_at_epoch, tz=timezone.utc)
             if last_used_at_epoch is not None
             else None
         ),

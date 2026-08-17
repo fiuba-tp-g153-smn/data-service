@@ -197,7 +197,7 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(RADAR_S3_PREFIX)
+        subdirs = await self._s3.try_get_subdirectories(RADAR_S3_PREFIX)
         radars = sorted(s.rstrip("/").split("/")[-1] for s in subdirs)
 
         await self._redis.cache_listing(
@@ -216,7 +216,7 @@ class RadarOnDemandStrategy:
             return []
 
         prefix = f"{RADAR_S3_PREFIX}/{radar_id}"
-        subdirs = await self._s3.get_subdirectories(prefix)
+        subdirs = await self._s3.try_get_subdirectories(prefix)
         variables = sorted(s.rstrip("/").split("/")[-1] for s in subdirs)
 
         await self._redis.cache_listing(
@@ -235,7 +235,7 @@ class RadarOnDemandStrategy:
             return []
 
         prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}"
-        subdirs = await self._s3.get_subdirectories(prefix)
+        subdirs = await self._s3.try_get_subdirectories(prefix)
         elevations = []
         for subdir in subdirs:
             name = subdir.rstrip("/").split("/")[-1]
@@ -263,7 +263,7 @@ class RadarOnDemandStrategy:
             return []
 
         prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}/{elevation_id}"
-        subdirs = await self._s3.get_subdirectories(prefix)
+        subdirs = await self._s3.try_get_subdirectories(prefix)
         tilesets = []
         for subdir in subdirs:
             name = subdir.rstrip("/").split("/")[-1]

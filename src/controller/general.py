@@ -16,7 +16,7 @@ router = APIRouter()
     response_description="Return service status",
     responses=ROOT_RESPONSES,
 )
-def root():
+async def root():
     """Check if the API service is up and running."""
     logger.info("Root endpoint was accessed")
     return {"status": "ok", "service": "data-service"}
@@ -30,6 +30,6 @@ def root():
     response_description="Returns 200 if service is healthy",
     responses=HEALTH_RESPONSES,
 )
-def health_check():
+async def health_check():
     """Perform a health check of the service."""
     return {"status": "running"}

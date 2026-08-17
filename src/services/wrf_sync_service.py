@@ -123,9 +123,10 @@ class WrfSyncService(DomainSyncService):
                 # Reconcile the per-product init index to the active set so it
                 # can't accumulate stale init runs over time. The init_runs
                 # sorted set has its whole-key TTL refreshed on every new step,
-                # so old members never expire on their own. Skip when the listing
-                # is empty so a transient S3 error (get_subdirectories returns []
-                # on failure) can't wipe the index — mirrors the ECMWF guard.
+                # so old members never expire on their own. A transient S3 error
+                # now *raises* out of the listing above and is caught below as an
+                # error cycle (aborting before this prune, so the index survives);
+                # this guard only skips the legitimately-empty case.
                 if active_inits:
                     await self._redis_client.prune_wrf_inits(
                         product_id, [it for it, _ in active_inits]

@@ -116,7 +116,7 @@ class EcmwfMslpOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(S3Client.ECMWF_MSLP_COG_PREFIX)
+        subdirs = await self._s3.try_get_subdirectories(S3Client.ECMWF_MSLP_COG_PREFIX)
         forecasts = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -142,7 +142,7 @@ class EcmwfMslpOnDemandStrategy:
             return []
 
         prefix = f"{S3Client.ECMWF_MSLP_COG_PREFIX}/{forecast_ts}/"
-        basenames = await self._s3.list_object_basenames(prefix, ".tif")
+        basenames = await self._s3.try_list_object_basenames(prefix, ".tif")
         timestamps = sorted(b for b in basenames if is_valid_timestamp_format(b))
 
         await self._redis.cache_listing(

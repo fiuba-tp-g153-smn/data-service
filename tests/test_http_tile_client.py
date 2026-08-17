@@ -9,9 +9,10 @@ from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int = 200, content: bytes = b"ok"):
+    def __init__(self, status_code: int = 200, content: bytes = b"ok", headers=None):
         self.status_code = status_code
         self.content = content
+        self.headers = headers or {}
 
 
 class _FakeHttpxClient:
@@ -221,3 +222,38 @@ async def test_success_still_returns_bytes():
         lambda _url: _FakeResponse(status_code=200, content=b"bytes")
     )
     assert await client.download_tile("https://host.test/1/2/3.png") == b"bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content,headers",
+    [
+        (b"", {}),  # empty body
+        (b"", {"content-type": "image/png"}),  # empty even with an image type
+        (b"<html>rate limited</html>", {"content-type": "text/html"}),  # error page
+    ],
+)
+async def test_non_tile_200_treated_as_miss(content, headers):
+    """A 200 with an empty body or a text/HTML error page is a MISS, not a tile,
+    so it is never cached and served as a real tile (BUG-20)."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=5, max_retries=1
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(status_code=200, content=content, headers=headers)
+    )
+    assert await client.download_tile("https://host.test/1/2/3.png") is None
+
+
+@pytest.mark.asyncio
+async def test_image_200_returns_bytes_regardless_of_content_type():
+    """A non-empty 200 with an image / octet-stream / missing type is served."""
+    client = HttpTileClient(
+        max_concurrent=4, delay_ms=0, timeout_seconds=5, max_retries=1
+    )
+    client._client = _ScriptedHttpxClient(  # type: ignore[assignment]
+        lambda _url: _FakeResponse(
+            status_code=200, content=b"\x89PNG", headers={"content-type": "image/png"}
+        )
+    )
+    assert await client.download_tile("https://host.test/1/2/3.png") == b"\x89PNG"

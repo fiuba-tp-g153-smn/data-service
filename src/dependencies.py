@@ -17,7 +17,13 @@ from settings import Settings
 
 settings: Settings = Settings.get_settings()
 logger: Logger = init_logger(settings)
-redis_client: RedisClient = RedisClient(settings.redis_url)
+redis_client: RedisClient = RedisClient(
+    settings.redis_url,
+    max_connections=settings.redis_max_connections,
+    socket_timeout_seconds=settings.redis_socket_timeout_seconds,
+    socket_connect_timeout_seconds=settings.redis_socket_connect_timeout_seconds,
+    health_check_interval_seconds=settings.redis_health_check_interval_seconds,
+)
 metrics_store: MetricsStore = MetricsStore(settings.metrics_db_path)
 basemap_service: BasemapService = BasemapService()
 # Populated in the lifespan via `set_weather_stations_keystore`. Routes hold a

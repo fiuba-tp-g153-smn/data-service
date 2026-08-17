@@ -46,8 +46,9 @@ clean:
 	# Drop the orphaned pre-rename data volume too (old "data" volume), best-effort.
 	docker volume rm data-service_data data-service_dataservice_data data-service_redis_dev_data data-service_redis_data 2>/dev/null || true
 	# Dev /app/data is a host BIND mount (./data), not a volume — `docker volume rm`
-	# never touches it. Wipe its contents (metrics + basemap scrape state +
-	# keystore SQLite) via a throwaway container so root-owned files are removed.
+	# never touches it. Wipe its contents (metrics + basemap scrape state SQLite;
+	# API keys live in S3, not here) via a throwaway container so root-owned files
+	# are removed.
 	docker run --rm -v "$$(pwd)/data:/data" alpine sh -c 'rm -rf /data/* /data/.[!.]* 2>/dev/null' || true
 
 precommit:

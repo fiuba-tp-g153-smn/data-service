@@ -3,7 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional
+from typing import Awaitable, Optional
 
 import uvloop
 from fastapi import FastAPI
@@ -389,6 +389,8 @@ async def configure_basemap(
         request_deadline_seconds=settings.basemap_request_deadline_seconds,
         redis_cache_enabled=redis_cache_enabled,
         s3_cache_enabled=s3_cache_enabled,
+        negative_cache_enabled=settings.basemap_negative_cache_enabled,
+        negative_cache_ttl=settings.basemap_negative_cache_ttl,
     )
 
     scraper_http_client: Optional[HttpTileClient] = None
@@ -586,20 +588,38 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     )
 
 
+async def _safe_shutdown(step: Awaitable[None], label: str) -> None:
+    """Await one teardown step, logging and swallowing any failure.
+
+    Shutdown must be best-effort: a single ``close()`` that raises can't be
+    allowed to skip every remaining teardown (which would leak the other
+    connections and leave SQLite unclosed). Isolating each step guarantees the
+    rest always run.
+    """
+    try:
+        await step
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        logger.warning("Shutdown step '%s' failed: %s", label, exc)
+
+
 async def shutdown_weather_stations(runtime: WeatherStationsRuntime) -> None:
     """Tear down weather-stations resources in reverse startup order."""
     if runtime.scraper is not None:
-        await runtime.scraper.stop(logger)
+        await _safe_shutdown(runtime.scraper.stop(logger), "weather_stations.scraper")
     if runtime.smn_client is not None:
-        await runtime.smn_client.close()
+        await _safe_shutdown(runtime.smn_client.close(), "weather_stations.smn_client")
     if runtime.registry_client is not None:
-        await runtime.registry_client.close()
+        await _safe_shutdown(
+            runtime.registry_client.close(), "weather_stations.registry_client"
+        )
     if runtime.s3_client is not None:
-        await runtime.s3_client.close()
+        await _safe_shutdown(runtime.s3_client.close(), "weather_stations.s3_client")
     if runtime.keystore is not None:
-        await runtime.keystore.close()
+        await _safe_shutdown(runtime.keystore.close(), "weather_stations.keystore")
     if runtime.api_keys_s3_client is not None:
-        await runtime.api_keys_s3_client.close()
+        await _safe_shutdown(
+            runtime.api_keys_s3_client.close(), "weather_stations.api_keys_s3_client"
+        )
 
 
 async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
@@ -607,31 +627,46 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
     if not runtime:
         return
     if runtime.scraper is not None:
-        await runtime.scraper.stop(logger)
+        await _safe_shutdown(runtime.scraper.stop(logger), "basemap.scraper")
     if runtime.state_store is not None:
-        await runtime.state_store.close()
-    await runtime.reader.close()
-    await runtime.reader_http_client.close()
+        await _safe_shutdown(runtime.state_store.close(), "basemap.state_store")
+    await _safe_shutdown(runtime.reader.close(), "basemap.reader")
+    await _safe_shutdown(
+        runtime.reader_http_client.close(), "basemap.reader_http_client"
+    )
     if runtime.scraper_http_client is not None:
-        await runtime.scraper_http_client.close()
+        await _safe_shutdown(
+            runtime.scraper_http_client.close(), "basemap.scraper_http_client"
+        )
     if runtime.s3_client is not None:
-        await runtime.s3_client.close()
+        await _safe_shutdown(runtime.s3_client.close(), "basemap.s3_client")
 
 
 async def shutdown_services():
     """Stop the per-product background sync loops if sync mode is full."""
     if settings.sync_mode == "full":
         for service in _SYNC_SERVICES:
-            await service.stop(logger)
+            await _safe_shutdown(
+                service.stop(logger), f"sync:{service.__class__.__name__}"
+            )
+
+
+# In production, cap the total wait for S3 at startup: a real outage should fail
+# the process so the orchestrator restarts/alerts, rather than leaving a
+# container stuck "starting" forever and never binding /health. Dev keeps waiting
+# indefinitely — its `--reload` reloader won't respawn a child that died, so a
+# hard crash there wedges the container until a file change.
+_S3_STARTUP_WAIT_MAX_SECONDS = 120.0
 
 
 async def _wait_for_s3_reachable() -> None:
-    """Block startup until S3 answers, retrying without limit with capped backoff.
+    """Block startup until S3 answers, with capped backoff.
 
-    Keeps the process alive instead of crashing on a cold/slow S3. In dev the
-    `--reload` reloader does not respawn a child that died, so a hard crash here
-    would wedge the container until a file change; waiting lets it self-heal when
-    S3 comes up (prod already self-heals via uvicorn's worker respawn).
+    In production the total wait is bounded by ``_S3_STARTUP_WAIT_MAX_SECONDS``,
+    after which it raises so the orchestrator can restart/alert. In development it
+    retries without limit and self-heals when S3 returns (the `--reload` reloader
+    does not respawn a child that died, so a hard crash would wedge the container
+    until a file change).
     """
     probe = S3Client(
         endpoint=settings.s3_tiles_data_endpoint,
@@ -644,10 +679,18 @@ async def _wait_for_s3_reachable() -> None:
         read_timeout=settings.s3_read_timeout_seconds,
         max_attempts=settings.s3_max_attempts,
     )
+    bounded = settings.app_env == "production"
     try:
         await probe.connect()
         backoff = 1.0
+        waited = 0.0
         while not await probe.is_reachable():
+            if bounded and waited >= _S3_STARTUP_WAIT_MAX_SECONDS:
+                raise RuntimeError(
+                    f"S3 endpoint {settings.s3_tiles_data_endpoint} unreachable "
+                    f"after {waited:.0f}s; failing startup so the orchestrator "
+                    "can restart."
+                )
             logger.warning(
                 "S3 endpoint %s not reachable; retrying in %.0fs "
                 "(startup blocked until S3 is available)",
@@ -655,6 +698,7 @@ async def _wait_for_s3_reachable() -> None:
                 backoff,
             )
             await asyncio.sleep(backoff)
+            waited += backoff
             backoff = min(backoff * 2, 30.0)
     finally:
         await probe.close()
@@ -678,10 +722,11 @@ async def lifespan(_app: FastAPI):
     await asyncio.to_thread(ensure_migrations, settings)
     await metrics_store.connect()
 
-    # S3 is a hard dependency. Block here until it answers (unlimited retry with
-    # capped backoff) instead of crashing — so dev (`--reload`, whose reloader
-    # won't respawn a dead child) recovers automatically when S3 returns, the
-    # same way prod's worker respawn already does.
+    # S3 is a hard dependency. Block here until it answers (capped backoff)
+    # instead of crashing — so dev (`--reload`, whose reloader won't respawn a
+    # dead child) recovers automatically when S3 returns. In production the wait
+    # is bounded and then raises, so a real outage fails startup (orchestrator
+    # restart/alert) rather than wedging the container as "starting" forever.
     if settings.is_s3_configured():
         await _wait_for_s3_reachable()
 
@@ -718,18 +763,20 @@ async def lifespan(_app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown — each step is isolated so one failing close can't skip the rest.
     logger.info("Shutting down data-service...")
     if redis_metrics_service is not None:
-        await redis_metrics_service.stop(logger)
+        await _safe_shutdown(
+            redis_metrics_service.stop(logger), "redis_metrics_service"
+        )
     await shutdown_weather_stations(weather_stations_runtime)
     await shutdown_basemap(basemap_runtime)
     await shutdown_services()
 
     if s3_client:
-        await s3_client.close()
-    await metrics_store.close()
-    await redis_client.close()
+        await _safe_shutdown(s3_client.close(), "s3_client")
+    await _safe_shutdown(metrics_store.close(), "metrics_store")
+    await _safe_shutdown(redis_client.close(), "redis_client")
 
 
 app: FastAPI = FastAPI(
@@ -763,7 +810,10 @@ app: FastAPI = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # Auth is header-based (X-API-Key / X-Admin-Password), never cookies, so
+    # credentialed CORS is unnecessary — and `allow_credentials=True` with a
+    # wildcard origin reflects any Origin back, an insecure combination.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

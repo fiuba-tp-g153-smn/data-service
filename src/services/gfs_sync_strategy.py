@@ -175,7 +175,7 @@ class GfsOnDemandStrategy:
         if not self._s3 or segment is None:
             return []
 
-        subdirs = await self._s3.get_subdirectories(
+        subdirs = await self._s3.try_get_subdirectories(
             S3Client.gfs_cog_cycle_prefix(segment)
         )
         cycles = sorted(
@@ -206,7 +206,7 @@ class GfsOnDemandStrategy:
         if not self._s3 or segment is None:
             return []
 
-        basenames = await self._s3.list_object_basenames(
+        basenames = await self._s3.try_list_object_basenames(
             f"{S3Client.gfs_cog_cycle_prefix(segment)}{cycle}/", ".tif", delimiter="/"
         )
         steps = sorted(
@@ -254,7 +254,7 @@ class GfsOnDemandStrategy:
             if cached:
                 return json.loads(cached)
 
-            basenames = await self._s3.list_object_basenames(
+            basenames = await self._s3.try_list_object_basenames(
                 S3Client.gfs_geojson_cycle_prefix(segment, cycle),
                 ".json",
                 delimiter="/",

@@ -71,7 +71,7 @@ x-ds-dev-common: &ds-dev-common
     - ./output_radar:/output_radar
     - ./data:/app/data
   healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=5)"]
     interval: 10s
     timeout: 10s
     retries: 3
@@ -81,8 +81,8 @@ x-ds-dev-common: &ds-dev-common
 services:
   redis:
     container_name: data-service-redis-dev
-    image: redis:8.6-alpine
-    command: redis-server --maxmemory 5gb --maxmemory-policy allkeys-lru --save 300 1 --appendonly no
+    image: redis:8.10-trixie
+    command: redis-server --maxmemory 5gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
     restart: unless-stopped
     ports:
       - "6389:6379"

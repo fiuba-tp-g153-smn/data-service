@@ -168,7 +168,7 @@ async def get_radar_point_value(
             tileset_id,
         )
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="cog_not_found",
         ) from exc
     except NoDataOrOutsideError as exc:
@@ -182,7 +182,7 @@ async def get_radar_point_value(
             lon,
         )
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="nodata_or_outside",
         ) from exc
 

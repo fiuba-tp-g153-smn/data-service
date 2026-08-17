@@ -22,6 +22,13 @@ from clients.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
+# Default ceiling on tiles held in memory during a sync (downloaded, awaiting
+# their Redis write). Small — tiles are ~100KB webp — but enough to keep the S3
+# read stage busy while the decoupled write stage drains. Bounds worst-case
+# memory (and applies backpressure) once the Redis write is no longer serialized
+# behind the S3 download semaphore.
+_DEFAULT_SYNC_MAX_INFLIGHT_TILES = 64
+
 
 class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instance-attributes
     """
@@ -42,6 +49,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         connect_timeout: Optional[float] = None,
         read_timeout: Optional[float] = None,
         max_attempts: Optional[int] = None,
+        sync_max_inflight_tiles: int = _DEFAULT_SYNC_MAX_INFLIGHT_TILES,
     ):
         # pylint: disable=too-many-arguments
         self._endpoint = endpoint
@@ -56,9 +64,17 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         # once here; None means "keep botocore defaults".
         self._config = self._build_config(connect_timeout, read_timeout, max_attempts)
         self._semaphore = asyncio.Semaphore(max_concurrent_downloads)
+        # Bounds total in-flight sync tiles (downloaded but not yet written) so
+        # the decoupled Redis write stage can't accumulate a whole prefix in
+        # memory when Redis is slow. Never below the S3 read concurrency, so it
+        # only caps the write backlog — it never throttles downloads.
+        self._sync_pipeline_semaphore = asyncio.Semaphore(
+            max(sync_max_inflight_tiles, max_concurrent_downloads)
+        )
         self._session = aioboto3.Session()
         self._exit_stack: Optional[AsyncExitStack] = None
         self._client: Optional[S3ClientType] = None
+        self._connect_lock = asyncio.Lock()
 
     @staticmethod
     def _build_config(
@@ -86,21 +102,30 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         return f"{protocol}://{self._endpoint}"
 
     async def connect(self) -> None:
-        """Create persistent S3 client connection."""
+        """Create persistent S3 client connection (idempotent, race-safe).
+
+        The lock + double check ensure two coroutines racing first-use build a
+        single client; without it the second overwrites the first, leaking an
+        aioboto3 client that is never aclose()d.
+        """
         if self._client:
             return
-        self._exit_stack = AsyncExitStack()
-        client_kwargs: dict = {
-            "endpoint_url": self._get_endpoint_url(),
-            "aws_access_key_id": self._access_key,
-            "aws_secret_access_key": self._secret_key,
-        }
-        if self._config is not None:
-            client_kwargs["config"] = self._config
-        ctx = self._session.client("s3", **client_kwargs)
+        async with self._connect_lock:
+            if self._client:
+                return
+            exit_stack = AsyncExitStack()
+            client_kwargs: dict = {
+                "endpoint_url": self._get_endpoint_url(),
+                "aws_access_key_id": self._access_key,
+                "aws_secret_access_key": self._secret_key,
+            }
+            if self._config is not None:
+                client_kwargs["config"] = self._config
+            ctx = self._session.client("s3", **client_kwargs)
 
-        self._client = await self._exit_stack.enter_async_context(ctx)
-        logger.info("S3 client connected to %s", self._get_endpoint_url())
+            self._client = await exit_stack.enter_async_context(ctx)
+            self._exit_stack = exit_stack
+            logger.info("S3 client connected to %s", self._get_endpoint_url())
 
     async def close(self) -> None:
         """Close the S3 client connection."""
@@ -119,6 +144,40 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             raise RuntimeError("S3 client failed to connect")
 
         return self._client
+
+    @staticmethod
+    def _parse_zxy(s3_key: str) -> Optional[tuple]:
+        """Parse the trailing ``/{z}/{x}/{y}.webp`` of a tile key.
+
+        Returns ``(z, x, y)`` as ints, or ``None`` for a malformed key so a
+        single bad object is skipped rather than aborting the whole sync.
+        """
+        parts = s3_key.split("/")
+        if len(parts) < 3:
+            return None
+        try:
+            z = int(parts[-3])
+            x = int(parts[-2])
+            y = int(parts[-1].removesuffix(".webp"))
+        except ValueError:
+            return None
+        return z, x, y
+
+    async def _download_webp_bytes(self, s3_key: str) -> bytes:
+        """Read one tile's bytes from S3, holding the download semaphore only
+        for the read.
+
+        The semaphore is released as soon as the bytes are in hand, so the
+        caller's Redis write happens outside it — a slow Redis can no longer
+        occupy download slots and throttle S3.
+        """
+        if self._client is None:
+            raise RuntimeError("S3 client is not connected")
+        client = self._client
+        async with self._semaphore:
+            response = await client.get_object(Bucket=self._bucket, Key=s3_key)
+            async with response["Body"] as stream:
+                return await stream.read()
 
     async def sync_prefix_to_redis(
         self,
@@ -186,31 +245,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> bool:
         # pylint: disable=too-many-arguments
         """Download a single tile from S3 and store in Redis."""
-        if self._client is None:
-            raise RuntimeError("S3 client is not connected")
-
-        client = self._client
-        async with self._semaphore:
+        async with self._sync_pipeline_semaphore:
             try:
-                # Parse z/x/y from key: .../{tileset_id}/{z}/{x}/{y}.webp
-                parts = s3_key.split("/")
-                y_file = parts[-1]  # "{y}.webp"
-                x = parts[-2]
-                z = parts[-3]
-                y = y_file.replace(".webp", "")
-
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
-                async with response["Body"] as stream:
-                    content = await stream.read()
-
+                zxy = self._parse_zxy(s3_key)
+                if zxy is None:
+                    logger.error("Malformed satellite tile key, skipping: %s", s3_key)
+                    return False
+                z, x, y = zxy
+                content = await self._download_webp_bytes(s3_key)
                 await redis_client.store_satellite_tile(
-                    channel_dir,
-                    tileset_id,
-                    int(z),
-                    int(x),
-                    int(y),
-                    content,
-                    ttl=tile_ttl,
+                    channel_dir, tileset_id, z, x, y, content, ttl=tile_ttl
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -226,7 +270,11 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         instead of raising, mirroring the other read-path tolerance in this
         client.
         """
-        objects = await self._list_objects(prefix)
+        try:
+            objects = await self._list_objects(prefix)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.error("Error listing keys under %s: %s", prefix, e)
+            return []
         return [obj["Key"] for obj in objects]
 
     async def _list_objects(self, prefix: str, delimiter: str = "") -> List[dict]:
@@ -253,9 +301,17 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                 for obj in page.get("Contents", []):
                     if not obj["Key"].endswith("/"):
                         objects.append(obj)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Error listing objects: %s", e)
-        return objects
+            return objects
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            # Infra failure: raise so callers can tell "couldn't list" from
+            # "listed nothing". Sync loops (which wrap the cycle in
+            # except → errors += 1) count it as a real failure instead of an
+            # empty-but-healthy cycle; read-path callers use the tolerant
+            # `try_*` variants / `list_object_keys` that degrade to []. Never
+            # return a partial page as if complete, and let programming errors
+            # surface too rather than be swallowed as "empty".
+            logger.error("Error listing objects under %s: %s", prefix, e)
+            raise
 
     WRF_TILES_PREFIX = "tiles/wrf"
     WRF_COG_PREFIX = "cog/wrf"
@@ -339,31 +395,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Download a single WRF tile from S3 and store in Redis."""
-        if self._client is None:
-            raise RuntimeError("S3 client is not connected")
-
-        client = self._client
-        async with self._semaphore:
+        async with self._sync_pipeline_semaphore:
             try:
-                parts = s3_key.split("/")
-                y_file = parts[-1]
-                x = parts[-2]
-                z = parts[-3]
-                y = y_file.replace(".webp", "")
-
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
-                async with response["Body"] as stream:
-                    content = await stream.read()
-
+                zxy = self._parse_zxy(s3_key)
+                if zxy is None:
+                    logger.error("Malformed WRF tile key, skipping: %s", s3_key)
+                    return False
+                z, x, y = zxy
+                content = await self._download_webp_bytes(s3_key)
                 await redis_client.store_wrf_tile(
-                    product_id,
-                    init_tag,
-                    fxxx,
-                    int(z),
-                    int(x),
-                    int(y),
-                    content,
-                    ttl=tile_ttl,
+                    product_id, init_tag, fxxx, z, x, y, content, ttl=tile_ttl
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -467,30 +508,16 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Download a single ECMWF total precipitation tile from S3 and store in Redis."""
-        if self._client is None:
-            raise RuntimeError("S3 client is not connected")
-
-        client = self._client
-        async with self._semaphore:
+        async with self._sync_pipeline_semaphore:
             try:
-                parts = s3_key.split("/")
-                y_file = parts[-1]
-                x = parts[-2]
-                z = parts[-3]
-                y = y_file.replace(".webp", "")
-
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
-                async with response["Body"] as stream:
-                    content = await stream.read()
-
+                zxy = self._parse_zxy(s3_key)
+                if zxy is None:
+                    logger.error("Malformed ECMWF-TP tile key, skipping: %s", s3_key)
+                    return False
+                z, x, y = zxy
+                content = await self._download_webp_bytes(s3_key)
                 await redis_client.store_ecmwf_tp_tile(
-                    forecast_ts,
-                    period_ts,
-                    int(z),
-                    int(x),
-                    int(y),
-                    content,
-                    ttl=tile_ttl,
+                    forecast_ts, period_ts, z, x, y, content, ttl=tile_ttl
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught
@@ -597,19 +624,35 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             names.append(tail[: -len(suffix)])
         return names
 
+    async def try_list_object_basenames(
+        self, prefix: str, suffix: str, delimiter: str = ""
+    ) -> List[str]:
+        """Read-path variant of ``list_object_basenames``: ``[]`` on infra error.
+
+        Read endpoints degrade to an empty list on a transient S3 outage; sync
+        loops call ``list_object_basenames`` (which raises) so the outage counts.
+        """
+        try:
+            return await self.list_object_basenames(prefix, suffix, delimiter=delimiter)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("Basename listing degraded to [] for %s: %s", prefix, e)
+            return []
+
     async def sync_ecmwf_mslp_forecast_to_redis(
         self,
         redis_client: RedisClient,
         forecast_ts: str,
         timestamps: List[str],
         geojson_ttl: int,
-    ) -> int:
+    ) -> List[str]:
         """Download all GeoJSON files for a forecast from S3 and store in Redis.
 
-        Returns the count of GeoJSONs successfully stored.
+        Returns the timestamps whose GeoJSON was actually stored, so the caller
+        indexes only what landed — not the full COG listing, which would
+        advertise timestamps that return no isobars.
         """
         if not timestamps:
-            return 0
+            return []
 
         await self._ensure_connected()
         logger.info(
@@ -625,7 +668,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             for timestamp_ts in timestamps
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        return sum(1 for r in results if r is True)
+        return [ts for ts, ok in zip(timestamps, results) if ok is True]
 
     async def _download_ecmwf_mslp_geojson_to_redis(
         self,
@@ -735,30 +778,22 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Download a single radar tile from S3 and store in Redis."""
-        if self._client is None:
-            raise RuntimeError("S3 client is not connected")
-
-        client = self._client
-        async with self._semaphore:
+        async with self._sync_pipeline_semaphore:
             try:
-                parts = s3_key.split("/")
-                y_file = parts[-1]
-                x = parts[-2]
-                z = parts[-3]
-                y = y_file.replace(".webp", "")
-
-                response = await client.get_object(Bucket=self._bucket, Key=s3_key)
-                async with response["Body"] as stream:
-                    content = await stream.read()
-
+                zxy = self._parse_zxy(s3_key)
+                if zxy is None:
+                    logger.error("Malformed radar tile key, skipping: %s", s3_key)
+                    return False
+                z, x, y = zxy
+                content = await self._download_webp_bytes(s3_key)
                 await redis_client.store_radar_tile(
                     radar_id,
                     variable_id,
                     tileset_id,
                     elevation_id,
-                    int(z),
-                    int(x),
-                    int(y),
+                    z,
+                    x,
+                    y,
                     content,
                     ttl=tile_ttl,
                 )
@@ -966,10 +1001,26 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             ):
                 for common_prefix in page.get("CommonPrefixes", []):
                     subdirs.append(common_prefix["Prefix"])
-        except Exception as e:  # pylint: disable=broad-exception-caught
+            return subdirs
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            # Raise on an infra failure so a real outage isn't masked as "no
+            # subdirectories". Sync loops count it (except → errors += 1); read
+            # paths use try_get_subdirectories, which degrades to [].
             logger.error("Error listing subdirectories for %s: %s", prefix, e)
+            raise
 
-        return subdirs
+    async def try_get_subdirectories(self, prefix: str) -> List[str]:
+        """Read-path variant of ``get_subdirectories``: ``[]`` on infra error.
+
+        On-demand listing endpoints must degrade to an empty list rather than
+        surface a 5xx when S3 is briefly unavailable. The sync loops call
+        ``get_subdirectories`` (which raises) so an outage is counted, not masked.
+        """
+        try:
+            return await self.get_subdirectories(prefix)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("Subdirectory listing degraded to [] for %s: %s", prefix, e)
+            return []
 
     async def delete_object(self, key: str) -> bool:
         """Delete a single object. Returns True on success, False on error."""

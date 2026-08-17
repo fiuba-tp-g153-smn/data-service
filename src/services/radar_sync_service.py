@@ -41,7 +41,6 @@ class RadarSyncService(DomainSyncService):
 
         total_downloaded = 0
         errors = 0
-        new_tilesets = 0
         radar_ids_seen: set = set()
 
         now = time.time()
@@ -89,9 +88,8 @@ class RadarSyncService(DomainSyncService):
             errors += 1
 
         logger.info(
-            "[radar] %d radar(s) scanned | %d new tilesets | %d tiles downloaded",
+            "[radar] %d radar(s) scanned | %d tiles downloaded",
             len(radar_ids_seen),
-            new_tilesets,
             total_downloaded,
         )
         return total_downloaded, errors

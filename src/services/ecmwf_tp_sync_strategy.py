@@ -129,7 +129,7 @@ class EcmwfTpOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.get_subdirectories(S3Client.ECMWF_TP_TILES_PREFIX)
+        subdirs = await self._s3.try_get_subdirectories(S3Client.ECMWF_TP_TILES_PREFIX)
         forecasts = sorted(
             (
                 s.rstrip("/").split("/")[-1]
@@ -155,7 +155,7 @@ class EcmwfTpOnDemandStrategy:
             return []
 
         prefix = f"{S3Client.ECMWF_TP_TILES_PREFIX}/{forecast_ts}"
-        subdirs = await self._s3.get_subdirectories(prefix)
+        subdirs = await self._s3.try_get_subdirectories(prefix)
         periods = sorted(
             s.rstrip("/").split("/")[-1]
             for s in subdirs

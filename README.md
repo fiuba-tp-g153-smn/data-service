@@ -153,10 +153,9 @@ interval elapses or its cooldown ends).
 
 Reader-side: the `/basemap/.../*.png` endpoint does not participate
 in the circuit directly. Its short relay timeout
-(`basemap_reader_http_timeout_seconds=3`) plus the Redis negative-
-cache tombstone (`basemap_negative_cache_ttl=300`) already bound the
+(`basemap_reader_http_timeout_seconds=3`) already bounds the
 per-request cost of a dead provider. A `ProviderUnavailableError`
-from the relay is caught and degraded to a normal miss + tombstone.
+from the relay is caught and degraded to a normal miss.
 
 #### Downstream (S3/Redis) outage recovery
 
@@ -483,8 +482,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_request_deadline_seconds`                                                                           | Hard wall-clock deadline per reader request, bounding single-flight waiters and the relay fallback (default: 4.0).                                                                                                                                                              |
 | `basemap_s3_object_ttl_days`                                                                                 | Lifecycle policy applied at startup to the basemap S3 bucket (default: 35 days — one scrape cycle of headroom over the 30-day Redis TTL).                                                                                                                                       |
 | `basemap_online_fallback_enabled`                                                                            | When `false`, disables tier-3 provider proxy — the service serves only from Redis/S3 (fully offline reads). Always required in `relay_only`.                                                                                                                                    |
-| `basemap_provider_presence_ttl`                                                                              | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                                                                                             |
-| `basemap_negative_cache_enabled` / `basemap_negative_cache_ttl`                                              | Redis tombstones suppressing repeat probes for known-missing tiles. Force-off in `no_cache` / `relay_only`.                                                                                                                                                                     |
+| `basemap_provider_availability_ttl`                                                                              | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                                                                                             |
 | `basemap_scrape_state_db_path`                                                                               | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                                                                                             |
 | `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds`                                      | How often the scraper flushes its watermark to SQLite.                                                                                                                                                                                                                          |
 | `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                                                                                           |

@@ -198,9 +198,23 @@ class HttpTileClient:
         response = await self._client.get(url)
 
         if response.status_code == 200:
-            data = response.content
             if self._delay_ms > 0:
                 await asyncio.sleep(self._delay_ms / 1000.0)
+            data = response.content
+            # A 200 with an empty body or a text/HTML error page is not a tile;
+            # treat it as a miss so it isn't cached and served as a real tile.
+            # Lenient on content-type: image/*, application/octet-stream, and a
+            # missing type all pass — only an explicit text/* is rejected.
+            headers = getattr(response, "headers", {}) or {}
+            content_type = headers.get("content-type", "")
+            if not data or content_type.startswith("text/"):
+                logger.warning(
+                    "Ignoring non-tile 200 for %s (%d bytes, content-type=%r)",
+                    url,
+                    len(data or b""),
+                    content_type,
+                )
+                return None
             return data
 
         if response.status_code in (404, 403):

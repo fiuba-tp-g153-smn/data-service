@@ -114,7 +114,7 @@ async def test_on_demand_list_forecasts_s3_fallback(mock_redis_client):
     mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
 
     mock_s3 = MagicMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    mock_s3.try_get_subdirectories = AsyncMock(
         return_value=[
             f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260413T1200Z/",
             f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260413T0000Z/",
@@ -134,7 +134,7 @@ async def test_on_demand_list_timestamps_s3_fallback(mock_redis_client):
     mock_redis_client.get_cached_listing = AsyncMock(return_value=None)
 
     mock_s3 = MagicMock()
-    mock_s3.list_object_basenames = AsyncMock(
+    mock_s3.try_list_object_basenames = AsyncMock(
         return_value=["20260413T1500Z", "20260413T1800Z", "metadata"]
     )
 

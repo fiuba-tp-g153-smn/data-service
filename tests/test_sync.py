@@ -82,6 +82,68 @@ async def test_sync_prefix_to_redis_no_objects(mock_redis_client):
     mock_redis_client.store_satellite_tile.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_sync_releases_download_slot_before_redis_write(mock_redis_client):
+    """A blocked Redis write must not hold an S3 download slot (decoupling).
+
+    With max_concurrent_downloads=1, both tiles must still get *downloaded*
+    while their Redis writes are blocked — proving the download semaphore is
+    released before the write. Under the old coupled code only one tile would
+    download (the single slot stays held through the blocked store).
+    """
+    client = S3Client(
+        "endpoint", "access", "secret", "bucket", max_concurrent_downloads=1
+    )
+    client._list_objects = AsyncMock(
+        return_value=[
+            {"Key": "tiles/band_13/tileset1/5/10/15.webp", "Size": 100},
+            {"Key": "tiles/band_13/tileset1/5/10/16.webp", "Size": 100},
+        ]
+    )
+
+    get_calls = 0
+
+    async def fake_get_object(**_kwargs):
+        nonlocal get_calls
+        get_calls += 1
+        body = AsyncMock()
+        body.read = AsyncMock(return_value=b"tile")
+        return {"Body": body}
+
+    mock_s3_client = AsyncMock()
+    mock_s3_client.get_object = AsyncMock(side_effect=fake_get_object)
+    client._session.client = MagicMock()
+    client._session.client.return_value.__aenter__ = AsyncMock(
+        return_value=mock_s3_client
+    )
+    client._session.client.return_value.__aexit__ = AsyncMock(return_value=False)
+
+    release = asyncio.Event()
+
+    async def blocking_store(*_args, **_kwargs):
+        await release.wait()
+
+    mock_redis_client.store_satellite_tile = AsyncMock(side_effect=blocking_store)
+
+    task = asyncio.create_task(
+        client.sync_prefix_to_redis(
+            mock_redis_client, "tiles/band_13/tileset1/", "band_13", "tileset1"
+        )
+    )
+    # Pump the loop (no wall-clock sleeps) while both Redis writes stay blocked.
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if get_calls >= 2:
+            break
+
+    assert get_calls == 2, "both tiles should download while Redis writes are blocked"
+
+    release.set()
+    downloaded = await task
+    assert downloaded == 2
+    assert mock_redis_client.store_satellite_tile.await_count == 2
+
+
 def test_build_satellite_tile_key_uses_tiles_root():
     """Satellite tile keys must be rooted at tiles/<band_id>/..."""
     key = S3Client.build_satellite_tile_key("band_13", "20260740300213", 5, 10, 15)
@@ -103,7 +165,8 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
     mock_redis_client.cache_listing = AsyncMock()
 
     mock_s3 = AsyncMock()
-    mock_s3.get_subdirectories = AsyncMock(
+    # On-demand read strategies use the tolerant listing variant.
+    mock_s3.try_get_subdirectories = AsyncMock(
         side_effect=[
             [
                 "tiles/radar/RMA1/DBZH/elev0/",
@@ -595,7 +658,9 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
         ]
     )
     mock_s3.list_object_basenames = AsyncMock(return_value=["20260330T1500Z"])
-    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(return_value=1)
+    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(
+        return_value=["20260330T1500Z"]
+    )
     mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
 
     service = _make_ecmwf_mslp(mock_s3, mock_redis_client)
@@ -605,6 +670,37 @@ async def test_sync_ecmwf_mslp_prunes_forecasts(mock_redis_client):
     assert errors == 0
     mock_redis_client.prune_ecmwf_mslp_forecasts.assert_awaited_once_with(
         ["20260330T1200Z", "20260330T0000Z"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_ecmwf_mslp_indexes_only_stored_timestamps(mock_redis_client):
+    """A COG timestamp whose GeoJSON did not land must not be indexed (BUG-02).
+
+    The COG listing has two timestamps but only one GeoJSON stores; the index
+    must advertise only the stored one, leaving the other to retry next cycle
+    instead of advertising a timestamp with no isobars behind it.
+    """
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        return_value=[f"{S3Client.ECMWF_MSLP_COG_PREFIX}/20260330T1200Z/"]
+    )
+    mock_s3.list_object_basenames = AsyncMock(
+        return_value=["20260330T1500Z", "20260330T1800Z"]
+    )
+    # COG lists two timestamps; only the first GeoJSON actually stored.
+    mock_s3.sync_ecmwf_mslp_forecast_to_redis = AsyncMock(
+        return_value=["20260330T1500Z"]
+    )
+    mock_redis_client.get_ecmwf_mslp_timestamps = AsyncMock(return_value=[])
+
+    service = _make_ecmwf_mslp(mock_s3, mock_redis_client)
+
+    downloaded, errors = await service._sync_ecmwf_mslp()
+
+    assert (downloaded, errors) == (1, 0)
+    mock_redis_client.store_ecmwf_mslp_index.assert_awaited_once_with(
+        "20260330T1200Z", ["20260330T1500Z"], service._settings.ecmwf_mslp_geojson_ttl
     )
 
 
