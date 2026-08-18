@@ -63,7 +63,7 @@ class SatelliteSyncService(DomainSyncService):
         errors = 0
 
         now = time.time()
-        cutoff = now - self._settings.tile_ttl
+        cutoff = now - self._settings.satellite_tile_ttl
 
         for prefix in self._sync_prefixes:
             channel_dir = self.PREFIX_TO_CHANNEL.get(
@@ -92,7 +92,7 @@ class SatelliteSyncService(DomainSyncService):
                         s3_tileset_prefix,
                         channel_dir,
                         tileset_id,
-                        tile_ttl=self._settings.tile_ttl,
+                        tile_ttl=self._settings.satellite_tile_ttl,
                     )
                     sat_downloaded += downloaded
                     prefix_downloaded += downloaded
@@ -108,7 +108,7 @@ class SatelliteSyncService(DomainSyncService):
                             channel_dir,
                             tileset_id,
                             now,
-                            ttl=self._settings.tile_ttl,
+                            ttl=self._settings.satellite_tile_ttl,
                         )
 
                 # Trim every cycle (even with no new tilesets) so the index stays

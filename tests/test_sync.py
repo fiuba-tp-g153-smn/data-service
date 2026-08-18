@@ -206,7 +206,8 @@ def _make_settings(ecmwf_forecasts_to_keep=2, wrf_inits_to_keep=2):
     settings.sync_domain_timeout_seconds = 300
     settings.wrf_sync_interval_seconds = 120
     settings.wrf_sync_timeout_seconds = 1200
-    settings.tile_ttl = 3600
+    settings.satellite_tile_ttl = 3600
+    settings.radar_tile_ttl = 3600
     settings.ecmwf_tile_ttl = 86400
     settings.ecmwf_forecasts_to_keep = ecmwf_forecasts_to_keep
     settings.ecmwf_mslp_geojson_ttl = 86400
@@ -334,7 +335,7 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
     score = args.args[2]
     assert isinstance(score, float)
     assert before <= score <= time.time()
-    assert args.kwargs["ttl"] == service._settings.tile_ttl
+    assert args.kwargs["ttl"] == service._settings.satellite_tile_ttl
     mock_redis_client.trim_satellite_index.assert_awaited_once()
 
 
@@ -427,7 +428,7 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
     score = args.args[4]
     assert isinstance(score, float)
     assert before <= score <= time.time()
-    assert args.kwargs["ttl"] == service._settings.tile_ttl
+    assert args.kwargs["ttl"] == service._settings.radar_tile_ttl
     mock_redis_client.trim_radar_index.assert_awaited_once()
 
 

@@ -106,13 +106,13 @@ def test_top_level_shared_keys_unchanged(tmp_path):
         tmp_path,
         {
             "sync_mode": "on_demand",
-            "tile_ttl": 1234,
+            "satellite": {"tile_ttl": 1234},
             "cache_control_tile": "no-store",
             "basemap": {"tile_ttl": 1},
         },
     )
     assert s.sync_mode == "on_demand"
-    assert s.tile_ttl == 1234
+    assert s.satellite_tile_ttl == 1234
     assert s.cache_control_tile == "no-store"
     assert s.basemap_tile_ttl == 1
 

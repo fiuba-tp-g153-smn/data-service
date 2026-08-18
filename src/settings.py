@@ -96,7 +96,7 @@ class Settings:
 
     # --- Operational tuning (loaded from settings.json, env overrides) ---
     sync_mode: str
-    tile_ttl: int
+    satellite_tile_ttl: int
     radar_tile_ttl: int
     tileset_listing_ttl: int
     sync_interval_seconds: int
@@ -354,7 +354,7 @@ class Settings:
         {
             # Shared: sync cadence, S3 client, cache-control headers
             "sync_mode",
-            "tile_ttl",
+            "satellite_tile_ttl",
             "radar_tile_ttl",
             "tileset_listing_ttl",
             "sync_interval_seconds",
@@ -595,7 +595,9 @@ class Settings:
             "SYNC_DOMAIN_TIMEOUT_SECONDS", self.sync_domain_timeout_seconds
         )
         self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
-        self.tile_ttl = self._env_int("TILE_TTL", self.tile_ttl)
+        self.satellite_tile_ttl = self._env_int(
+            "SATELLITE_TILE_TTL", self.satellite_tile_ttl
+        )
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
         self.tileset_listing_ttl = self._env_int(
             "TILESET_LISTING_TTL", self.tileset_listing_ttl

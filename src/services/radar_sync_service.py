@@ -44,7 +44,7 @@ class RadarSyncService(DomainSyncService):
         radar_ids_seen: set = set()
 
         now = time.time()
-        cutoff = now - self._settings.tile_ttl
+        cutoff = now - self._settings.radar_tile_ttl
 
         try:
             # 1. List radar IDs: tiles/radar/{radar_id}/
@@ -131,7 +131,7 @@ class RadarSyncService(DomainSyncService):
                 variable_id,
                 tileset_id,
                 elevation_id,
-                tile_ttl=self._settings.tile_ttl,
+                tile_ttl=self._settings.radar_tile_ttl,
             )
 
             if downloaded > 0:
@@ -142,7 +142,7 @@ class RadarSyncService(DomainSyncService):
                     elevation_id,
                     tileset_id,
                     now,
-                    ttl=self._settings.tile_ttl,
+                    ttl=self._settings.radar_tile_ttl,
                 )
                 downloaded_total += downloaded
                 logger.info(

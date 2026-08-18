@@ -185,7 +185,10 @@ async def configure_strategies(
         # strategy is given the S3 client + TTLs so a tile miss / evicted index
         # falls back to S3 (and re-warms Redis) instead of returning empty.
         sat_strategy = SatelliteFullSyncStrategy(
-            client_redis, s3_client, settings.tile_ttl, settings.tileset_listing_ttl
+            client_redis,
+            s3_client,
+            settings.satellite_tile_ttl,
+            settings.tileset_listing_ttl,
         )
         radar_strategy = RadarFullSyncStrategy(
             client_redis,
@@ -241,7 +244,7 @@ async def configure_strategies(
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
             s3_client,
-            settings.tile_ttl,
+            settings.satellite_tile_ttl,
             settings.tileset_listing_ttl,
         )
         radar_strategy = RadarOnDemandStrategy(

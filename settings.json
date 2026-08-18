@@ -8,8 +8,10 @@
     "config": "public, max-age=60, stale-while-revalidate=120",
     "tile": "public, max-age=43200, immutable"
   },
-  "tile_ttl": 21600,
   "tileset_listing_ttl": 30,
+  "satellite": {
+    "tile_ttl": 21600
+  },
   "radar": {
     "tile_ttl": 21600
   },

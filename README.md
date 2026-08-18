@@ -431,12 +431,12 @@ All images use Python 3.13.13-slim-trixie as the base for minimal size.
 
 Operational tuning settings live in `settings.json` at the project root. Edit this file to adjust sync behavior, caching, and retention without touching environment variables. `src/settings.py` is the authoritative source of defaults and loaders — consult it for any key not documented below.
 
-Per-domain knobs are grouped under a namespace object (`basemap`, `ecmwf`, `radar`); the loader flattens one level so the inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`sync_mode`, `tile_ttl`, `cache_control_*`, …) stay at the root because they apply across satellite/radar/ECMWF or have no domain. Example:
+Per-domain knobs are grouped under a namespace object (`satellite`, `basemap`, `ecmwf`, `radar`); the loader recursively flattens nested objects so each inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`sync_mode`, `tileset_listing_ttl`, `cache_control_*`, …) stay at the root because they apply across every domain or have no domain. Example:
 
 ```jsonc
 {
   "sync_mode": "full",
-  "tile_ttl": 21600,
+  "satellite": { "tile_ttl": 21600 },
   "basemap": {
     "sync_mode": "no_cache",
     "tile_ttl": 604800,
@@ -454,7 +454,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | Key                           | Description                                                                                                                               |
 | :---------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
 | `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, and ECMWF.                                   |
-| `tile_ttl`                    | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
+| `satellite_tile_ttl`          | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
 | `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles (default: 2592000 = 30 days).                                                             |
 | `ecmwf_tile_ttl`              | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                 |
 | `ecmwf_forecasts_to_keep`     | How many ECMWF forecast cycles to retain in the hot cache.                                                                                |
