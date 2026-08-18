@@ -175,6 +175,7 @@ async def configure_strategies(
             connect_timeout=settings.s3_connect_timeout_seconds,
             read_timeout=settings.s3_read_timeout_seconds,
             max_attempts=settings.s3_max_attempts,
+            sync_max_inflight_tiles=settings.s3_sync_max_inflight_tiles,
         )
         await s3_client.connect()
 

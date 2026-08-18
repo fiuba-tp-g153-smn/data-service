@@ -99,6 +99,7 @@ class DomainSyncService(BaseSyncService):  # pylint: disable=abstract-method
             connect_timeout=s.s3_connect_timeout_seconds,
             read_timeout=s.s3_read_timeout_seconds,
             max_attempts=s.s3_max_attempts,
+            sync_max_inflight_tiles=s.s3_sync_max_inflight_tiles,
         )
 
     async def _record_cycle(

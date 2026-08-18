@@ -128,6 +128,10 @@ class Settings:
     s3_connect_timeout_seconds: float = 5.0
     s3_read_timeout_seconds: float = 30.0
     s3_max_attempts: int = 3
+    # Ceiling on tiles held in memory during a sync (downloaded, awaiting their
+    # Redis write) — bounds worst-case sync memory. The client floors it at
+    # s3_max_concurrent_downloads, so it only caps the decoupled write backlog.
+    s3_sync_max_inflight_tiles: int = 64
     # ECMWF total precipitation (loaded from settings.json, env overrides)
     ecmwf_tile_ttl: int
     ecmwf_forecasts_to_keep: int
@@ -366,6 +370,7 @@ class Settings:
             "s3_connect_timeout_seconds",
             "s3_read_timeout_seconds",
             "s3_max_attempts",
+            "s3_sync_max_inflight_tiles",
             # ECMWF (total precipitation + mean sea level pressure)
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
@@ -618,6 +623,9 @@ class Settings:
             "S3_READ_TIMEOUT_SECONDS", self.s3_read_timeout_seconds
         )
         self.s3_max_attempts = self._env_int("S3_MAX_ATTEMPTS", self.s3_max_attempts)
+        self.s3_sync_max_inflight_tiles = self._env_int(
+            "S3_SYNC_MAX_INFLIGHT_TILES", self.s3_sync_max_inflight_tiles
+        )
         self.ecmwf_tile_ttl = self._env_int("ECMWF_TILE_TTL", self.ecmwf_tile_ttl)
         self.ecmwf_forecasts_to_keep = self._env_int(
             "ECMWF_FORECASTS_TO_KEEP", self.ecmwf_forecasts_to_keep

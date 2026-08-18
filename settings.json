@@ -8,6 +8,9 @@
     "config": "public, max-age=60, stale-while-revalidate=120",
     "tile": "public, max-age=43200, immutable"
   },
+  "s3": {
+    "sync_max_inflight_tiles": 64
+  },
   "tileset_listing_ttl": 30,
   "satellite": {
     "tile_ttl": 21600
