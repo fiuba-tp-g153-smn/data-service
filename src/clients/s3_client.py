@@ -314,13 +314,10 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             raise
 
     WRF_TILES_PREFIX = "tiles/wrf"
-    WRF_COG_PREFIX = "cog/wrf"
     WRF_GEOJSON_PREFIX = "geojson/wrf"
 
     ECMWF_TP_TILES_PREFIX = "tiles/models/ecmwf/total_precipitation"
-    ECMWF_TP_COG_PREFIX = "cog/models/ecmwf/total_precipitation"
     ECMWF_MSLP_COG_PREFIX = "cog/models/ecmwf/mean_sea_level_pressure"
-    ECMWF_MSLP_GEOJSON_PREFIX = "geojson/models/ecmwf/mean_sea_level_pressure"
 
     @staticmethod
     def build_wrf_tile_key(
