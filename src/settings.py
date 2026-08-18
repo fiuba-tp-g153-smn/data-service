@@ -245,21 +245,15 @@ class Settings:
     # the global `basemap_scrape_concurrent` budget so we never hammer one
     # host even in "full" mode when multiple providers share an origin.
     basemap_scrape_per_host_concurrent: int = 8
-    # Provider-health circuit breaker. When a provider returns this many
-    # consecutive UNAVAILABLE fetches inside a sweep, the scraper trips its
-    # circuit, preserves the resume cursor, and skips it for a cooldown
-    # chosen from `basemap_provider_cooldown_schedule` (indexed by the
-    # consecutive-trip count, capped at the last element). One clean sweep
-    # resets the counter and closes the circuit.
-    basemap_provider_unhealthy_threshold: int = 5
+    # Provider-health circuit breaker. Within one sweep the scraper pushes
+    # through scattered failures and trips a provider only when its error rate
+    # (failed / attempted fetches) exceeds `error_rate_threshold`, but not
+    # before `error_rate_min_samples` fetches — so a fully-down provider still
+    # bails early instead of hammering the whole bbox. A tripped provider is
+    # skipped for a cooldown chosen from `basemap_provider_cooldown_schedule`
+    # (indexed by the consecutive-trip count, capped at the last element); one
+    # clean sweep resets the counter and closes the circuit.
     basemap_provider_cooldown_schedule: List[int] = [300, 900, 3600, 10800, 21600]
-    # Rate-based circuit breaker (supersedes the consecutive-failure trigger
-    # above). Within one sweep the scraper pushes through scattered failures and
-    # trips a provider only when its error rate (failed / attempted fetches)
-    # exceeds `error_rate_threshold`, but not before `error_rate_min_samples`
-    # fetches — so a fully-down provider still bails early instead of hammering
-    # the whole bbox. `basemap_provider_unhealthy_threshold` is kept for config
-    # compatibility but no longer drives tripping.
     basemap_provider_error_rate_threshold: float = 0.05
     basemap_provider_error_rate_min_samples: int = 50
     # The error rate is measured over a rolling window of the most recent fetches
@@ -422,7 +416,6 @@ class Settings:
             "basemap_sync_mode",
             "basemap_scrape_parallelism_mode",
             "basemap_scrape_per_host_concurrent",
-            "basemap_provider_unhealthy_threshold",
             "basemap_provider_cooldown_schedule",
             "basemap_provider_error_rate_threshold",
             "basemap_provider_error_rate_min_samples",
@@ -758,10 +751,6 @@ class Settings:
             "BASEMAP_SCRAPE_PER_HOST_CONCURRENT",
             self.basemap_scrape_per_host_concurrent,
         )
-        self.basemap_provider_unhealthy_threshold = self._env_int(
-            "BASEMAP_PROVIDER_UNHEALTHY_THRESHOLD",
-            self.basemap_provider_unhealthy_threshold,
-        )
         self.basemap_provider_cooldown_schedule = self._env_int_list(
             "BASEMAP_PROVIDER_COOLDOWN_SCHEDULE",
             self.basemap_provider_cooldown_schedule,
@@ -956,11 +945,6 @@ class Settings:
                 f"({self.basemap_scrape_per_host_concurrent}) exceeds global "
                 f"basemap_scrape_concurrent ({self.basemap_scrape_concurrent}); "
                 "per-host limit larger than the global budget has no effect."
-            )
-        if self.basemap_provider_unhealthy_threshold < 1:
-            raise ValueError(
-                "basemap_provider_unhealthy_threshold must be >= 1 "
-                f"(got {self.basemap_provider_unhealthy_threshold})"
             )
         if not 0 < self.basemap_provider_error_rate_threshold <= 1:
             raise ValueError(

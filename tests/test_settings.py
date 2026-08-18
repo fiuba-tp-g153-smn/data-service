@@ -206,28 +206,11 @@ def test_provider_cooldown_schedule_round_trips(tmp_path):
         {
             "basemap": {
                 "sync_mode": "full",
-                "provider_unhealthy_threshold": 7,
                 "provider_cooldown_schedule": [60, 120, 300],
             }
         },
     )
-    assert s.basemap_provider_unhealthy_threshold == 7
     assert s.basemap_provider_cooldown_schedule == [60, 120, 300]
-
-
-def test_provider_unhealthy_threshold_must_be_positive(tmp_path):
-    import pytest
-
-    with pytest.raises(ValueError, match="basemap_provider_unhealthy_threshold"):
-        _built_settings(
-            tmp_path,
-            {
-                "basemap": {
-                    "sync_mode": "full",
-                    "provider_unhealthy_threshold": 0,
-                }
-            },
-        )
 
 
 def test_provider_error_rate_round_trips(tmp_path):

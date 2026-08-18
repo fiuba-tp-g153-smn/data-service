@@ -128,12 +128,14 @@ hammering a dead upstream:
   budget exhausted — the provider itself appears down). Only
   UNAVAILABLE contributes to the health signal, so a sparse bbox with
   legitimate 404s never false-positives.
-- When a provider returns `basemap_provider_unhealthy_threshold`
-  consecutive UNAVAILABLE tiles within one sweep (default **5**), the
-  scraper **trips the circuit**: in-flight tile tasks for that
-  provider are cancelled, the resume cursor is preserved so the next
-  attempt picks up exactly where we left off, and the provider's
-  `last_completed` stamp is left untouched.
+- When a provider's UNAVAILABLE **error rate** (failed / attempted
+  fetches over a rolling window) exceeds `basemap_provider_error_rate_threshold`
+  — but only after at least `basemap_provider_error_rate_min_samples`
+  fetches, so a fully-down provider still bails early — the scraper
+  **trips the circuit**: in-flight tile tasks for that provider are
+  cancelled, the resume cursor is preserved so the next attempt picks
+  up exactly where we left off, and the provider's `last_completed`
+  stamp is left untouched.
 - The cooldown is chosen from `basemap_provider_cooldown_schedule`,
   indexed by the consecutive-trip count and capped at the last entry.
   Default: `[5 min, 15 min, 1 h, 3 h, 6 h]`. A provider that stays
@@ -487,7 +489,6 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds`                                      | How often the scraper flushes its watermark to SQLite.                                                                                                                                                                                                                          |
 | `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                                                                                           |
 | `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=2592000, immutable` = 30 days — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
-| `basemap_provider_unhealthy_threshold`                                                                       | Consecutive UNAVAILABLE tile fetches inside one sweep before the circuit breaker trips (default: 5).                                                                                                                                                                            |
 | `basemap_provider_cooldown_schedule`                                                                         | Exponential backoff list (seconds) indexed by consecutive trip count, capped at the last element (default: `[300, 900, 3600, 10800, 21600]` = 5 min → 6 h). Must be non-empty, positive, monotonically non-decreasing. Persists across restarts via SQLite.                     |
 
 Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
@@ -523,7 +524,6 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `BASEMAP_SYNC_MODE`                  | `full` / `on_demand` / `no_cache` / `relay_only`.                                          | `full`                     |
 | `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
 | `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |
-| `BASEMAP_PROVIDER_UNHEALTHY_THRESHOLD` | Consecutive UNAVAILABLE tile fetches that trip the circuit breaker.                       | `5`                        |
 | `BASEMAP_PROVIDER_COOLDOWN_SCHEDULE` | Comma-separated seconds, indexed by consecutive trip count, capped at last.                | `300,900,3600,10800,21600` |
 | `BASEMAP_ONLINE_FALLBACK_ENABLED`    | When `false`, disables tier-3 provider relay.                                              | `true`                     |
 | `BASEMAP_{PROVIDER}_URL`             | Per-provider URL template (one per enabled provider in `basemap_providers`).               | See `.env.example`         |
