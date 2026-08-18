@@ -374,3 +374,60 @@ def test_non_positive_gfs_ttls_rejected(tmp_path):
     for key, attr in (("tile_ttl", "gfs_tile_ttl"), ("geojson_ttl", "gfs_geojson_ttl")):
         with pytest.raises(ValueError, match=attr):
             _built_settings(tmp_path, {"gfs": {key: 0}})
+
+
+# --- Recursive flattener (arbitrary-depth nesting -> flat attr names) ---
+
+
+def test_flatten_recurses_arbitrary_depth():
+    flat = Settings._flatten(  # pylint: disable=protected-access
+        {
+            "basemap": {
+                "scrape": {"delay_ms": 30, "interval_seconds": 600},
+                "reader_http": {"timeout_seconds": 3},
+                "tile_ttl": 42,
+            },
+            "tile_ttl": 7,
+        }
+    )
+    assert flat == {
+        "basemap_scrape_delay_ms": 30,
+        "basemap_scrape_interval_seconds": 600,
+        "basemap_reader_http_timeout_seconds": 3,
+        "basemap_tile_ttl": 42,
+        "tile_ttl": 7,
+    }
+
+
+def test_flatten_keeps_lists_as_leaf_values():
+    providers = [{"id": "argenmap", "enabled": True}]
+    flat = Settings._flatten(  # pylint: disable=protected-access
+        {"basemap": {"providers": providers}}
+    )
+    assert flat == {"basemap_providers": providers}
+
+
+def test_flatten_nested_wins_over_flat_at_same_name():
+    flat = Settings._flatten(  # pylint: disable=protected-access
+        {"basemap_tile_ttl": 7, "basemap": {"tile_ttl": 99}}
+    )
+    assert flat["basemap_tile_ttl"] == 99
+
+
+def test_real_settings_json_has_no_unrecognized_keys():
+    """Guard the nested settings.json against typos: every flattened key must be
+    a recognized operational key, otherwise it is silently ineffective."""
+    repo_path = Path(__file__).resolve().parent.parent / "settings.json"
+    with open(repo_path, encoding="utf-8") as f:
+        data = json.load(f)
+    flat = Settings._flatten(data)  # pylint: disable=protected-access
+    unknown = set(flat) - Settings._JSON_KEYS  # pylint: disable=protected-access
+    assert not unknown, f"Unrecognized settings.json keys: {sorted(unknown)}"
+
+
+def test_unrecognized_keys_are_warned(tmp_path, caplog):
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        _load(tmp_path, {"basemap": {"tile_ttl": 1}, "bogus_key": 5})
+    assert "bogus_key" in caplog.text

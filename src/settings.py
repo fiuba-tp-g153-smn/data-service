@@ -7,6 +7,7 @@
 # pylint: disable=too-many-lines
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List
@@ -351,41 +352,13 @@ class Settings:
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
     _APP_ROLES = ("web", "worker", "all")
-    _JSON_NAMESPACES = (
-        "basemap",
-        "ecmwf",
-        "ecmwf_mslp",
-        "gfs",
-        "radar",
-        "weather_stations",
-        "wrf",
-    )
-
-    def __init__(self):
-        settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
-
-        self._load_from_json(settings_json_path)
-        self._load_from_env()
-        self._validate()
-
-    def _load_from_json(self, settings_json_path: Path) -> None:
-        """Load operational settings from settings.json."""
-        if not settings_json_path.is_file():
-            return
-
-        with open(settings_json_path, encoding="utf-8") as f:
-            data = json.load(f)
-
-        # Flatten one level of per-domain nesting so the rest of the loader
-        # (and every `settings.basemap_*` call site) keeps working unchanged.
-        # Nested values win over flat ones when both are present.
-        for namespace in self._JSON_NAMESPACES:
-            section = data.pop(namespace, None)
-            if isinstance(section, dict):
-                for inner_key, inner_value in section.items():
-                    data[f"{namespace}_{inner_key}"] = inner_value
-
-        json_keys = {
+    # Operational keys accepted from settings.json, after nested objects are
+    # flattened to underscore-joined names by `_flatten`. Anything else in the
+    # file is ignored with a warning (see `_load_from_json`). Grouped by domain
+    # for navigability; membership — not order — is what matters.
+    _JSON_KEYS: frozenset[str] = frozenset(
+        {
+            # Shared: sync cadence, S3 client, cache-control headers
             "sync_mode",
             "tile_ttl",
             "radar_tile_ttl",
@@ -399,21 +372,25 @@ class Settings:
             "s3_connect_timeout_seconds",
             "s3_read_timeout_seconds",
             "s3_max_attempts",
+            # ECMWF (total precipitation + mean sea level pressure)
             "ecmwf_tile_ttl",
             "ecmwf_forecasts_to_keep",
             "ecmwf_mslp_geojson_ttl",
+            # WRF
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
             "wrf_inits_to_keep",
             "wrf_overlay_recheck_ttl",
             "wrf_sync_interval_seconds",
             "wrf_sync_timeout_seconds",
+            # GFS
             "gfs_tile_ttl",
             "gfs_geojson_ttl",
             "gfs_cycles_to_keep",
             "gfs_sync_interval_seconds",
             "gfs_sync_timeout_seconds",
             "gfs_cache_control_tile_miss",
+            # Basemap scraper + reader
             "basemap_tile_ttl",
             "basemap_scrape_interval_seconds",
             "basemap_scrape_concurrent",
@@ -450,6 +427,7 @@ class Settings:
             "basemap_provider_error_rate_threshold",
             "basemap_provider_error_rate_min_samples",
             "basemap_provider_error_rate_window",
+            # Weather stations
             "weather_stations_sync_mode",
             "weather_stations_scrape_interval_seconds",
             "weather_stations_scrape_lock_path",
@@ -472,6 +450,7 @@ class Settings:
             "weather_stations_redis_animation_warm_buckets",
             "weather_stations_series_hours",
             "weather_stations_api_key_auth_enabled",
+            # Metrics / observability
             "metrics_enabled",
             "metrics_db_path",
             "metrics_retention_days",
@@ -482,10 +461,67 @@ class Settings:
             "redis_metrics_memory_batch_size",
             "redis_metrics_memory_sample_per_domain",
         }
+    )
 
-        for key in json_keys:
-            if key in data:
-                setattr(self, key, data[key])
+    def __init__(self):
+        settings_json_path = Path(__file__).resolve().parent.parent / "settings.json"
+
+        self._load_from_json(settings_json_path)
+        self._load_from_env()
+        self._validate()
+
+    def _load_from_json(self, settings_json_path: Path) -> None:
+        """Load operational settings from settings.json.
+
+        Nested per-domain objects are flattened to underscore-joined keys (see
+        `_flatten`), then only recognized keys (`_JSON_KEYS`) are applied.
+        Unrecognized keys are surfaced as a warning rather than silently
+        dropped, so a typo or stale key in settings.json is visible instead of
+        falling back to a default unnoticed.
+        """
+        if not settings_json_path.is_file():
+            return
+
+        with open(settings_json_path, encoding="utf-8") as f:
+            data = json.load(f)
+
+        flat = self._flatten(data)
+
+        unknown = sorted(set(flat) - self._JSON_KEYS)
+        if unknown:
+            logging.getLogger(__name__).warning(
+                "Ignoring unrecognized settings.json keys: %s", ", ".join(unknown)
+            )
+
+        for key in self._JSON_KEYS:
+            if key in flat:
+                setattr(self, key, flat[key])
+
+    @staticmethod
+    def _flatten(data: dict) -> dict:
+        """Flatten nested settings objects into underscore-joined flat keys.
+
+        `{"basemap": {"scrape": {"delay_ms": 30}}}` becomes
+        `{"basemap_scrape_delay_ms": 30}`, so settings.json can stay nested and
+        human-navigable while every `settings.<flat_attr>` read site and
+        `<FLAT_ATTR>` env override keep working unchanged.
+
+        Recurses into dicts only; lists (e.g. `basemap.providers`) and scalars
+        are leaf values. A nested object wins over a flat key that resolves to
+        the same name — each level assigns its leaves before its nested dicts.
+        """
+        flat: Dict[str, Any] = {}
+
+        def _walk(prefix: str, section: Dict[str, Any]) -> None:
+            for key, value in section.items():
+                if not isinstance(value, dict):
+                    flat[f"{prefix}{key}"] = value
+            for key, value in section.items():
+                if isinstance(value, dict):
+                    _walk(f"{prefix}{key}_", value)
+
+        _walk("", data)
+        return flat
 
     @staticmethod
     def _env_int(key: str, default: int) -> int:

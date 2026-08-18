@@ -70,3 +70,5 @@ output_radar/
 .agent/
 .claude
 mypy_cache/
+
+CODE_REVIEW.md
