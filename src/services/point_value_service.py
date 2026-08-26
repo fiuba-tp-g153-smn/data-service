@@ -51,6 +51,8 @@ class PointValueService(BaseProductService):
 
     RADAR_UNITS = {
         "DBZH": "dBZ",
+        # Long-range reflectivity (subvolume 04): same moment as DBZH.
+        "DBZH_450KM": "dBZ",
         "VRAD": "m/s",
     }
 
