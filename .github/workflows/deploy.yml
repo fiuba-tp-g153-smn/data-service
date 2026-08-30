@@ -62,7 +62,7 @@ jobs:
         run: |
           echo "📡 Triggering deployment..."
 
-          if ! RESPONSE=$(curl -s -X GET \
+          if ! RESPONSE=$(curl -s -X POST \
             --max-time 30 \
             -H "Authorization: Bearer $COOLIFY_DEPLOY_TOKEN" \
             "$COOLIFY_DEPLOY_HOOK"); then
