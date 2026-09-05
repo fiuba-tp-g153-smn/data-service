@@ -6,7 +6,12 @@ from fastapi import Request, Response, status
 
 from dependencies import logger, settings
 from models.radar import RadarPointValueResponse
-from routes.utils import create_tile_response, make_transparent_tile_response
+from routes.utils import (
+    create_tile_response,
+    etag_pair,
+    make_transparent_tile_response,
+    not_modified,
+)
 from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
 from services.radar_service import radar_service
 
@@ -104,11 +109,13 @@ async def get_radar_tile(
     # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
     """Get Radar Tile."""
     # ETag based on unique tile identifier
-    etag = f'"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"'
+    etag, miss_etag = etag_pair(
+        f"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"
+    )
 
     # Check If-None-Match for 304
     if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     tile_data = await radar_service.get_tile_data(
@@ -125,7 +132,11 @@ async def get_radar_tile(
             x,
             y,
         )
-        return make_transparent_tile_response(etag, settings.cache_control_tile)
+        if if_none_match == miss_etag:
+            return not_modified(settings.radar_cache_control_tile_miss)
+        return make_transparent_tile_response(
+            miss_etag, settings.radar_cache_control_tile_miss
+        )
 
     logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 

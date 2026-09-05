@@ -1,8 +1,9 @@
 """Shared utilities for route handlers."""
 
 import io
+from typing import Tuple
 
-from fastapi import Response
+from fastapi import Response, status
 from PIL import Image
 
 
@@ -22,6 +23,24 @@ def _build_transparent_png_tile() -> bytes:
 
 TRANSPARENT_TILE: bytes = _build_transparent_tile()
 TRANSPARENT_PNG_TILE: bytes = _build_transparent_png_tile()
+
+
+def etag_pair(identity: str) -> Tuple[str, str]:
+    """`(hit, miss)` ETags for one tile identity.
+
+    They must differ. A gap and the object that later fills it share a URL, so a
+    single ETag would make the client's revalidation match its own cached gap
+    and answer 304 forever — the tile would never arrive.
+    """
+    return f'"{identity}"', f'"{identity}-miss"'
+
+
+def not_modified(cache_control: str) -> Response:
+    """304 that restates the Cache-Control, so a gap keeps its short freshness."""
+    return Response(
+        status_code=status.HTTP_304_NOT_MODIFIED,
+        headers={"Cache-Control": cache_control},
+    )
 
 
 def make_transparent_tile_response(etag: str, cache_control: str) -> Response:

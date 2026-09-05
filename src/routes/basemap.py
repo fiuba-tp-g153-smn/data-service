@@ -6,7 +6,12 @@ from fastapi import Request, Response, status
 
 from dependencies import get_basemap_service, settings
 from models.basemap import BasemapProvidersResponse
-from routes.utils import create_tile_response, make_transparent_png_response
+from routes.utils import (
+    create_tile_response,
+    etag_pair,
+    make_transparent_png_response,
+    not_modified,
+)
 from services.basemap_service import BasemapNotConfiguredError, BasemapService
 
 router = APIRouter(prefix="/basemap", tags=["Basemap"])
@@ -84,9 +89,9 @@ async def get_tile(
             detail=f"Unknown provider '{provider_id}'",
         )
 
-    etag = f'"{provider_id}-{z}-{x}-{y}"'
+    etag, miss_etag = etag_pair(f"{provider_id}-{z}-{x}-{y}")
     if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     try:
@@ -98,8 +103,10 @@ async def get_tile(
         ) from exc
 
     if not tile_data:
+        if if_none_match == miss_etag:
+            return not_modified(settings.basemap_cache_control_tile_miss)
         return make_transparent_png_response(
-            etag, settings.basemap_cache_control_tile_miss
+            miss_etag, settings.basemap_cache_control_tile_miss
         )
 
     return create_tile_response(

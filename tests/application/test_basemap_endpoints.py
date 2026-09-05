@@ -99,3 +99,89 @@ def test_negative_zoom_returns_422(app_with_basemap_stub):
     client, _ = app_with_basemap_stub
     response = client.get("/basemap/argenmap/-1/0/0.png")
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# ETag: a miss must never share the hit's ETag.
+#
+# Both live at the same URL, so a shared ETag makes the client's revalidation
+# match its own cached transparent tile and answer 304 forever — the real tile
+# would never arrive once upstream recovers.
+# ---------------------------------------------------------------------------
+
+
+def test_miss_etag_differs_from_hit_etag(app_with_basemap_stub):
+    client, stub = app_with_basemap_stub
+
+    stub.get_tile_data = AsyncMock(return_value=None)
+    miss_etag = client.get("/basemap/argenmap/4/5/9.png").headers["etag"]
+
+    stub.get_tile_data = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+    hit_etag = client.get("/basemap/argenmap/4/5/9.png").headers["etag"]
+
+    assert miss_etag != hit_etag
+    assert miss_etag == '"argenmap-4-5-9-miss"'
+    assert hit_etag == '"argenmap-4-5-9"'
+
+
+def test_revalidating_a_cached_miss_yields_the_recovered_tile(app_with_basemap_stub):
+    """The regression this whole pair of ETags exists for.
+
+    Upstream is down → client caches a transparent tile. Upstream recovers.
+    The client revalidates with the miss ETag and must get the real tile back,
+    not a 304 pointing at its own cached gap.
+    """
+    client, stub = app_with_basemap_stub
+
+    stub.get_tile_data = AsyncMock(return_value=None)
+    miss = client.get("/basemap/argenmap/4/5/9.png")
+    assert miss.status_code == 200
+
+    stub.get_tile_data = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+    revalidated = client.get(
+        "/basemap/argenmap/4/5/9.png",
+        headers={"If-None-Match": miss.headers["etag"]},
+    )
+
+    assert revalidated.status_code == 200
+    assert revalidated.content == b"\x89PNG\r\n\x1a\n"
+
+
+def test_revalidating_a_still_missing_tile_yields_304_with_miss_cache_control(
+    app_with_basemap_stub,
+):
+    """Upstream still down: 304 is correct, but it must restate the short
+    miss TTL so the gap keeps its short freshness instead of inheriting the
+    default heuristic."""
+    client, stub = app_with_basemap_stub
+    stub.get_tile_data = AsyncMock(return_value=None)
+
+    from dependencies import settings
+
+    miss = client.get("/basemap/argenmap/4/5/9.png")
+    revalidated = client.get(
+        "/basemap/argenmap/4/5/9.png",
+        headers={"If-None-Match": miss.headers["etag"]},
+    )
+
+    assert revalidated.status_code == 304
+    assert revalidated.headers["cache-control"] == (
+        settings.basemap_cache_control_tile_miss
+    )
+
+
+def test_revalidating_a_cached_hit_still_yields_304(app_with_basemap_stub):
+    """The hit path's 304 must keep working — the fix must not cost the
+    bandwidth saving on tiles that are genuinely unchanged."""
+    client, stub = app_with_basemap_stub
+    stub.get_tile_data = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
+
+    hit = client.get("/basemap/argenmap/4/5/9.png")
+    revalidated = client.get(
+        "/basemap/argenmap/4/5/9.png",
+        headers={"If-None-Match": hit.headers["etag"]},
+    )
+
+    assert revalidated.status_code == 304
+    # Served straight from the ETag, without consulting the reader.
+    stub.get_tile_data.assert_awaited_once()
