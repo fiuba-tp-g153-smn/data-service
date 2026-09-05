@@ -98,6 +98,7 @@ class Settings:
     sync_mode: str
     satellite_tile_ttl: int
     radar_tile_ttl: int
+    radar_cache_control_tile_miss: str = "public, max-age=300"
     tileset_listing_ttl: int
     sync_interval_seconds: int
     # Floor on the inter-cycle sleep so the loop always yields, even when a
@@ -140,6 +141,7 @@ class Settings:
     # WRF model (loaded from settings.json, env overrides)
     wrf_tile_ttl: int = 86400
     wrf_geojson_ttl: int = 86400
+    wrf_cache_control_tile_miss: str = "public, max-age=300"
     # WRF is the heaviest product, so it runs on its own loop with a longer
     # cadence and a generous watchdog (a big backfill pass must not be truncated).
     wrf_sync_interval_seconds: int = 120
@@ -362,6 +364,7 @@ class Settings:
             "sync_mode",
             "satellite_tile_ttl",
             "radar_tile_ttl",
+            "radar_cache_control_tile_miss",
             "tileset_listing_ttl",
             "sync_interval_seconds",
             "sync_min_sleep_seconds",
@@ -380,6 +383,7 @@ class Settings:
             # WRF
             "wrf_tile_ttl",
             "wrf_geojson_ttl",
+            "wrf_cache_control_tile_miss",
             "wrf_inits_to_keep",
             "wrf_overlay_recheck_ttl",
             "wrf_sync_interval_seconds",
@@ -606,6 +610,9 @@ class Settings:
             "SATELLITE_TILE_TTL", self.satellite_tile_ttl
         )
         self.radar_tile_ttl = self._env_int("RADAR_TILE_TTL", self.radar_tile_ttl)
+        self.radar_cache_control_tile_miss = os.getenv(
+            "RADAR_CACHE_CONTROL_TILE_MISS", self.radar_cache_control_tile_miss
+        )
         self.tileset_listing_ttl = self._env_int(
             "TILESET_LISTING_TTL", self.tileset_listing_ttl
         )
@@ -637,6 +644,9 @@ class Settings:
         )
         self.wrf_tile_ttl = self._env_int("WRF_TILE_TTL", self.wrf_tile_ttl)
         self.wrf_geojson_ttl = self._env_int("WRF_GEOJSON_TTL", self.wrf_geojson_ttl)
+        self.wrf_cache_control_tile_miss = os.getenv(
+            "WRF_CACHE_CONTROL_TILE_MISS", self.wrf_cache_control_tile_miss
+        )
         self.wrf_inits_to_keep = self._env_int(
             "WRF_INITS_TO_KEEP", self.wrf_inits_to_keep
         )

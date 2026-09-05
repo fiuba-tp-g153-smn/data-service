@@ -81,7 +81,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 - Services are module-level singletons configured via `.configure(...)` inside `lifespan` (DI via method call, not constructor — see `BasemapService`).
 - Blocking I/O offloaded via `asyncio.to_thread()`.
-- Tiles served as `FileResponse` with `image/webp` (satellite/radar/ECMWF) or `image/png` (basemap) and aggressive cache headers. Missing basemap tiles return a cached transparent PNG (`routes.utils.TRANSPARENT_PNG_TILE`) with `basemap_cache_control_tile_miss` and the **miss** half of `routes.utils.etag_pair` — a gap must never share the hit's ETag, or the client's revalidation matches its own cached gap and 304s forever, so the real tile never arrives once upstream recovers. `radar`/`wrf` still share one ETag across hit and miss (pending).
+- Tiles served as `FileResponse` with `image/webp` (satellite/radar/ECMWF) or `image/png` (basemap) and aggressive cache headers. A handler that serves a placeholder in place of a missing payload (transparent tile, empty FeatureCollection) MUST label it with the **miss** half of `routes.utils.etag_pair` and a short, non-`immutable` `*_cache_control_tile_miss` — a gap must never share the hit's ETag, or the client's revalidation matches its own cached gap and 304s forever, so the real payload never arrives once the data lands. This holds for basemap, radar, WRF (tiles + barbs) and GFS (tiles + barbs); `tests/application/test_tile_miss_etag.py` parametrizes the invariant over all six.
 - Tests use `pytest-socket` — network disabled by default, only `127.0.0.1` allowed.
 
 ## Configuration
@@ -104,9 +104,10 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 **Runtime tuning** — `settings.json` is merged with env vars (env wins). `src/settings.py` is the source of truth for defaults, so `settings.json` carries only *overrides* plus the few keys that have no code default (a value equal to its default is omitted). Every key has a matching `UPPERCASE` env override. Per-domain keys nest under a namespace object (`basemap`, `ecmwf`, `wrf`, …) and may nest further (e.g. `basemap.scrape.delay_ms`, `ecmwf.mslp.geojson_ttl`); the loader (`Settings._flatten`) recursively flattens them back to underscore-joined `<namespace>_<key>` names, so Python attrs and env vars stay flat regardless of nesting depth (`basemap.scrape.delay_ms` → `settings.basemap_scrape_delay_ms` / `BASEMAP_SCRAPE_DELAY_MS`). Unrecognized keys (not in `Settings._JSON_KEYS`) are logged as a warning rather than silently dropped. Knobs by group (defaults in `settings.py`; most are omitted from `settings.json` while unchanged):
 
-- Shared: `sync_mode`, `satellite_tile_ttl`, `radar_tile_ttl`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
+- Shared: `sync_mode`, `satellite_tile_ttl`, `radar_tile_ttl`, `radar_cache_control_tile_miss`, `tileset_listing_ttl`, `s3_max_concurrent_downloads`, `cache_control_config`, `cache_control_tile`.
 - Sync cadence: `sync_interval_seconds` (one shared loop drives satellite + radar + ECMWF).
 - ECMWF: `ecmwf_tile_ttl`, `ecmwf_forecasts_to_keep`.
+- WRF: `wrf_tile_ttl`, `wrf_geojson_ttl`, `wrf_cache_control_tile_miss`, `wrf_inits_to_keep`.
 - Basemap: `basemap_sync_mode`, `basemap_providers`, `basemap_tile_ttl` (30 d default), `basemap_scrape_*` (incl. `basemap_scrape_parallelism_mode` — `sequential`/`per_origin`/`full` — and `basemap_scrape_per_host_concurrent`, a per-host request budget stacked under `basemap_scrape_concurrent`), `basemap_provider_cooldown_schedule` + `basemap_provider_error_rate_*` (circuit breaker — trips on per-sweep UNAVAILABLE error rate, exponential-backoff cooldown, state persisted in SQLite `basemap_provider_health`), `basemap_cache_*`, `basemap_bbox_*`, `basemap_http_*`, `basemap_reader_http_*`, `basemap_request_deadline_seconds`, `basemap_s3_object_ttl_days` (35 d default — strictly greater than scrape interval), `basemap_online_fallback_enabled`, `basemap_provider_availability_ttl`, `basemap_scrape_state_db_path`, `basemap_cache_control_tile_miss`.
 
 ## Engineering Rules

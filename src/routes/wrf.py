@@ -15,7 +15,12 @@ from models.wrf import (
     WrfSecondaryPointValueResponse,
     WrfStepListResponse,
 )
-from routes.utils import create_tile_response, make_transparent_tile_response
+from routes.utils import (
+    create_tile_response,
+    etag_pair,
+    make_transparent_tile_response,
+    not_modified,
+)
 from services.point_value_service import (
     CogNotFoundError,
     NoDataOrOutsideError,
@@ -229,18 +234,26 @@ async def get_barb_tile(
             f"Valid: {sorted(_BARB_ZOOM_LEVELS)}",
         )
 
-    etag = f'"{product_id}-{init_tag}-{fxxx}-barbs-{z}-{x}-{y}"'
-    if request.headers.get("if-none-match") == etag:
+    etag, miss_etag = etag_pair(f"{product_id}-{init_tag}-{fxxx}-barbs-{z}-{x}-{y}")
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     data = await wrf_service.get_barb_tile(product_id, init_tag, fxxx, z, x, y)
     if not data:
         # Return empty FeatureCollection (not 404) so the browser console stays
-        # clean for tiles outside the WRF Lambert domain.
+        # clean for tiles outside the WRF Lambert domain. Its own ETag + short
+        # TTL, so a tile that gains barbs later is not masked by the client's
+        # cached empty one.
+        if if_none_match == miss_etag:
+            return not_modified(settings.wrf_cache_control_tile_miss)
         return Response(
             content=b'{"type":"FeatureCollection","features":[]}',
             media_type="application/geo+json",
-            headers={"Cache-Control": settings.cache_control_tile, "ETag": etag},
+            headers={
+                "Cache-Control": settings.wrf_cache_control_tile_miss,
+                "ETag": miss_etag,
+            },
         )
 
     return Response(
@@ -272,9 +285,9 @@ async def get_tile(
             detail=f"Zoom level {z} not available. Valid range: {_ZOOM_MIN}-{_ZOOM_MAX}",
         )
 
-    etag = f'"{product_id}-{init_tag}-{fxxx}-{z}-{x}-{y}"'
+    etag, miss_etag = etag_pair(f"{product_id}-{init_tag}-{fxxx}-{z}-{x}-{y}")
     if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
+    if if_none_match == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
     tile_data = await wrf_service.get_tile_data(product_id, init_tag, fxxx, z, x, y)
@@ -284,6 +297,15 @@ async def get_tile(
         # exist, so a 404 here is normal at the model boundary. Return a
         # transparent WebP instead so Leaflet renders empty pixels and the
         # frontend's tileerror handler does not surface a "layer down" toast.
-        return make_transparent_tile_response(etag, settings.cache_control_tile)
+        #
+        # But two other gaps land here too: a pyramid still being written, and
+        # an S3 transport failure (S3Client.download_tile degrades it to the
+        # same None as a real 404). Its own ETag + short TTL keep those from
+        # being cached as if they were the permanent case.
+        if if_none_match == miss_etag:
+            return not_modified(settings.wrf_cache_control_tile_miss)
+        return make_transparent_tile_response(
+            miss_etag, settings.wrf_cache_control_tile_miss
+        )
 
     return create_tile_response(tile_data, etag, settings.cache_control_tile)
