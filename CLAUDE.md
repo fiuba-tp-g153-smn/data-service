@@ -81,7 +81,7 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 - Services are module-level singletons configured via `.configure(...)` inside `lifespan` (DI via method call, not constructor — see `BasemapService`).
 - Blocking I/O offloaded via `asyncio.to_thread()`.
-- Tiles served as `FileResponse` with `image/webp` (satellite/radar/ECMWF) or `image/png` (basemap) and aggressive cache headers. Missing basemap tiles return a cached transparent PNG (`routes.utils.TRANSPARENT_PNG_TILE`) with `basemap_cache_control_tile_miss`.
+- Tiles served as `FileResponse` with `image/webp` (satellite/radar/ECMWF) or `image/png` (basemap) and aggressive cache headers. Missing basemap tiles return a cached transparent PNG (`routes.utils.TRANSPARENT_PNG_TILE`) with `basemap_cache_control_tile_miss` and the **miss** half of `routes.utils.etag_pair` — a gap must never share the hit's ETag, or the client's revalidation matches its own cached gap and 304s forever, so the real tile never arrives once upstream recovers. `radar`/`wrf` still share one ETag across hit and miss (pending).
 - Tests use `pytest-socket` — network disabled by default, only `127.0.0.1` allowed.
 
 ## Configuration

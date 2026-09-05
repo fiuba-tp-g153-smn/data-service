@@ -414,3 +414,10 @@ def test_unrecognized_keys_are_warned(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         _load(tmp_path, {"basemap": {"tile_ttl": 1}, "bogus_key": 5})
     assert "bogus_key" in caplog.text
+
+
+def test_basemap_tile_miss_default_is_revalidatable():
+    """`immutable` on a gap tells the browser not to revalidate at all, which is
+    exactly what pins a transparent tile in place while upstream is down."""
+    assert "immutable" not in Settings.basemap_cache_control_tile_miss
+    assert "max-age=300" in Settings.basemap_cache_control_tile_miss

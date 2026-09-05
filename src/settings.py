@@ -227,7 +227,9 @@ class Settings:
     basemap_request_deadline_seconds: float = 4.0
     # Cache-Control header returned for missing tiles (datalayer-style: a
     # transparent PNG with a short TTL so the browser stops re-requesting).
-    basemap_cache_control_tile_miss: str = "public, max-age=300, immutable"
+    # The miss also carries its own ETag so that revalidation can return the
+    # real tile.
+    basemap_cache_control_tile_miss: str = "public, max-age=300"
     # Cache-Control header returned for successful basemap tile hits. Kept
     # separate from `cache_control_tile` because basemap tiles are static
     # (upstream providers refresh on the order of weeks) while satellite /
