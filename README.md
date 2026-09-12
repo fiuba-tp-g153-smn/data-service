@@ -55,7 +55,7 @@ The Data Service is a FastAPI microservice (Python 3.13) that serves satellite i
 
 Each data domain has its own route prefix, service, and sync mechanism.
 The four below are the ones whose sync is under a mode knob; the service
-also serves WRF (`/products/wrf/...`), GFS (`/products/gfs/...`), SMN
+also serves WRF (`/products/wrf-arg4k/...`), GFS (`/products/gfs/...`), SMN
 weather stations (`/weather-stations/...`), background-sync status
 (`/sync/status`) and dashboard metrics (`/metrics/...`) — `/docs` has the
 full list.
@@ -63,8 +63,8 @@ full list.
 | Domain        | Route prefix                                                   | Source                                   | Sync control                                                |
 | :------------ | :------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------- |
 | **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                          |
-| **Radar**     | `/products/radar/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
-| **ECMWF**     | `/products/ecmwf/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_mode` (`full` / `on_demand`)                          |
+| **Radar**     | `/products/radar-sinarame/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
+| **ECMWF**     | `/products/ecmwf-ifs/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_mode` (`full` / `on_demand`)                          |
 | **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_sync_mode` (independent of `sync_mode`; see below) |
 
 Satellite, radar, ECMWF, WRF and GFS share the same `sync_mode` knob. Basemap
