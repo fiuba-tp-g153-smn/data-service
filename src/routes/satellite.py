@@ -30,7 +30,7 @@ router = APIRouter(prefix="/products", tags=["Satellite"])
 )
 async def get_satellite_product(
     product_id: str = PathParam(
-        ..., description="Satellite product identifier (e.g., goes-19)"
+        ..., description="Satellite product identifier (e.g., goes19)"
     )
 ):
     """
@@ -38,7 +38,7 @@ async def get_satellite_product(
 
     Returns available instruments and their endpoints.
 
-    Example: /products/goes-19
+    Example: /products/goes19
     """
     product = satellite_service.get_satellite_product(product_id)
     if not product:
@@ -60,7 +60,7 @@ async def get_satellite_product(
 )
 async def get_instrument(
     product_id: str = PathParam(
-        ..., description="Satellite product identifier (e.g., goes-19)"
+        ..., description="Satellite product identifier (e.g., goes19)"
     ),
     instrument_id: str = PathParam(
         ..., description="Instrument identifier (e.g., abi)"
@@ -71,7 +71,7 @@ async def get_instrument(
 
     Returns available channels and their endpoints.
 
-    Example: /products/goes-19/abi
+    Example: /products/goes19/abi
     """
     if not satellite_service.instrument_exists(product_id, instrument_id):
         raise HTTPException(
@@ -93,12 +93,12 @@ async def get_instrument(
 async def list_channel_tilesets(
     request: Request,
     product_id: str = PathParam(
-        ..., description="Satellite product identifier (e.g., goes-19)"
+        ..., description="Satellite product identifier (e.g., goes19)"
     ),
     instrument_id: str = PathParam(
         ..., description="Instrument identifier (e.g., abi)"
     ),
-    channel_id: str = PathParam(..., description="Channel identifier (e.g., ch-13)"),
+    channel_id: str = PathParam(..., description="Channel identifier (e.g., c13)"),
 ):
     """
     List available tilesets for a specific channel.
@@ -108,7 +108,7 @@ async def list_channel_tilesets(
     - List of available tilesets with URL patterns
     - Tile URL pattern for fetching tiles
 
-    Example: /products/goes-19/abi/ch-13
+    Example: /products/goes19/abi/c13
     """
     if not satellite_service.channel_exists(product_id, instrument_id, channel_id):
         raise HTTPException(
@@ -152,12 +152,12 @@ async def list_channel_tilesets(
 async def get_satellite_tile(
     request: Request,
     product_id: str = PathParam(
-        ..., description="Satellite product identifier (e.g., goes-19)"
+        ..., description="Satellite product identifier (e.g., goes19)"
     ),
     instrument_id: str = PathParam(
         ..., description="Instrument identifier (e.g., abi)"
     ),
-    channel_id: str = PathParam(..., description="Channel identifier (e.g., ch-13)"),
+    channel_id: str = PathParam(..., description="Channel identifier (e.g., c13)"),
     tileset_id: str = PathParam(
         ..., description="Tileset identifier (timestamp-based)"
     ),
@@ -169,7 +169,7 @@ async def get_satellite_tile(
     """
     Serve a specific tile for a satellite product/instrument/channel.
 
-    Example: /products/goes-19/abi/ch-13/OR_ABI-L1b-RadF-M6C13_G19_s20261234567/5/10/15.webp
+    Example: /products/goes19/abi/c13/OR_ABI-L1b-RadF-M6C13_G19_s20261234567/5/10/15.webp
     """
     # Validate channel
     if not satellite_service.channel_exists(product_id, instrument_id, channel_id):
@@ -218,12 +218,12 @@ async def get_satellite_tile(
 )
 async def get_satellite_point_value(
     product_id: str = PathParam(
-        ..., description="Satellite product identifier (e.g., goes-19)"
+        ..., description="Satellite product identifier (e.g., goes19)"
     ),
     instrument_id: str = PathParam(
         ..., description="Instrument identifier (e.g., abi)"
     ),
-    channel_id: str = PathParam(..., description="Channel identifier (e.g., ch-13)"),
+    channel_id: str = PathParam(..., description="Channel identifier (e.g., c13)"),
     tileset_id: str = PathParam(
         ..., description="Tileset identifier (timestamp-based)"
     ),

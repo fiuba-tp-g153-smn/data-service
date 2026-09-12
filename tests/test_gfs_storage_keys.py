@@ -36,11 +36,11 @@ class TestCatalogue:
     def test_exposes_the_three_products(self):
         assert product_ids() == ["mslp", "500hpa", "250hpa"]
 
-    def test_mslp_is_abbreviated_in_the_url_but_not_in_s3(self):
+    def test_mslp_is_abbreviated_in_both_the_url_and_s3(self):
         """tiles-processor writes the long segment; the URL uses the short id."""
         product = get_product("mslp")
         assert product is not None
-        assert product.s3_segment == "mean_sea_level_pressure"
+        assert product.s3_segment == "mslp"
 
     @pytest.mark.parametrize("product_id", ["500hpa", "250hpa"])
     def test_upper_level_ids_match_their_s3_segment(self, product_id):
@@ -133,32 +133,32 @@ class TestS3Keys:
     def test_tile_key(self):
         assert (
             S3Client.build_gfs_tile_key("500hpa", CYCLE, FXXX, 5, 9, 17)
-            == f"tiles/models/gfs/500hpa/{CYCLE}/{STEP_ID}/5/9/17.webp"
+            == f"tiles/gfs/500hpa/{CYCLE}/{STEP_ID}/5/9/17.webp"
         )
 
     def test_cog_key(self):
         assert (
             S3Client.build_gfs_cog_key("250hpa", CYCLE, FXXX)
-            == f"cog/models/gfs/250hpa/{CYCLE}/{STEP_ID}.tif"
+            == f"cog/gfs/250hpa/{CYCLE}/{STEP_ID}.tif"
         )
 
     def test_geojson_key(self):
         assert (
             S3Client.build_gfs_geojson_key("500hpa", CYCLE, FXXX, "isotherms")
-            == f"geojson/models/gfs/500hpa/{CYCLE}/{STEP_ID}_isotherms.json"
+            == f"geojson/gfs/500hpa/{CYCLE}/{STEP_ID}_isotherms.json"
         )
 
     def test_barb_tile_key(self):
         """Barbs are the one overlay stored per tile rather than per step."""
         assert (
             S3Client.build_gfs_barb_tile_key("500hpa", CYCLE, FXXX, 4, 5, 9)
-            == f"geojson/models/gfs/500hpa/{CYCLE}/{STEP_ID}_barbs/4/5/9.json"
+            == f"geojson/gfs/500hpa/{CYCLE}/{STEP_ID}_barbs/4/5/9.json"
         )
 
     def test_mslp_keys_use_the_long_s3_segment(self):
         segment = GFS_PRODUCTS["mslp"].s3_segment
         key = S3Client.build_gfs_geojson_key(segment, CYCLE, FXXX, "isobars")
-        assert key.startswith("geojson/models/gfs/mean_sea_level_pressure/")
+        assert key.startswith("geojson/gfs/mslp/")
 
     def test_step_id_joins_cycle_and_step(self):
         """The API splits them; tiles-processor names objects with them joined."""
@@ -167,7 +167,7 @@ class TestS3Keys:
 
     def test_cog_cycle_prefix_is_listable(self):
         prefix = S3Client.gfs_cog_cycle_prefix("500hpa")
-        assert prefix == "cog/models/gfs/500hpa/"
+        assert prefix == "cog/gfs/500hpa/"
         assert S3Client.build_gfs_cog_key("500hpa", CYCLE, FXXX).startswith(prefix)
 
     def test_every_product_builds_a_distinct_cog_prefix(self):
@@ -179,7 +179,7 @@ class TestS3Keys:
     def test_secondary_cog_key(self):
         assert (
             S3Client.build_gfs_secondary_cog_key("500hpa", CYCLE, "temperature", FXXX)
-            == f"cog/models/gfs/500hpa/{CYCLE}/temperature/{STEP_ID}.tif"
+            == f"cog/gfs/500hpa/{CYCLE}/temperature/{STEP_ID}.tif"
         )
 
     def test_secondary_cog_is_nested_not_flat(self):
@@ -190,7 +190,7 @@ class TestS3Keys:
         `{STEP_ID}.temperature.tif` — would come back as the phantom forecast
         step `f003.temperature` and reach the frontend as a real timestep.
         """
-        cycle_prefix = f"cog/models/gfs/500hpa/{CYCLE}/"
+        cycle_prefix = f"cog/gfs/500hpa/{CYCLE}/"
         key = S3Client.build_gfs_secondary_cog_key("500hpa", CYCLE, "temperature", FXXX)
         assert "/" in key[len(cycle_prefix) :]
 

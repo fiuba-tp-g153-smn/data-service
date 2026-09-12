@@ -71,8 +71,7 @@ class WrfService(BaseProductService):
             *(self._strategy.list_layers(product_id, init_tag, s) for s in steps)
         )
         step_infos = [
-            WrfStepInfo(fxxx=s, layers=layers)
-            for s, layers in zip(steps, layer_lists)
+            WrfStepInfo(fxxx=s, layers=layers) for s, layers in zip(steps, layer_lists)
         ]
         return WrfStepListResponse(
             product_id=product_id,
@@ -113,9 +112,7 @@ class WrfService(BaseProductService):
         """Get rasterized wind-barb WebP tile bytes via the configured strategy."""
         if not self._strategy:
             return None
-        return await self._strategy.get_barb_tile(
-            product_id, init_tag, fxxx, z, x, y
-        )
+        return await self._strategy.get_barb_tile(product_id, init_tag, fxxx, z, x, y)
 
 
 # Singleton instance

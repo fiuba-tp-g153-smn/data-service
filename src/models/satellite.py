@@ -6,7 +6,7 @@ from models.base import ZoomLevels, BoundingBox, TilesetInfo
 
 
 class ChannelConfig(BaseModel):
-    """Configuration for a satellite channel (e.g., ch-13)."""
+    """Configuration for a satellite channel (e.g., c13)."""
 
     name: str
     description: str

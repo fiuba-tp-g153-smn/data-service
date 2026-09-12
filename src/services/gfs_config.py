@@ -27,7 +27,7 @@ class GfsProduct:
 # tiles-processor. The other two match on both sides.
 GFS_MSLP = GfsProduct(
     product_id="mslp",
-    s3_segment="mean_sea_level_pressure",
+    s3_segment="mslp",
     layers=("isobars", "thickness"),
     unit="hPa",
     # The SMN's `slpb.gs` chart is pure contours, so no raster is produced.

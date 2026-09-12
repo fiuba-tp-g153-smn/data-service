@@ -15,7 +15,7 @@ from settings import Settings
 
 CYCLE_NEW = "20260808T0600Z"
 CYCLE_OLD = "20260808T0000Z"
-MSLP_PREFIX = "cog/models/gfs/mean_sea_level_pressure/"
+MSLP_PREFIX = "cog/gfs/mslp/"
 
 
 def _make_settings(cycles_to_keep: int = 2) -> Settings:
@@ -129,10 +129,7 @@ class TestStepSync:
         s3, redis = _s3(), _redis()
         await _make_service(s3, redis)._sync_step(GFS_MSLP, CYCLE_NEW, "f003")
         keys = [c.args[0] for c in s3.download_tile.await_args_list]
-        assert (
-            f"geojson/models/gfs/mean_sea_level_pressure/{CYCLE_NEW}/"
-            f"{CYCLE_NEW}_f003_isobars.json" in keys
-        )
+        assert f"geojson/gfs/mslp/{CYCLE_NEW}/" f"{CYCLE_NEW}_f003_isobars.json" in keys
 
     @pytest.mark.asyncio
     async def test_already_mirrored_overlays_cost_no_s3_get(self):
@@ -217,7 +214,7 @@ class TestFullPass:
         original = s3.get_subdirectories
 
         async def fail_on_mslp(prefix):
-            if "mean_sea_level_pressure" in prefix:
+            if "/mslp/" in prefix or prefix.endswith("/mslp"):
                 raise RuntimeError("S3 down")
             return await original(prefix)
 

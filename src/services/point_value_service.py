@@ -41,19 +41,19 @@ class PointValueService(BaseProductService):
         self._strategy: Optional[PointValueStrategy] = None
 
     SATELLITE_UNITS = {
-        "band_13": "K",
-        "band_9": "K",
-        "band_2": "1",
-        "glm_fed": "flashes/min",
-        "glm_toe": "fJ",
-        "glm_mfa": "km2",
+        "goes19/abi/c13": "K",
+        "goes19/abi/c09": "K",
+        "goes19/abi/c02": "1",
+        "goes19/glm/fed": "flashes/min",
+        "goes19/glm/toe": "fJ",
+        "goes19/glm/mfa": "km2",
     }
 
     RADAR_UNITS = {
-        "DBZH": "dBZ",
+        "dbzh": "dBZ",
         # Long-range reflectivity (subvolume 04): same moment as DBZH.
-        "DBZH_450KM": "dBZ",
-        "VRAD": "m/s",
+        "dbzh-450km": "dBZ",
+        "vrad": "m/s",
     }
 
     MODEL_UNITS = {
@@ -62,16 +62,16 @@ class PointValueService(BaseProductService):
     }
 
     WRF_PRODUCT_UNITS = {
-        "Colmax": "dBZ",
-        "Rafagas": "kt",
-        "Campo900hPa": "g/kg",
-        "Precipitacion1h": "mm",
-        "MUCAPE": "J/kg",
-        "AguaPrecipitable": "mm",
-        "JetCapasBajas": "kt",
-        "CortanteNivelesBajos": "kt",
-        "CAPE_BRN": "J/kg",
-        "Granizo": "",
+        "colmax": "dBZ",
+        "rafagas": "kt",
+        "campo-900hpa": "g/kg",
+        "precipitacion-1h": "mm",
+        "mucape": "J/kg",
+        "agua-precipitable": "mm",
+        "jet-capas-bajas": "kt",
+        "cortante-niveles-bajos": "kt",
+        "cape-brn": "J/kg",
+        "granizo": "",
     }
 
     # Units for WRF secondary point-query variables (keyed by variable name,
@@ -112,7 +112,7 @@ class PointValueService(BaseProductService):
         lon: float,
     ) -> PointSample:
         """Sample a radar COG at a specific coordinate."""
-        cog_key = f"cog/radar/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}.tif"
+        cog_key = f"cog/radar/sinarame/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}.tif"
         unit = self.RADAR_UNITS.get(variable_id, "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
@@ -125,7 +125,7 @@ class PointValueService(BaseProductService):
         lon: float,
     ) -> PointSample:
         """Sample an ECMWF total precipitation COG at a specific coordinate."""
-        cog_key = f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
+        cog_key = f"cog/ecmwf-ifs/tp/{forecast_ts}/{period_ts}.tif"
         unit = self.MODEL_UNITS.get("ecmwf_total_precipitation", "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
@@ -140,7 +140,7 @@ class PointValueService(BaseProductService):
     ) -> PointSample:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Sample a WRF primary-field COG at a specific coordinate."""
-        cog_key = f"cog/wrf/{product_id}/{init_tag}/{fxxx}.tif"
+        cog_key = f"cog/wrf-arg4k/{product_id}/{init_tag}/{fxxx}.tif"
         unit = self.WRF_PRODUCT_UNITS.get(product_id, "")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
@@ -156,7 +156,7 @@ class PointValueService(BaseProductService):
     ) -> PointSample:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Sample a WRF secondary-variable COG (wind / contour) at a point."""
-        cog_key = f"cog/wrf/{product_id}/{init_tag}/{fxxx}.{variable}.tif"
+        cog_key = f"cog/wrf-arg4k/{product_id}/{init_tag}/{fxxx}.{variable}.tif"
         unit = self.WRF_SECONDARY_UNITS.get(variable, "")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)
@@ -169,10 +169,7 @@ class PointValueService(BaseProductService):
         lon: float,
     ) -> PointSample:
         """Sample an ECMWF mean sea level pressure COG at a specific coordinate."""
-        cog_key = (
-            f"cog/models/ecmwf/mean_sea_level_pressure/"
-            f"{forecast_ts}/{timestamp_ts}.tif"
-        )
+        cog_key = f"cog/ecmwf-ifs/mslp/" f"{forecast_ts}/{timestamp_ts}.tif"
         unit = self.MODEL_UNITS.get("ecmwf_mean_sea_level_pressure", "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)

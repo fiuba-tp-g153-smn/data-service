@@ -7,7 +7,7 @@ from typing import List, Optional, Protocol
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 
-WRF_S3_PREFIX = "tiles/wrf"
+WRF_S3_PREFIX = "tiles/wrf-arg4k"
 
 
 class WrfSyncStrategy(Protocol):

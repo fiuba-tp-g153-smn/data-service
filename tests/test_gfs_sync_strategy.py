@@ -74,7 +74,7 @@ class TestOnDemandTiles:
 
         assert await strategy.get_tile("500hpa", CYCLE, FXXX, 5, 9, 17) == b"payload"
         s3.download_tile.assert_awaited_once_with(
-            f"tiles/models/gfs/500hpa/{CYCLE}/{CYCLE}_{FXXX}/5/9/17.webp"
+            f"tiles/gfs/500hpa/{CYCLE}/{CYCLE}_{FXXX}/5/9/17.webp"
         )
 
     @pytest.mark.asyncio
@@ -120,8 +120,7 @@ class TestOnDemandOverlays:
 
         await strategy.get_geojson("mslp", CYCLE, FXXX, "isobars")
         s3.download_tile.assert_awaited_once_with(
-            f"geojson/models/gfs/mean_sea_level_pressure/{CYCLE}/"
-            f"{CYCLE}_{FXXX}_isobars.json"
+            f"geojson/gfs/mslp/{CYCLE}/" f"{CYCLE}_{FXXX}_isobars.json"
         )
 
     @pytest.mark.asyncio
@@ -140,7 +139,7 @@ class TestOnDemandOverlays:
 
         await strategy.get_barb_tile("500hpa", CYCLE, FXXX, 4, 5, 9)
         s3.download_tile.assert_awaited_once_with(
-            f"geojson/models/gfs/500hpa/{CYCLE}/{CYCLE}_{FXXX}_barbs/4/5/9.json"
+            f"geojson/gfs/500hpa/{CYCLE}/{CYCLE}_{FXXX}_barbs/4/5/9.json"
         )
 
     @pytest.mark.asyncio
@@ -203,17 +202,15 @@ class TestOnDemandListings:
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
         await strategy.list_cycles("mslp")
-        s3.try_get_subdirectories.assert_awaited_once_with(
-            "cog/models/gfs/mean_sea_level_pressure/"
-        )
+        s3.try_get_subdirectories.assert_awaited_once_with("cog/gfs/mslp/")
 
     @pytest.mark.asyncio
     async def test_cycles_come_back_newest_first(self):
         redis, s3 = _redis(), _s3()
         s3.try_get_subdirectories = AsyncMock(
             return_value=[
-                "cog/models/gfs/500hpa/20260808T0000Z/",
-                "cog/models/gfs/500hpa/20260808T0600Z/",
+                "cog/gfs/500hpa/20260808T0000Z/",
+                "cog/gfs/500hpa/20260808T0600Z/",
             ]
         )
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
@@ -276,7 +273,7 @@ class TestOnDemandListings:
             "isotherms",
         ]
         prefix = s3.try_list_object_basenames.await_args.args[0]
-        assert prefix == f"geojson/models/gfs/500hpa/{CYCLE}/"
+        assert prefix == f"geojson/gfs/500hpa/{CYCLE}/"
         # Delimited: the `{step}_barbs/z/x/y` subtrees hold thousands of keys.
         assert s3.try_list_object_basenames.await_args.kwargs["delimiter"] == "/"
 
@@ -329,9 +326,7 @@ class TestFullSyncStrategy:
     @pytest.mark.asyncio
     async def test_cold_index_falls_back_to_s3(self):
         redis, s3 = _redis(), _s3()
-        s3.try_get_subdirectories = AsyncMock(
-            return_value=[f"cog/models/gfs/500hpa/{CYCLE}/"]
-        )
+        s3.try_get_subdirectories = AsyncMock(return_value=[f"cog/gfs/500hpa/{CYCLE}/"])
         strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
 
         assert await strategy.list_cycles("500hpa") == [CYCLE]

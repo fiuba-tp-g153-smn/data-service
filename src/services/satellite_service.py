@@ -28,7 +28,7 @@ class SatelliteService(BaseProductService):
 
     # Satellite products configuration
     SATELLITE_PRODUCTS: Dict[str, dict] = {
-        "goes-19": {
+        "goes19": {
             "name": "GOES-19",
             "description": "Geostationary Operational Environmental Satellite 19",
             "type": "satellite",
@@ -38,17 +38,17 @@ class SatelliteService(BaseProductService):
                     "description": "Advanced Baseline Imager",
                     "available": True,
                     "channels": {
-                        "ch-2": {
+                        "c02": {
                             "name": "Channel 2",
                             "description": "Red Visible (0.64 µm)",
                             "available": False,
                         },
-                        "ch-9": {
+                        "c09": {
                             "name": "Channel 9",
                             "description": "Mid-Level Water Vapor (6.9 µm)",
                             "available": False,
                         },
-                        "ch-13": {
+                        "c13": {
                             "name": "Channel 13",
                             "description": "Clean IR Longwave Window (10.3 µm) - Cloud Top",
                             "available": True,
@@ -60,18 +60,18 @@ class SatelliteService(BaseProductService):
                     "description": "Geostationary Lightning Mapper",
                     "available": True,
                     "channels": {
-                        "glm-fed": {
+                        "fed": {
                             "name": "Flash Extent Density",
                             "description": "GLM Flash Extent Density (FED) - Lightning Activity",
                             "available": True,
                         },
-                        "glm-toe": {
+                        "toe": {
                             "name": "Total Optical Energy",
                             "description": "GLM Total Optical Energy (TOE) - "
                             "Radiated Energy Sum per Cell",
                             "available": True,
                         },
-                        "glm-mfa": {
+                        "mfa": {
                             "name": "Minimum Flash Area",
                             "description": "GLM Minimum Flash Area (MFA) - "
                             "Smallest flash footprint per cell",
@@ -83,14 +83,16 @@ class SatelliteService(BaseProductService):
         }
     }
 
-    # Mapping from channel IDs to directory names
+    # Channel id -> its path below the tiles/ and cog/ roots, which is also the
+    # Redis key segment. The instrument sits in the path, so the flat channel id
+    # from the URL cannot be used directly.
     CHANNEL_DIR_MAPPING = {
-        "ch-2": "band_2",
-        "ch-9": "band_9",
-        "ch-13": "band_13",
-        "glm-fed": "glm_fed",
-        "glm-toe": "glm_toe",
-        "glm-mfa": "glm_mfa",
+        "c02": "goes19/abi/c02",
+        "c09": "goes19/abi/c09",
+        "c13": "goes19/abi/c13",
+        "fed": "goes19/glm/fed",
+        "toe": "goes19/glm/toe",
+        "mfa": "goes19/glm/mfa",
     }
 
     def __init__(self):
@@ -210,7 +212,7 @@ class SatelliteService(BaseProductService):
             return None
 
         # For GOES-19 ABI and GLM, use the predefined bounding box and zoom levels
-        if product_id == "goes-19" and instrument_id in ("abi", "glm"):
+        if product_id == "goes19" and instrument_id in ("abi", "glm"):
             return {
                 "name": channel["name"],
                 "description": channel["description"],

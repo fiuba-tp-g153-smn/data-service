@@ -10,7 +10,7 @@ from clients.s3_client import S3Client
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
 # S3 prefix where radar data lives
-RADAR_S3_PREFIX = "tiles/radar"
+RADAR_S3_PREFIX = "tiles/radar/sinarame"
 
 
 class RadarSyncStrategy(Protocol):

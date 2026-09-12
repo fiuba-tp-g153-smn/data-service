@@ -85,10 +85,10 @@ ENDPOINTS = [
     ),
     TileEndpoint(
         name="radar-tile",
-        url="/products/radar/RMA1/DBZH/elev0/20260808T120000Z/5/9/17.webp",
+        url="/products/radar/RMA1/dbzh/elev0/20260808T120000Z/5/9/17.webp",
         hit_payload=_WEBP,
         cache_control_attr="radar_cache_control_tile_miss",
-        expected_identity="RMA1-DBZH-elev0-20260808T120000Z-5-9-17",
+        expected_identity="RMA1-dbzh-elev0-20260808T120000Z-5-9-17",
         install=_patch_singleton("routes.radar.radar_service", "get_tile_data"),
     ),
     TileEndpoint(

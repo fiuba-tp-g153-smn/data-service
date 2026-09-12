@@ -69,12 +69,14 @@ async def test_store_and_get_satellite_tile():
     tile_data = b"fake-webp-data"
     client._redis.get = AsyncMock(return_value=tile_data)
 
-    await client.store_satellite_tile("band_13", "tileset1", 5, 10, 15, tile_data)
+    await client.store_satellite_tile(
+        "goes19/abi/c13", "tileset1", 5, 10, 15, tile_data
+    )
     client._redis.set.assert_awaited_once_with(
-        "tile:sat:band_13/tileset1/5/10/15", tile_data
+        "tile:sat:goes19/abi/c13/tileset1/5/10/15", tile_data
     )
 
-    result = await client.get_satellite_tile("band_13", "tileset1", 5, 10, 15)
+    result = await client.get_satellite_tile("goes19/abi/c13", "tileset1", 5, 10, 15)
     assert result == tile_data
 
 
@@ -85,10 +87,10 @@ async def test_satellite_tileset_index():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"tileset1", b"tileset2"])
 
-    await client.add_satellite_tileset("band_13", "tileset1", 20250141230210.0)
+    await client.add_satellite_tileset("goes19/abi/c13", "tileset1", 20250141230210.0)
     client._redis.zadd.assert_awaited_once()
 
-    tilesets = await client.get_satellite_tilesets("band_13")
+    tilesets = await client.get_satellite_tilesets("goes19/abi/c13")
     assert tilesets == ["tileset1", "tileset2"]
 
 
@@ -99,10 +101,10 @@ async def test_delete_satellite_tileset():
     client._redis = AsyncMock()
     # Simulate scan returning some keys then finishing
     client._redis.scan = AsyncMock(
-        return_value=(0, [b"tile:sat:band_13/tileset1/5/10/15"])
+        return_value=(0, [b"tile:sat:goes19/abi/c13/tileset1/5/10/15"])
     )
 
-    await client.delete_satellite_tileset("band_13", "tileset1")
+    await client.delete_satellite_tileset("goes19/abi/c13", "tileset1")
 
     client._redis.zrem.assert_awaited_once()
     client._redis.delete.assert_awaited_once()
@@ -121,11 +123,11 @@ async def test_trim_satellite_index():
     client._redis = AsyncMock()
     client._redis.zremrangebyscore = AsyncMock(return_value=3)
 
-    removed = await client.trim_satellite_index("band_13", 1000.0)
+    removed = await client.trim_satellite_index("goes19/abi/c13", 1000.0)
 
     assert removed == 3
     client._redis.zremrangebyscore.assert_awaited_once_with(
-        "idx:sat:band_13", "-inf", "(1000.0"
+        "idx:sat:goes19/abi/c13", "-inf", "(1000.0"
     )
 
 
@@ -136,10 +138,10 @@ async def test_store_radar_tile_with_ttl():
     client._redis = AsyncMock()
 
     await client.store_radar_tile(
-        "RMA1", "DBZH", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600
+        "RMA1", "dbzh", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600
     )
     client._redis.set.assert_awaited_once_with(
-        "tile:radar:RMA1/DBZH/ts1_elev0/5/10/15", b"data", ex=3600
+        "tile:radar:RMA1/dbzh/ts1_elev0/5/10/15", b"data", ex=3600
     )
 
 
@@ -153,11 +155,11 @@ async def test_radar_index_operations():
     mock_pipeline.execute = AsyncMock(return_value=[])
     client._redis = mock_redis
 
-    await client.add_radar_index("RMA1", "DBZH", "elev0", "ts1", 1234.0, ttl=3600)
+    await client.add_radar_index("RMA1", "dbzh", "elev0", "ts1", 1234.0, ttl=3600)
     mock_pipeline.execute.assert_awaited_once()
     # Tilesets axis is a scored sorted set; the dimension axes stay plain sets.
     mock_pipeline.zadd.assert_called_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", {b"ts1": 1234.0}
+        "idx:radar:RMA1:dbzh:elev0:tilesets", {b"ts1": 1234.0}
     )
     assert mock_pipeline.sadd.call_count == 3
 
@@ -174,11 +176,11 @@ async def test_get_radar_tilesets_returns_newest_first():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"ts1", b"ts2", b"ts3"])
 
-    tilesets = await client.get_radar_tilesets("RMA1", "DBZH", "elev0")
+    tilesets = await client.get_radar_tilesets("RMA1", "dbzh", "elev0")
 
     assert tilesets == ["ts3", "ts2", "ts1"]
     client._redis.zrange.assert_awaited_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", 0, -1
+        "idx:radar:RMA1:dbzh:elev0:tilesets", 0, -1
     )
     client._redis.delete.assert_not_called()
 
@@ -194,10 +196,10 @@ async def test_get_radar_tilesets_self_heals_legacy_wrongtype_key():
         )
     )
 
-    tilesets = await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+    tilesets = await client.get_radar_tilesets("RMA1", "vrad", "elev0")
 
     assert tilesets == []
-    client._redis.delete.assert_awaited_once_with("idx:radar:RMA1:VRAD:elev0:tilesets")
+    client._redis.delete.assert_awaited_once_with("idx:radar:RMA1:vrad:elev0:tilesets")
 
 
 @pytest.mark.asyncio
@@ -208,7 +210,7 @@ async def test_get_radar_tilesets_reraises_other_response_errors():
     client._redis.zrange = AsyncMock(side_effect=ResponseError("LOADING"))
 
     with pytest.raises(ResponseError):
-        await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+        await client.get_radar_tilesets("RMA1", "vrad", "elev0")
 
     client._redis.delete.assert_not_called()
 
@@ -220,11 +222,11 @@ async def test_trim_radar_index():
     client._redis = AsyncMock()
     client._redis.zremrangebyscore = AsyncMock(return_value=2)
 
-    removed = await client.trim_radar_index("RMA1", "DBZH", "elev0", 1000.0)
+    removed = await client.trim_radar_index("RMA1", "dbzh", "elev0", 1000.0)
 
     assert removed == 2
     client._redis.zremrangebyscore.assert_awaited_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", "-inf", "(1000.0"
+        "idx:radar:RMA1:dbzh:elev0:tilesets", "-inf", "(1000.0"
     )
 
 

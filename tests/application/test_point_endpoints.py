@@ -58,7 +58,7 @@ def test_radar_point_endpoint_nodata_or_outside():
         mock_service.get_point_value = AsyncMock(side_effect=NoDataOrOutsideError())
 
         response = client.get(
-            "/products/radar/RMA1/DBZH/elev0/20260114T170328Z/point?lat=-34.6&lon=-58.4"
+            "/products/radar/RMA1/dbzh/elev0/20260114T170328Z/point?lat=-34.6&lon=-58.4"
         )
 
         assert response.status_code == 404
