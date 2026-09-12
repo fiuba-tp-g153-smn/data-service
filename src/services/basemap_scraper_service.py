@@ -1,5 +1,7 @@
 """Background scraper that builds the basemap tile backup from external providers."""
 
+# pylint: disable=too-many-lines
+
 import asyncio
 import logging
 import time
@@ -26,6 +28,7 @@ from services.basemap_config import (
     build_source_url,
     iter_tiles,
 )
+from services.storage_circuit import CircuitTransition, StorageCircuit
 from settings import Settings
 
 _PROGRESS_PCT_STEP = 10
@@ -36,6 +39,10 @@ _PROGRESS_MIN_INTERVAL_S = 1.0
 # S3/Redis outage recovers automatically without waiting a full scrape
 # interval (7 days by default).
 _STORAGE_RETRY_FLOOR_SECONDS = 60.0
+# Cap on the storage circuit's exponential cooldown. A sweep pauses in place
+# for at most this long between half-open probes, so a brief S3 blip costs a
+# few seconds rather than the sweep's cursor.
+_STORAGE_MAX_COOLDOWN_SECONDS = 30.0
 
 
 class _TileOutcome(Enum):
@@ -44,7 +51,8 @@ class _TileOutcome(Enum):
     OK = "ok"  # downloaded + persisted successfully
     MISSING = "missing"  # permanent miss (404/403) — tile legitimately doesn't exist
     UNAVAILABLE = "unavailable"  # provider appears down (network / exhausted retries)
-    STORAGE_ERROR = "storage"  # provider returned bytes but S3/Redis write failed
+    STORAGE_ERROR = "storage"  # provider returned bytes but the S3 write failed
+    STORAGE_SKIPPED = "storage_skipped"  # storage circuit open — never attempted
 
 
 @dataclass
@@ -60,15 +68,22 @@ class _ProviderSweepState:
     last-sweep error-rate stats shown on the dashboard.
 
     ``storage_errors`` counts tiles whose upstream fetch succeeded but whose
-    persistence to S3/Redis failed. Non-zero at end-of-sweep = systemic
-    downstream outage (not a provider health issue), so the scraper skips
-    stamping ``last_completed`` and lets the next cycle retry in ~60s
-    instead of the configured scrape interval.
+    persistence to S3 failed, plus those skipped outright while the storage
+    circuit was open. Non-zero at end-of-sweep = systemic downstream outage
+    (not a provider health issue), so the scraper skips stamping
+    ``last_completed`` and lets the next cycle retry in ~60s instead of the
+    configured scrape interval.
+
+    ``storage_abandoned`` is the harder verdict: the storage circuit stayed
+    open across every probe, so the sweep gave up mid-flight. Unlike the
+    run-to-the-end case the cursor is *preserved*, so the next cycle resumes
+    in place rather than restarting a multi-day sweep.
     """
 
     attempted: int = 0
     failed: int = 0
     tripped: bool = False
+    storage_abandoned: bool = False
     last_reason: str = ""
     failure_samples: List[str] = field(default_factory=list)
     storage_errors: int = 0
@@ -196,6 +211,22 @@ class BasemapScraperService(BaseSyncService):
         # so _compute_next_sleep can floor the next sleep to ~60s regardless
         # of last_completed. Reset at the top of every _run_sync.
         self._storage_retry_due = False
+        # Exponential-backoff gates around the two storage backends. Shared
+        # across providers because the backends are: once S3 is down, every
+        # provider would otherwise rediscover it one wasted upstream fetch at
+        # a time. The S3 circuit gates the whole tile (skipping the provider
+        # download too); the Redis one gates only the hot-cache write-through,
+        # which is not what the sweep exists to produce.
+        self._s3_circuit = StorageCircuit(
+            "S3", max_cooldown=_STORAGE_MAX_COOLDOWN_SECONDS
+        )
+        self._redis_circuit = StorageCircuit(
+            "Redis", max_cooldown=_STORAGE_MAX_COOLDOWN_SECONDS
+        )
+        # Latched for the rest of a cycle once one provider abandons its sweep
+        # to a dead storage backend, so the remaining providers skip straight
+        # past instead of each burning their own probe budget.
+        self._storage_down_this_cycle = False
 
     def _get_lock_path(self) -> str:
         return self._settings.basemap_scrape_lock_path
@@ -294,6 +325,7 @@ class BasemapScraperService(BaseSyncService):
         # storage error during this cycle will set it back to True and the
         # next scheduled sleep will be floored to _STORAGE_RETRY_FLOOR_SECONDS.
         self._storage_retry_due = False
+        self._storage_down_this_cycle = False
         # Apply the bucket lifecycle policy if it hasn't succeeded yet. This
         # recovers from an S3-down startup: the scraper keeps probing until
         # the policy sticks, then latches and stops retrying.
@@ -389,7 +421,17 @@ class BasemapScraperService(BaseSyncService):
 
     async def _scrape_provider(self, provider: BasemapProvider) -> tuple[int, int]:
         """Scrape all tiles for a single provider within the bounding box."""
-        # pylint: disable=too-many-locals
+        # pylint: disable=too-many-locals,too-many-return-statements
+        # pylint: disable=too-many-statements
+        if self._storage_down_this_cycle:
+            # An earlier provider already exhausted the storage circuit's probe
+            # schedule this cycle. Storage is shared, so the rest would each
+            # rediscover the same outage at the cost of their own backoff.
+            logger.info(
+                "Skipping %s: storage unavailable this cycle", provider.provider_id
+            )
+            return 0, 0
+
         now = int(time.time())
 
         # Circuit-breaker gate: skip providers whose cooldown hasn't expired.
@@ -451,7 +493,7 @@ class BasemapScraperService(BaseSyncService):
             )
             downloaded += zoom_ok
             failed += zoom_failed
-            if sweep_state.tripped:
+            if sweep_state.tripped or sweep_state.storage_abandoned:
                 break
 
         if sweep_state.tripped:
@@ -480,6 +522,12 @@ class BasemapScraperService(BaseSyncService):
             )
             await self._record_sweep_stats(
                 provider.provider_id, downloaded, failed, completed=False
+            )
+            return downloaded, failed
+
+        if sweep_state.storage_abandoned:
+            await self._finish_abandoned_sweep(
+                provider, sweep_state, downloaded, failed
             )
             return downloaded, failed
 
@@ -526,6 +574,35 @@ class BasemapScraperService(BaseSyncService):
         )
         return downloaded, failed
 
+    async def _finish_abandoned_sweep(
+        self,
+        provider: BasemapProvider,
+        sweep_state: _ProviderSweepState,
+        downloaded: int,
+        failed: int,
+    ) -> None:
+        """Book-keeping for a sweep that gave up on a dead storage backend.
+
+        Unlike the ran-to-the-end case the cursor is *preserved*: the sweep
+        stopped at a real position, so the next cycle resumes there instead of
+        restarting a multi-day scrape. Provider health is deliberately left
+        alone — the upstream did nothing wrong.
+        """
+        # pylint: disable=too-many-arguments
+        self._storage_retry_due = True
+        self._storage_down_this_cycle = True
+        logger.warning(
+            "Provider %s sweep abandoned: storage unavailable across every "
+            "probe (%d tiles unwritten). Cursor preserved; next cycle "
+            "retries in ~%ds.",
+            provider.provider_id,
+            sweep_state.storage_errors,
+            int(_STORAGE_RETRY_FLOOR_SECONDS),
+        )
+        await self._record_sweep_stats(
+            provider.provider_id, downloaded, failed, completed=False
+        )
+
     def _compute_cooldown(self, consecutive_trips: int) -> int:
         """Lookup the cooldown (seconds) for the current trip count, capped."""
         if not self._cooldown_schedule:
@@ -557,7 +634,7 @@ class BasemapScraperService(BaseSyncService):
             provider, zoom, sweep_state
         )
 
-        if sweep_state.tripped:
+        if sweep_state.tripped or sweep_state.storage_abandoned:
             # Circuit tripped during failed-tile retry — don't start the
             # main sweep; _scrape_provider handles cooldown bookkeeping.
             return retry_ok, retry_failed
@@ -634,7 +711,7 @@ class BasemapScraperService(BaseSyncService):
                 ok += 1
             else:
                 failed += 1
-            if sweep_state.tripped:
+            if sweep_state.tripped or sweep_state.storage_abandoned:
                 break
         return ok, failed
 
@@ -659,12 +736,17 @@ class BasemapScraperService(BaseSyncService):
             # Legitimately-missing tiles (404/403) aren't health signals — a
             # sparse bbox would distort the rate otherwise. Excluded entirely.
             return
-        if outcome is _TileOutcome.STORAGE_ERROR:
-            # Downstream persistence issue (S3/Redis), not provider health.
-            # Track separately so the post-sweep accounting can defer the
+        if outcome in (_TileOutcome.STORAGE_ERROR, _TileOutcome.STORAGE_SKIPPED):
+            # Downstream persistence issue (S3), not provider health. Track
+            # separately so the post-sweep accounting can defer the
             # last_completed stamp instead of letting a storage outage
             # silently push the next sweep out by a full interval.
             sweep_state.storage_errors += 1
+            if self._s3_circuit.exhausted():
+                # Every probe across the backoff schedule failed. Waiting
+                # longer in-sweep buys nothing; hand back to the cycle
+                # scheduler, which retries at the ~60s storage floor.
+                sweep_state.storage_abandoned = True
             return
 
         # OK and UNAVAILABLE are both definitive fetch attempts.
@@ -731,6 +813,14 @@ class BasemapScraperService(BaseSyncService):
 
         try:
             for chunk_start in range(resume_index, total, self._fanout_window):
+                # Pause in place while storage is down rather than spinning
+                # through the remaining tiles as instant skips — that would
+                # burn the whole sweep during a blip S3 recovers from in
+                # seconds. Chunk boundaries are the natural pause point: the
+                # previous chunk's tasks have already drained.
+                await self._await_storage_cooldown()
+                if sweep_state.storage_abandoned:
+                    break
                 chunk_end = min(chunk_start + self._fanout_window, total)
                 await self._sweep_chunk(
                     provider,
@@ -741,7 +831,7 @@ class BasemapScraperService(BaseSyncService):
                     sweep_state,
                     progress,
                 )
-                if sweep_state.tripped:
+                if sweep_state.tripped or sweep_state.storage_abandoned:
                     break
         finally:
             # Cancellation-safe: checkpoint the current watermark before
@@ -766,6 +856,17 @@ class BasemapScraperService(BaseSyncService):
             rate,
         )
         return progress.ok, progress.failed
+
+    async def _await_storage_cooldown(self) -> None:
+        """Block until the S3 circuit admits its next half-open probe.
+
+        Bounded by the circuit's cooldown cap, so this sleeps for at most
+        `_STORAGE_MAX_COOLDOWN_SECONDS` at a time and only while the circuit
+        is actually open.
+        """
+        remaining = self._s3_circuit.cooldown_remaining()
+        if remaining > 0:
+            await asyncio.sleep(remaining)
 
     async def _sweep_chunk(
         self,
@@ -795,7 +896,7 @@ class BasemapScraperService(BaseSyncService):
                     sweep_state,
                     progress,
                 )
-                if sweep_state.tripped:
+                if sweep_state.tripped or sweep_state.storage_abandoned:
                     # Stop consuming the moment we trip; the finally block
                     # cancels everything still in-flight so we stop hitting
                     # the unhealthy upstream immediately.
@@ -826,7 +927,11 @@ class BasemapScraperService(BaseSyncService):
             progress.ok += 1
         else:
             progress.failed += 1
-            await self._state.add_failed(provider.provider_id, z, x, y)
+            if outcome is not _TileOutcome.STORAGE_SKIPPED:
+                # A skipped tile was never attempted, and the sweep that
+                # resumes will reach it again anyway — queueing it would just
+                # write one SQLite row per tile for the whole outage.
+                await self._state.add_failed(provider.provider_id, z, x, y)
         progress.processed += 1
 
         watermark, flushed = await self._advance_watermark(
@@ -948,9 +1053,16 @@ class BasemapScraperService(BaseSyncService):
         """Download a single tile from the external provider and store in S3 + Redis.
 
         Returns the fetch outcome so the caller can drive the circuit breaker.
-        Storage-side failures (S3 / Redis hiccups) count as ``MISSING`` — they
-        are not an upstream health signal.
+        Storage-side failures are reported separately from provider health —
+        they say nothing about the upstream.
+
+        Skips the upstream download entirely while the S3 circuit is open:
+        fetching a tile we already know we can't persist costs provider quota
+        and produces nothing.
         """
+        if not self._s3_circuit.allows_write():
+            return _TileOutcome.STORAGE_SKIPPED
+
         url = build_source_url(provider, z, x, y)
         try:
             data = await self._http.download_tile(url)
@@ -968,33 +1080,82 @@ class BasemapScraperService(BaseSyncService):
         if not data:
             return _TileOutcome.MISSING
 
+        if not await self._persist_to_s3(provider, z, x, y, data):
+            return _TileOutcome.STORAGE_ERROR
+
+        await self._write_through_redis(provider, z, x, y, data)
+        # The durable backup landed. A Redis hiccup leaves a cold hot-cache
+        # entry that the first read repopulates, so it must not mark the sweep
+        # incomplete and cost a full re-scrape.
+        return _TileOutcome.OK
+
+    async def _persist_to_s3(
+        self, provider: BasemapProvider, z: int, x: int, y: int, data: bytes
+    ) -> bool:
+        """Write the tile to the durable bucket. False on failure.
+
+        botocore (ClientError/BotoCoreError, incl. EndpointConnectionError)
+        covers the S3 outage shapes; OSError/TimeoutError the socket-level ones.
+        """
+        # pylint: disable=too-many-arguments
         try:
             s3_key = S3Client.build_basemap_tile_key(provider.provider_id, z, x, y)
             await self._s3.upload_tile(s3_key, data)
+        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as exc:
+            self._log_circuit(self._s3_circuit.record_failure(), exc)
+            return False
+        self._log_circuit(self._s3_circuit.record_success())
+        return True
 
-            if self._redis_writes_enabled:
-                await self._redis.store_basemap_tile(
-                    provider.provider_id, z, x, y, data, ttl=self._tile_ttl
-                )
-                await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
-            return _TileOutcome.OK
-        except (
-            ClientError,
-            BotoCoreError,
-            httpx.HTTPError,
-            asyncio.TimeoutError,
-            OSError,
-        ) as exc:
-            # Catch every plausible shape of "downstream write failed".
-            # botocore (ClientError/BotoCoreError, incl. EndpointConnectionError)
-            # covers S3 outages; httpx / OSError / TimeoutError covers Redis
-            # write-through failures.
-            logger.warning(
-                "Failed to persist tile %s/%d/%d/%d: %s",
-                provider.provider_id,
-                z,
-                x,
-                y,
-                exc,
+    async def _write_through_redis(
+        self, provider: BasemapProvider, z: int, x: int, y: int, data: bytes
+    ) -> None:
+        """Warm the hot cache. Best-effort: never fails the tile."""
+        # pylint: disable=too-many-arguments
+        if not self._redis_writes_enabled or not self._redis_circuit.allows_write():
+            return
+        try:
+            await self._redis.store_basemap_tile(
+                provider.provider_id, z, x, y, data, ttl=self._tile_ttl
             )
-            return _TileOutcome.STORAGE_ERROR
+            await self._redis.clear_basemap_tile_miss(provider.provider_id, z, x, y)
+        except (httpx.HTTPError, asyncio.TimeoutError, OSError) as exc:
+            self._log_circuit(self._redis_circuit.record_failure(), exc)
+            return
+        self._log_circuit(self._redis_circuit.record_success())
+
+    @staticmethod
+    def _log_circuit(
+        transition: Optional[CircuitTransition],
+        exc: Optional[BaseException] = None,
+    ) -> None:
+        """Emit the single line a circuit state change is worth.
+
+        Every other outcome returns ``None`` and logs nothing, which is what
+        keeps a storage outage to a handful of lines instead of one per tile.
+        """
+        if transition is None:
+            return
+        if transition.opened:
+            logger.warning(
+                "%s circuit opened after %d failed writes (%s) — "
+                "skipping writes for %s",
+                transition.name,
+                transition.failures,
+                exc,
+                _fmt_duration(transition.cooldown),
+            )
+        elif transition.probe_failed:
+            logger.warning(
+                "%s still unavailable (%s) — next probe in %s",
+                transition.name,
+                exc,
+                _fmt_duration(transition.cooldown),
+            )
+        elif transition.recovered:
+            logger.info(
+                "%s recovered after %s and %d failed writes — resuming",
+                transition.name,
+                _fmt_duration(transition.downtime),
+                transition.failures,
+            )

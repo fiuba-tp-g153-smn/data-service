@@ -19,8 +19,14 @@ from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
 from clients.redis_client import RedisClient
+from log_throttle import BackoffLogThrottle
 
 logger = logging.getLogger(__name__)
+
+# Shared across every S3Client instance: an endpoint outage hits the read paths
+# of all of them at once, so one backoff schedule per error shape is what keeps
+# the log readable.
+_LISTING_LOG_THROTTLE = BackoffLogThrottle()
 
 # Default ceiling on tiles held in memory during a sync (downloaded, awaiting
 # their Redis write). Small — tiles are ~100KB webp — but enough to keep the S3
@@ -990,21 +996,19 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         if not prefix.endswith("/"):
             prefix += "/"
 
-        try:
-            paginator = client.get_paginator("list_objects_v2")
-            async for page in cast(
-                AsyncIterator[dict],
-                paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"),
-            ):
-                for common_prefix in page.get("CommonPrefixes", []):
-                    subdirs.append(common_prefix["Prefix"])
-            return subdirs
-        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            # Raise on an infra failure so a real outage isn't masked as "no
-            # subdirectories". Sync loops count it (except → errors += 1); read
-            # paths use try_get_subdirectories, which degrades to [].
-            logger.error("Error listing subdirectories for %s: %s", prefix, e)
-            raise
+        # Infra failures propagate so a real outage isn't masked as "no
+        # subdirectories". Sync loops count it (except → errors += 1); read
+        # paths use try_get_subdirectories, which degrades to []. Logging is
+        # left to those callers — they all report it, and logging here too
+        # doubled every line during an outage.
+        paginator = client.get_paginator("list_objects_v2")
+        async for page in cast(
+            AsyncIterator[dict],
+            paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"),
+        ):
+            for common_prefix in page.get("CommonPrefixes", []):
+                subdirs.append(common_prefix["Prefix"])
+        return subdirs
 
     async def try_get_subdirectories(self, prefix: str) -> List[str]:
         """Read-path variant of ``get_subdirectories``: ``[]`` on infra error.
@@ -1016,7 +1020,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         try:
             return await self.get_subdirectories(prefix)
         except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            logger.warning("Subdirectory listing degraded to [] for %s: %s", prefix, e)
+            # One request per tileset endpoint means an S3 outage produces a
+            # line per poll per product. There's no retry loop to pace here, so
+            # the line itself backs off, keyed by error shape rather than by
+            # prefix — the endpoint being down is one fact, not thirty.
+            suppressed = _LISTING_LOG_THROTTLE.check(type(e).__name__)
+            if suppressed is not None:
+                logger.warning(
+                    "Subdirectory listing degraded to [] for %s: %s%s",
+                    prefix,
+                    e,
+                    f" (+{suppressed} suppressed)" if suppressed else "",
+                )
             return []
 
     async def delete_object(self, key: str) -> bool:
