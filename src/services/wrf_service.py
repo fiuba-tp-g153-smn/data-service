@@ -19,7 +19,9 @@ class WrfService(BaseProductService):
 
     ZOOM_LEVELS = ZoomLevels(min=4, max=6)
     BOUNDING_BOX = BoundingBox(minx=-110.0, miny=-60.0, maxx=-30.0, maxy=-15.0)
-    TILE_URL_PATTERN = "/products/wrf/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
+    TILE_URL_PATTERN = (
+        "/products/wrf-arg4k/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
+    )
 
     def __init__(self) -> None:
         self._strategy: Optional[WrfSyncStrategy] = None

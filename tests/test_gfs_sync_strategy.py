@@ -64,7 +64,10 @@ class TestOnDemandTiles:
         redis.get_gfs_tile = AsyncMock(return_value=b"cached")
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) == b"cached"
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            == b"cached"
+        )
         s3.download_tile.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -72,7 +75,10 @@ class TestOnDemandTiles:
         redis, s3 = _redis(), _s3()
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) == b"payload"
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            == b"payload"
+        )
         s3.download_tile.assert_awaited_once_with(
             f"tiles/gfs/geopotential-500hpa/{CYCLE}/{CYCLE}_{FXXX}/5/9/17.webp"
         )
@@ -94,7 +100,10 @@ class TestOnDemandTiles:
         s3.download_tile = AsyncMock(return_value=None)
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) is None
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            is None
+        )
         await _settle()
         redis.store_gfs_tile.assert_not_awaited()
 
@@ -109,7 +118,10 @@ class TestOnDemandTiles:
     @pytest.mark.asyncio
     async def test_without_s3_returns_none(self):
         strategy = GfsOnDemandStrategy(_redis(), None, 10, 10, 10)
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) is None
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            is None
+        )
 
 
 class TestOnDemandOverlays:
@@ -120,7 +132,8 @@ class TestOnDemandOverlays:
 
         await strategy.get_geojson("mean-sea-level-pressure", CYCLE, FXXX, "isobars")
         s3.download_tile.assert_awaited_once_with(
-            f"geojson/gfs/mean-sea-level-pressure/{CYCLE}/" f"{CYCLE}_{FXXX}_isobars.json"
+            f"geojson/gfs/mean-sea-level-pressure/{CYCLE}/"
+            f"{CYCLE}_{FXXX}_isobars.json"
         )
 
     @pytest.mark.asyncio
@@ -163,7 +176,10 @@ class TestDeferredCacheWrites:
         redis.store_gfs_tile = AsyncMock(side_effect=OSError("redis down"))
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) == b"payload"
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            == b"payload"
+        )
         await _settle()
         await _settle()
         assert "cache write failed" in caplog.text.lower()
@@ -202,7 +218,9 @@ class TestOnDemandListings:
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
         await strategy.list_cycles("mean-sea-level-pressure")
-        s3.try_get_subdirectories.assert_awaited_once_with("cog/gfs/mean-sea-level-pressure/")
+        s3.try_get_subdirectories.assert_awaited_once_with(
+            "cog/gfs/mean-sea-level-pressure/"
+        )
 
     @pytest.mark.asyncio
     async def test_cycles_come_back_newest_first(self):
@@ -228,7 +246,10 @@ class TestOnDemandListings:
         )
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.list_steps("geopotential-500hpa", CYCLE) == ["f000", "f003"]
+        assert await strategy.list_steps("geopotential-500hpa", CYCLE) == [
+            "f000",
+            "f003",
+        ]
 
     @pytest.mark.asyncio
     async def test_foreign_basenames_are_ignored(self):
@@ -294,7 +315,9 @@ class TestOnDemandListings:
         )
         strategy = GfsOnDemandStrategy(redis, s3, 10, 10, 10)
 
-        assert "barbs" not in await strategy.list_layers("geopotential-500hpa", CYCLE, FXXX)
+        assert "barbs" not in await strategy.list_layers(
+            "geopotential-500hpa", CYCLE, FXXX
+        )
 
     @pytest.mark.asyncio
     async def test_the_whole_cycle_costs_one_list(self):
@@ -326,7 +349,9 @@ class TestFullSyncStrategy:
     @pytest.mark.asyncio
     async def test_cold_index_falls_back_to_s3(self):
         redis, s3 = _redis(), _s3()
-        s3.try_get_subdirectories = AsyncMock(return_value=[f"cog/gfs/geopotential-500hpa/{CYCLE}/"])
+        s3.try_get_subdirectories = AsyncMock(
+            return_value=[f"cog/gfs/geopotential-500hpa/{CYCLE}/"]
+        )
         strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
 
         assert await strategy.list_cycles("geopotential-500hpa") == [CYCLE]
@@ -337,7 +362,12 @@ class TestFullSyncStrategy:
         redis.get_gfs_geojson = AsyncMock(return_value=b"warm")
         strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_geojson("mean-sea-level-pressure", CYCLE, FXXX, "isobars") == b"warm"
+        assert (
+            await strategy.get_geojson(
+                "mean-sea-level-pressure", CYCLE, FXXX, "isobars"
+            )
+            == b"warm"
+        )
         s3.download_tile.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -346,7 +376,10 @@ class TestFullSyncStrategy:
         redis, s3 = _redis(), _s3()
         strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
 
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) == b"payload"
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            == b"payload"
+        )
         s3.download_tile.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -355,12 +388,16 @@ class TestFullSyncStrategy:
         strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
 
         assert (
-            await strategy.get_barb_tile("geopotential-500hpa", CYCLE, FXXX, 4, 5, 9) == b"payload"
+            await strategy.get_barb_tile("geopotential-500hpa", CYCLE, FXXX, 4, 5, 9)
+            == b"payload"
         )
         s3.download_tile.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_without_s3_reads_degrade_to_none(self):
         strategy = GfsFullSyncStrategy(_redis(), None, 10, 10, 10)
-        assert await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17) is None
+        assert (
+            await strategy.get_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
+            is None
+        )
         assert await strategy.list_cycles("geopotential-500hpa") == []

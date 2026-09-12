@@ -34,7 +34,11 @@ STEP_ID = f"{CYCLE}_{FXXX}"
 
 class TestCatalogue:
     def test_exposes_the_three_products(self):
-        assert product_ids() == ["mean-sea-level-pressure", "geopotential-500hpa", "geopotential-250hpa"]
+        assert product_ids() == [
+            "mean-sea-level-pressure",
+            "geopotential-500hpa",
+            "geopotential-250hpa",
+        ]
 
     def test_mslp_is_abbreviated_in_both_the_url_and_s3(self):
         """tiles-processor writes the long segment; the URL uses the short id."""
@@ -42,7 +46,9 @@ class TestCatalogue:
         assert product is not None
         assert product.s3_segment == "mean-sea-level-pressure"
 
-    @pytest.mark.parametrize("product_id", ["geopotential-500hpa", "geopotential-250hpa"])
+    @pytest.mark.parametrize(
+        "product_id", ["geopotential-500hpa", "geopotential-250hpa"]
+    )
     def test_upper_level_ids_match_their_s3_segment(self, product_id):
         product = get_product(product_id)
         assert product is not None
@@ -89,7 +95,10 @@ class TestSecondaryVariables:
 
     def test_each_product_carries_what_tiles_processor_uploads(self):
         assert secondary_vars_for("mean-sea-level-pressure") == ["thickness"]
-        assert sorted(secondary_vars_for("geopotential-500hpa")) == ["geopotential", "temperature"]
+        assert sorted(secondary_vars_for("geopotential-500hpa")) == [
+            "geopotential",
+            "temperature",
+        ]
         assert secondary_vars_for("geopotential-250hpa") == ["geopotential"]
 
     def test_250_has_no_temperature(self):
@@ -144,14 +153,18 @@ class TestS3Keys:
 
     def test_geojson_key(self):
         assert (
-            S3Client.build_gfs_geojson_key("geopotential-500hpa", CYCLE, FXXX, "isotherms")
+            S3Client.build_gfs_geojson_key(
+                "geopotential-500hpa", CYCLE, FXXX, "isotherms"
+            )
             == f"geojson/gfs/geopotential-500hpa/{CYCLE}/{STEP_ID}_isotherms.json"
         )
 
     def test_barb_tile_key(self):
         """Barbs are the one overlay stored per tile rather than per step."""
         assert (
-            S3Client.build_gfs_barb_tile_key("geopotential-500hpa", CYCLE, FXXX, 4, 5, 9)
+            S3Client.build_gfs_barb_tile_key(
+                "geopotential-500hpa", CYCLE, FXXX, 4, 5, 9
+            )
             == f"geojson/gfs/geopotential-500hpa/{CYCLE}/{STEP_ID}_barbs/4/5/9.json"
         )
 
@@ -168,7 +181,9 @@ class TestS3Keys:
     def test_cog_cycle_prefix_is_listable(self):
         prefix = S3Client.gfs_cog_cycle_prefix("geopotential-500hpa")
         assert prefix == "cog/gfs/geopotential-500hpa/"
-        assert S3Client.build_gfs_cog_key("geopotential-500hpa", CYCLE, FXXX).startswith(prefix)
+        assert S3Client.build_gfs_cog_key(
+            "geopotential-500hpa", CYCLE, FXXX
+        ).startswith(prefix)
 
     def test_every_product_builds_a_distinct_cog_prefix(self):
         prefixes = {
@@ -178,7 +193,9 @@ class TestS3Keys:
 
     def test_secondary_cog_key(self):
         assert (
-            S3Client.build_gfs_secondary_cog_key("geopotential-500hpa", CYCLE, "temperature", FXXX)
+            S3Client.build_gfs_secondary_cog_key(
+                "geopotential-500hpa", CYCLE, "temperature", FXXX
+            )
             == f"cog/gfs/geopotential-500hpa/{CYCLE}/temperature/{STEP_ID}.tif"
         )
 
@@ -191,13 +208,17 @@ class TestS3Keys:
         step `f003.temperature` and reach the frontend as a real timestep.
         """
         cycle_prefix = f"cog/gfs/geopotential-500hpa/{CYCLE}/"
-        key = S3Client.build_gfs_secondary_cog_key("geopotential-500hpa", CYCLE, "temperature", FXXX)
+        key = S3Client.build_gfs_secondary_cog_key(
+            "geopotential-500hpa", CYCLE, "temperature", FXXX
+        )
         assert "/" in key[len(cycle_prefix) :]
 
     def test_secondary_cog_never_collides_with_the_primary(self):
         primary = S3Client.build_gfs_cog_key("geopotential-500hpa", CYCLE, FXXX)
         keys = {
-            S3Client.build_gfs_secondary_cog_key("geopotential-500hpa", CYCLE, variable, FXXX)
+            S3Client.build_gfs_secondary_cog_key(
+                "geopotential-500hpa", CYCLE, variable, FXXX
+            )
             for variable in secondary_vars_for("geopotential-500hpa")
         }
         assert primary not in keys
@@ -212,7 +233,7 @@ class TestS3Keys:
 
     def test_secondary_cog_uses_the_joined_step_id(self):
         key = S3Client.build_gfs_secondary_cog_key(
-            "mean_sea_level_pressure", CYCLE, "thickness", FXXX
+            "mean-sea-level-pressure", CYCLE, "thickness", FXXX
         )
         assert key.endswith(f"/thickness/{CYCLE}_{FXXX}.tif")
 
@@ -232,15 +253,21 @@ class TestRedisGeoJson:
     @pytest.mark.asyncio
     async def test_store_with_ttl(self):
         client = _client()
-        await client.store_gfs_geojson("mean-sea-level-pressure", CYCLE, FXXX, "isobars", b"x", ttl=64800)
+        await client.store_gfs_geojson(
+            "mean-sea-level-pressure", CYCLE, FXXX, "isobars", b"x", ttl=64800
+        )
         client._redis.set.assert_awaited_once_with(
-            f"geojson:gfs:mean-sea-level-pressure/{CYCLE}/{FXXX}/isobars", b"x", ex=64800
+            f"geojson:gfs:mean-sea-level-pressure/{CYCLE}/{FXXX}/isobars",
+            b"x",
+            ex=64800,
         )
 
     @pytest.mark.asyncio
     async def test_store_without_ttl(self):
         client = _client()
-        await client.store_gfs_geojson("mean-sea-level-pressure", CYCLE, FXXX, "isobars", b"x")
+        await client.store_gfs_geojson(
+            "mean-sea-level-pressure", CYCLE, FXXX, "isobars", b"x"
+        )
         client._redis.set.assert_awaited_once_with(
             f"geojson:gfs:mean-sea-level-pressure/{CYCLE}/{FXXX}/isobars", b"x"
         )
@@ -249,7 +276,9 @@ class TestRedisGeoJson:
     async def test_get_uses_the_same_key_as_store(self):
         client = _client()
         client._redis.get = AsyncMock(return_value=b'{"type":"FeatureCollection"}')
-        result = await client.get_gfs_geojson("geopotential-500hpa", CYCLE, FXXX, "heights")
+        result = await client.get_gfs_geojson(
+            "geopotential-500hpa", CYCLE, FXXX, "heights"
+        )
         client._redis.get.assert_awaited_once_with(
             f"geojson:gfs:geopotential-500hpa/{CYCLE}/{FXXX}/heights"
         )
@@ -261,7 +290,9 @@ class TestRedisTiles:
     async def test_store_and_get_share_the_key(self):
         client = _client()
         client._redis.get = AsyncMock(return_value=b"webp")
-        await client.store_gfs_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17, b"webp", ttl=10)
+        await client.store_gfs_tile(
+            "geopotential-500hpa", CYCLE, FXXX, 5, 9, 17, b"webp", ttl=10
+        )
         await client.get_gfs_tile("geopotential-500hpa", CYCLE, FXXX, 5, 9, 17)
         expected = f"tile:gfs:geopotential-500hpa/{CYCLE}/{FXXX}/5/9/17"
         client._redis.set.assert_awaited_once_with(expected, b"webp", ex=10)
@@ -295,7 +326,9 @@ class TestRedisIndexes:
         client = _client()
         client._redis.zrevrange = AsyncMock(return_value=[b"20260808T0600Z", b"x"])
         result = await client.get_gfs_cycles("geopotential-500hpa")
-        client._redis.zrevrange.assert_awaited_once_with("idx:gfs:geopotential-500hpa:cycles", 0, -1)
+        client._redis.zrevrange.assert_awaited_once_with(
+            "idx:gfs:geopotential-500hpa:cycles", 0, -1
+        )
         assert result == ["20260808T0600Z", "x"]
 
     @pytest.mark.asyncio

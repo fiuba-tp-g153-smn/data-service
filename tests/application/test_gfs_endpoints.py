@@ -127,7 +127,7 @@ class TestSecondaryPointEndpoint:
 
     def test_temperature_is_404_at_250(self, app_client, service):
         """250 hPa never loads temperature, so the variable does not exist there."""
-        base_250 = f"/products/gfs/250hpa/{CYCLE}/{FXXX}"
+        base_250 = f"/products/gfs/geopotential-250hpa/{CYCLE}/{FXXX}"
         response = app_client.get(
             f"{base_250}/secondary/temperature/point?lat=-34&lon=-64"
         )
@@ -229,7 +229,8 @@ class TestListings:
         )
         first = app_client.get("/products/gfs/geopotential-500hpa")
         second = app_client.get(
-            "/products/gfs/geopotential-500hpa", headers={"If-None-Match": first.headers["ETag"]}
+            "/products/gfs/geopotential-500hpa",
+            headers={"If-None-Match": first.headers["ETag"]},
         )
         assert second.status_code == 304
 

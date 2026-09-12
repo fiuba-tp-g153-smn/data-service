@@ -85,7 +85,7 @@ ENDPOINTS = [
     ),
     TileEndpoint(
         name="radar-tile",
-        url="/products/radar/RMA1/dbzh/elev0/20260808T120000Z/5/9/17.webp",
+        url="/products/radar-sinarame/RMA1/dbzh/elev0/20260808T120000Z/5/9/17.webp",
         hit_payload=_WEBP,
         cache_control_attr="radar_cache_control_tile_miss",
         expected_identity="RMA1-dbzh-elev0-20260808T120000Z-5-9-17",
@@ -93,7 +93,7 @@ ENDPOINTS = [
     ),
     TileEndpoint(
         name="wrf-tile",
-        url=f"/products/wrf/Colmax/{INIT}/{FXXX}/5/9/17.webp",
+        url=f"/products/wrf-arg4k/Colmax/{INIT}/{FXXX}/5/9/17.webp",
         hit_payload=_WEBP,
         cache_control_attr="wrf_cache_control_tile_miss",
         expected_identity=f"Colmax-{INIT}-{FXXX}-5-9-17",
@@ -101,7 +101,7 @@ ENDPOINTS = [
     ),
     TileEndpoint(
         name="wrf-barbs",
-        url=f"/products/wrf/Colmax/{INIT}/{FXXX}/barbs/4/5/9.json",
+        url=f"/products/wrf-arg4k/Colmax/{INIT}/{FXXX}/barbs/4/5/9.json",
         hit_payload=_GEOJSON,
         cache_control_attr="wrf_cache_control_tile_miss",
         expected_identity=f"Colmax-{INIT}-{FXXX}-barbs-4-5-9",
@@ -109,18 +109,18 @@ ENDPOINTS = [
     ),
     TileEndpoint(
         name="gfs-tile",
-        url=f"/products/gfs/500hpa/{CYCLE}/{FXXX}/5/9/17.webp",
+        url=f"/products/gfs/geopotential-500hpa/{CYCLE}/{FXXX}/5/9/17.webp",
         hit_payload=_WEBP,
         cache_control_attr="gfs_cache_control_tile_miss",
-        expected_identity=f"500hpa-{CYCLE}-{FXXX}-5-9-17",
+        expected_identity=f"geopotential-500hpa-{CYCLE}-{FXXX}-5-9-17",
         install=_patch_singleton("routes.gfs.gfs_service", "get_tile_data"),
     ),
     TileEndpoint(
         name="gfs-barbs",
-        url=f"/products/gfs/500hpa/{CYCLE}/{FXXX}/barbs/4/5/9.json",
+        url=f"/products/gfs/geopotential-500hpa/{CYCLE}/{FXXX}/barbs/4/5/9.json",
         hit_payload=_GEOJSON,
         cache_control_attr="gfs_cache_control_tile_miss",
-        expected_identity=f"500hpa-{CYCLE}-{FXXX}-barbs-4-5-9",
+        expected_identity=f"geopotential-500hpa-{CYCLE}-{FXXX}-barbs-4-5-9",
         install=_patch_singleton("routes.gfs.gfs_service", "get_barb_tile"),
     ),
 ]

@@ -169,7 +169,10 @@ class PointValueService(BaseProductService):
         lon: float,
     ) -> PointSample:
         """Sample an ECMWF mean sea level pressure COG at a specific coordinate."""
-        cog_key = f"cog/ecmwf-ifs/mean-sea-level-pressure/" f"{forecast_ts}/{timestamp_ts}.tif"
+        cog_key = (
+            f"cog/ecmwf-ifs/mean-sea-level-pressure/"
+            f"{forecast_ts}/{timestamp_ts}.tif"
+        )
         unit = self.MODEL_UNITS.get("ecmwf_mean_sea_level_pressure", "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)

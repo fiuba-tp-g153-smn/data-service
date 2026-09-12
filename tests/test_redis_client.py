@@ -360,7 +360,9 @@ async def test_prune_gfs_cycles_noop_when_all_active():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"20260816T0000Z"])
 
-    removed = await client.prune_gfs_cycles("mean-sea-level-pressure", ["20260816T0000Z"])
+    removed = await client.prune_gfs_cycles(
+        "mean-sea-level-pressure", ["20260816T0000Z"]
+    )
 
     assert removed == 0
     client._redis.zrem.assert_not_awaited()

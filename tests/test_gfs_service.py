@@ -167,7 +167,10 @@ class TestListSteps:
     @pytest.mark.asyncio
     async def test_unknown_cycle_returns_none(self):
         assert (
-            await _service(FakeStrategy(steps=[])).list_steps("geopotential-500hpa", CYCLE) is None
+            await _service(FakeStrategy(steps=[])).list_steps(
+                "geopotential-500hpa", CYCLE
+            )
+            is None
         )
 
     @pytest.mark.asyncio
@@ -184,7 +187,10 @@ class TestListSteps:
         )
         with patch("services.gfs_service.settings") as mock_settings:
             mock_settings.gfs_cycles_to_keep = 2
-            assert await _service(strategy).list_steps("geopotential-500hpa", CYCLE) is None
+            assert (
+                await _service(strategy).list_steps("geopotential-500hpa", CYCLE)
+                is None
+            )
 
     @pytest.mark.asyncio
     async def test_retired_cycle_never_reaches_the_strategy_listing(self):
@@ -226,7 +232,9 @@ class TestProductGating:
     @pytest.mark.asyncio
     async def test_mslp_has_no_tiles(self):
         strategy = FakeStrategy()
-        result = await _service(strategy).get_tile_data("mean-sea-level-pressure", CYCLE, "f003", 5, 9, 17)
+        result = await _service(strategy).get_tile_data(
+            "mean-sea-level-pressure", CYCLE, "f003", 5, 9, 17
+        )
         assert result is None
         assert not any(c[0] == "get_tile" for c in strategy.calls)
 
@@ -261,12 +269,16 @@ class TestProductGating:
     async def test_barbs_are_not_reachable_as_a_single_file_overlay(self):
         """Barbs are per-tile; asking for `barbs.json` must not hit S3."""
         strategy = FakeStrategy()
-        result = await _service(strategy).get_geojson("geopotential-500hpa", CYCLE, "f003", "barbs")
+        result = await _service(strategy).get_geojson(
+            "geopotential-500hpa", CYCLE, "f003", "barbs"
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_valid_overlay_is_served(self):
-        result = await _service().get_geojson("mean-sea-level-pressure", CYCLE, "f003", "thickness")
+        result = await _service().get_geojson(
+            "mean-sea-level-pressure", CYCLE, "f003", "thickness"
+        )
         assert result == b"data"
 
     @pytest.mark.asyncio

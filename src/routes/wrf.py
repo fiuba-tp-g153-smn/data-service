@@ -28,7 +28,7 @@ from services.point_value_service import (
 )
 from services.wrf_service import wrf_service
 
-router = APIRouter(prefix="/products/wrf", tags=["WRF Model"])
+router = APIRouter(prefix="/products/wrf-arg4k", tags=["WRF Model"])
 
 _ZOOM_MIN = 4
 _ZOOM_MAX = 9

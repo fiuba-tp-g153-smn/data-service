@@ -15,7 +15,7 @@ from routes.utils import (
 from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
 from services.radar_service import radar_service
 
-router = APIRouter(prefix="/products/radar", tags=["Radar"])
+router = APIRouter(prefix="/products/radar-sinarame", tags=["Radar"])
 
 
 @router.get(
