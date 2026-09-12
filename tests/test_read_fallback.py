@@ -174,8 +174,8 @@ async def test_wrf_list_init_runs_falls_back_to_s3(mock_redis_client):
     mock_redis_client.get_wrf_init_runs = AsyncMock(return_value=[])
     s3 = _s3_listing(
         [
-            "tiles/wrf-arg4k/Precipitacion1h/20260603_000000/",
-            "tiles/wrf-arg4k/Precipitacion1h/20260603_060000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_000000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_060000/",
         ]
     )
     strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30)
@@ -193,9 +193,9 @@ async def test_wrf_cold_listing_is_capped_at_inits_to_keep(mock_redis_client):
     mock_redis_client.get_wrf_init_runs = AsyncMock(return_value=[])
     s3 = _s3_listing(
         [
-            "tiles/wrf-arg4k/Precipitacion1h/20260603_000000/",
-            "tiles/wrf-arg4k/Precipitacion1h/20260603_060000/",
-            "tiles/wrf-arg4k/Precipitacion1h/20260603_120000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_000000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_060000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_120000/",
         ]
     )
     strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30, 2)

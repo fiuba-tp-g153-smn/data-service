@@ -23,7 +23,7 @@ def test_get_channel_config_headers():
             2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc
         )
 
-        response = client.get("/products/goes-19/abi/ch-13")
+        response = client.get("/products/goes19/abi/c13")
 
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == settings.cache_control_config
@@ -40,7 +40,7 @@ def test_get_tile_headers():
         mock_service.validate_zoom_level.return_value = (True, "")
         mock_service.get_tile_data = AsyncMock(return_value=tile_bytes)
 
-        response = client.get("/products/goes-19/abi/ch-13/t1/5/1/1.webp")
+        response = client.get("/products/goes19/abi/c13/t1/5/1/1.webp")
 
         assert response.status_code == 200
         assert "immutable" in response.headers["Cache-Control"]
@@ -55,7 +55,7 @@ def test_tile_304_not_modified():
         mock_service.validate_zoom_level.return_value = (True, "")
 
         response = client.get(
-            "/products/goes-19/abi/ch-13/t1/5/1/1.webp",
+            "/products/goes19/abi/c13/t1/5/1/1.webp",
             headers={"If-None-Match": '"t1-5-1-1"'},
         )
 
@@ -80,7 +80,7 @@ def test_config_304_not_modified():
 
         # First request to get the ETag
         response = client.get(
-            "/products/goes-19/abi/ch-13",
+            "/products/goes19/abi/c13",
             headers={"If-None-Match": '"test-hash-123"'},
         )
 

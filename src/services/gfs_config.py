@@ -23,8 +23,10 @@ class GfsProduct:
     secondary_vars: Mapping[str, str] = field(default_factory=dict)
 
 
-# `mslp` is abbreviated in the URL but keeps the long S3 segment written by
-# tiles-processor. The other two match on both sides.
+# All three now spell the same id in the URL and in S3. `s3_segment` is kept
+# as its own field rather than collapsed into `product_id`: it is the seam that
+# let mslp differ from its URL id before, and it is what would absorb a future
+# divergence without touching the route.
 GFS_MSLP = GfsProduct(
     product_id="mslp",
     s3_segment="mslp",

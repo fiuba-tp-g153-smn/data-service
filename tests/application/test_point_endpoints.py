@@ -20,7 +20,7 @@ def test_satellite_point_endpoint_returns_value():
         mock_service.get_point_value = AsyncMock(return_value=PointSample(291.1, "K"))
 
         response = client.get(
-            "/products/goes-19/abi/ch-13/20260101T000000Z/point?lat=-34.6&lon=-58.4"
+            "/products/goes19/abi/c13/20260101T000000Z/point?lat=-34.6&lon=-58.4"
         )
 
         assert response.status_code == 200
@@ -35,7 +35,7 @@ def test_satellite_point_endpoint_cog_not_found():
         mock_service.get_point_value = AsyncMock(side_effect=CogNotFoundError())
 
         response = client.get(
-            "/products/goes-19/abi/ch-13/unknown/point?lat=-34.6&lon=-58.4"
+            "/products/goes19/abi/c13/unknown/point?lat=-34.6&lon=-58.4"
         )
 
         assert response.status_code == 404
@@ -47,7 +47,7 @@ def test_satellite_point_endpoint_invalid_latlon_422():
         mock_service.channel_exists.return_value = True
 
         response = client.get(
-            "/products/goes-19/abi/ch-13/20260101T000000Z/point?lat=-95.0&lon=-58.4"
+            "/products/goes19/abi/c13/20260101T000000Z/point?lat=-95.0&lon=-58.4"
         )
 
         assert response.status_code == 422
