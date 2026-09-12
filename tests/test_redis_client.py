@@ -343,12 +343,12 @@ async def test_prune_gfs_cycles_uses_the_sorted_set_commands():
     )
 
     removed = await client.prune_gfs_cycles(
-        "mslp", ["20260816T0000Z", "20260815T1800Z"]
+        "mean-sea-level-pressure", ["20260816T0000Z", "20260815T1800Z"]
     )
 
     assert removed == 1
     client._redis.zrem.assert_awaited_once_with(
-        "idx:gfs:mslp:cycles", b"20260815T1200Z"
+        "idx:gfs:mean-sea-level-pressure:cycles", b"20260815T1200Z"
     )
     client._redis.smembers.assert_not_awaited()
 
@@ -360,7 +360,7 @@ async def test_prune_gfs_cycles_noop_when_all_active():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"20260816T0000Z"])
 
-    removed = await client.prune_gfs_cycles("mslp", ["20260816T0000Z"])
+    removed = await client.prune_gfs_cycles("mean-sea-level-pressure", ["20260816T0000Z"])
 
     assert removed == 0
     client._redis.zrem.assert_not_awaited()

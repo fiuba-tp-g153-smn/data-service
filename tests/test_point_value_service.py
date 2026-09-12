@@ -89,7 +89,7 @@ async def test_sample_ecmwf_tp_point_builds_correct_cog_key():
         "20260330T1200Z", "20260330T1500Z", -34.0, -58.0
     )
 
-    expected_key = "cog/ecmwf-ifs/tp" "/20260330T1200Z/20260330T1500Z.tif"
+    expected_key = "cog/ecmwf-ifs/total-precipitation" "/20260330T1200Z/20260330T1500Z.tif"
     strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)
 
 
@@ -141,5 +141,5 @@ async def test_sample_ecmwf_mslp_point_builds_correct_cog_key():
         "20260413T1200Z", "20260413T1500Z", -34.0, -58.0
     )
 
-    expected_key = "cog/ecmwf-ifs/mslp" "/20260413T1200Z/20260413T1500Z.tif"
+    expected_key = "cog/ecmwf-ifs/mean-sea-level-pressure" "/20260413T1200Z/20260413T1500Z.tif"
     strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)

@@ -21,7 +21,7 @@ from services.point_value_service import (
     point_value_service,
 )
 
-router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF Mean Sea Level Pressure"])
+router = APIRouter(prefix="/products/ecmwf-ifs", tags=["ECMWF Mean Sea Level Pressure"])
 
 
 @router.get(

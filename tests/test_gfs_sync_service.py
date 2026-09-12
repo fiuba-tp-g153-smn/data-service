@@ -15,7 +15,7 @@ from settings import Settings
 
 CYCLE_NEW = "20260808T0600Z"
 CYCLE_OLD = "20260808T0000Z"
-MSLP_PREFIX = "cog/gfs/mslp/"
+MSLP_PREFIX = "cog/gfs/mean-sea-level-pressure/"
 
 
 def _make_settings(cycles_to_keep: int = 2) -> Settings:
@@ -129,7 +129,7 @@ class TestStepSync:
         s3, redis = _s3(), _redis()
         await _make_service(s3, redis)._sync_step(GFS_MSLP, CYCLE_NEW, "f003")
         keys = [c.args[0] for c in s3.download_tile.await_args_list]
-        assert f"geojson/gfs/mslp/{CYCLE_NEW}/" f"{CYCLE_NEW}_f003_isobars.json" in keys
+        assert f"geojson/gfs/mean-sea-level-pressure/{CYCLE_NEW}/" f"{CYCLE_NEW}_f003_isobars.json" in keys
 
     @pytest.mark.asyncio
     async def test_already_mirrored_overlays_cost_no_s3_get(self):
@@ -188,7 +188,7 @@ class TestPruning:
     async def test_prunes_to_the_active_cycles(self):
         s3, redis = _s3(cycles=[CYCLE_NEW, CYCLE_OLD]), _redis()
         await _make_service(s3, redis)._sync_product(GFS_MSLP)
-        redis.prune_gfs_cycles.assert_awaited_once_with("mslp", [CYCLE_NEW, CYCLE_OLD])
+        redis.prune_gfs_cycles.assert_awaited_once_with("mean-sea-level-pressure", [CYCLE_NEW, CYCLE_OLD])
 
     @pytest.mark.asyncio
     async def test_empty_listing_does_not_wipe_the_index(self):
@@ -205,7 +205,7 @@ class TestFullPass:
         synced, errors = await _make_service(s3, redis)._sync_gfs()
         assert errors == 0
         products = {c.args[0] for c in redis.add_gfs_index.await_args_list}
-        assert products == {"mslp", "500hpa", "250hpa"}
+        assert products == {"mean-sea-level-pressure", "geopotential-500hpa", "geopotential-250hpa"}
         assert synced > 0
 
     @pytest.mark.asyncio
@@ -214,7 +214,7 @@ class TestFullPass:
         original = s3.get_subdirectories
 
         async def fail_on_mslp(prefix):
-            if "/mslp/" in prefix or prefix.endswith("/mslp"):
+            if "/mean-sea-level-pressure" in prefix:
                 raise RuntimeError("S3 down")
             return await original(prefix)
 
@@ -223,8 +223,8 @@ class TestFullPass:
         synced, errors = await _make_service(s3, redis)._sync_gfs()
         assert errors == 1
         products = {c.args[0] for c in redis.add_gfs_index.await_args_list}
-        assert "mslp" not in products
-        assert {"500hpa", "250hpa"} <= products
+        assert "mean-sea-level-pressure" not in products
+        assert {"geopotential-500hpa", "geopotential-250hpa"} <= products
         assert synced > 0
 
     @pytest.mark.asyncio

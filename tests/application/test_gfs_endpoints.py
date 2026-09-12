@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 CYCLE = "20260808T0000Z"
 FXXX = "f003"
-BASE = f"/products/gfs/500hpa/{CYCLE}/{FXXX}"
+BASE = f"/products/gfs/geopotential-500hpa/{CYCLE}/{FXXX}"
 
 
 @pytest.fixture
@@ -116,7 +116,7 @@ class TestSecondaryPointEndpoint:
             app_client.get(f"{BASE}/secondary/temperature/point?lat=-34&lon=-64")
             args = pvs.sample_gfs_secondary_point.await_args.args
 
-        assert args[0] == "500hpa"
+        assert args[0] == "geopotential-500hpa"
         assert args[3] == "temperature"
 
     def test_unknown_variable_is_404(self, app_client, service):
@@ -156,7 +156,7 @@ class TestListings:
         assert response.status_code == 404
 
     def test_unknown_cycle_is_404(self, app_client, service):
-        response = app_client.get(f"/products/gfs/500hpa/{CYCLE}")
+        response = app_client.get(f"/products/gfs/geopotential-500hpa/{CYCLE}")
         assert response.status_code == 404
 
     def test_cycle_listing_is_served_with_an_etag(self, app_client, service):
@@ -165,7 +165,7 @@ class TestListings:
 
         service.list_cycles = AsyncMock(
             return_value=GfsCycleListResponse(
-                product_id="500hpa",
+                product_id="geopotential-500hpa",
                 cycles=[],
                 layers=["heights"],
                 tile_url_pattern="/x/{z}/{x}/{y}.webp",
@@ -173,7 +173,7 @@ class TestListings:
                 bounding_box=BoundingBox(minx=-110, miny=-60, maxx=-30, maxy=-15),
             )
         )
-        response = app_client.get("/products/gfs/500hpa")
+        response = app_client.get("/products/gfs/geopotential-500hpa")
         assert response.status_code == 200
         assert response.headers.get("ETag")
 
@@ -186,7 +186,7 @@ class TestListings:
 
         service.list_steps = AsyncMock(
             return_value=GfsStepListResponse(
-                product_id="500hpa",
+                product_id="geopotential-500hpa",
                 cycle=CYCLE,
                 steps=[
                     GfsStepInfo(
@@ -200,7 +200,7 @@ class TestListings:
                 bounding_box=BoundingBox(minx=-110, miny=-60, maxx=-30, maxy=-15),
             )
         )
-        response = app_client.get(f"/products/gfs/500hpa/{CYCLE}")
+        response = app_client.get(f"/products/gfs/geopotential-500hpa/{CYCLE}")
         assert response.status_code == 200
         assert response.headers.get("ETag")
         body = response.json()
@@ -208,7 +208,7 @@ class TestListings:
         assert body["barb_zoom_levels"] == [2, 4, 6, 8]
 
         cached = app_client.get(
-            f"/products/gfs/500hpa/{CYCLE}",
+            f"/products/gfs/geopotential-500hpa/{CYCLE}",
             headers={"If-None-Match": response.headers["ETag"]},
         )
         assert cached.status_code == 304
@@ -219,7 +219,7 @@ class TestListings:
 
         service.list_cycles = AsyncMock(
             return_value=GfsCycleListResponse(
-                product_id="500hpa",
+                product_id="geopotential-500hpa",
                 cycles=[],
                 layers=["heights"],
                 tile_url_pattern=None,
@@ -227,9 +227,9 @@ class TestListings:
                 bounding_box=BoundingBox(minx=-110, miny=-60, maxx=-30, maxy=-15),
             )
         )
-        first = app_client.get("/products/gfs/500hpa")
+        first = app_client.get("/products/gfs/geopotential-500hpa")
         second = app_client.get(
-            "/products/gfs/500hpa", headers={"If-None-Match": first.headers["ETag"]}
+            "/products/gfs/geopotential-500hpa", headers={"If-None-Match": first.headers["ETag"]}
         )
         assert second.status_code == 304
 
@@ -409,7 +409,7 @@ class TestPointValue:
         body = response.json()
         assert body["value"] == 98.4
         assert body["unit"] == "kt"
-        assert body["product_id"] == "500hpa"
+        assert body["product_id"] == "geopotential-500hpa"
 
     @pytest.mark.parametrize("query", ["lat=-91&lon=-64", "lat=-34&lon=-181"])
     def test_out_of_range_coordinates_are_422(self, app_client, query):

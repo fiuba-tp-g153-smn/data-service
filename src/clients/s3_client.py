@@ -316,8 +316,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     WRF_TILES_PREFIX = "tiles/wrf-arg4k"
     WRF_GEOJSON_PREFIX = "geojson/wrf-arg4k"
 
-    ECMWF_TP_TILES_PREFIX = "tiles/ecmwf-ifs/tp"
-    ECMWF_MSLP_COG_PREFIX = "cog/ecmwf-ifs/mslp"
+    ECMWF_TP_TILES_PREFIX = "tiles/ecmwf-ifs/total-precipitation"
+    ECMWF_MSLP_COG_PREFIX = "cog/ecmwf-ifs/mean-sea-level-pressure"
 
     @staticmethod
     def build_wrf_tile_key(
@@ -458,12 +458,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> str:
         """Build S3 key for an ECMWF total precipitation tile."""
-        return f"tiles/ecmwf-ifs/tp/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
+        return f"tiles/ecmwf-ifs/total-precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
 
     @staticmethod
     def build_ecmwf_tp_cog_key(forecast_ts: str, period_ts: str) -> str:
         """Build S3 key for an ECMWF total precipitation COG."""
-        return f"cog/ecmwf-ifs/tp/{forecast_ts}/{period_ts}.tif"
+        return f"cog/ecmwf-ifs/total-precipitation/{forecast_ts}/{period_ts}.tif"
 
     async def sync_ecmwf_tp_period_to_redis(
         self,
@@ -526,12 +526,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     @staticmethod
     def build_ecmwf_mslp_cog_key(forecast_ts: str, timestamp_ts: str) -> str:
         """Build S3 key for an ECMWF mean sea level pressure COG."""
-        return f"cog/ecmwf-ifs/mslp/{forecast_ts}/{timestamp_ts}.tif"
+        return f"cog/ecmwf-ifs/mean-sea-level-pressure/{forecast_ts}/{timestamp_ts}.tif"
 
     @staticmethod
     def build_ecmwf_mslp_geojson_key(forecast_ts: str, timestamp_ts: str) -> str:
         """Build S3 key for an ECMWF mean sea level pressure isobars GeoJSON."""
-        return f"geojson/ecmwf-ifs/mslp/{forecast_ts}/{timestamp_ts}.json"
+        return f"geojson/ecmwf-ifs/mean-sea-level-pressure/{forecast_ts}/{timestamp_ts}.json"
 
     # ============== GFS ==============
     #

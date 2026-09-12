@@ -22,7 +22,7 @@ from services.point_value_service import (
     point_value_service,
 )
 
-router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF Total Precipitation"])
+router = APIRouter(prefix="/products/ecmwf-ifs", tags=["ECMWF Total Precipitation"])
 
 _ZOOM_MIN = 3
 _ZOOM_MAX = 7

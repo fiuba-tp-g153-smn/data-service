@@ -20,7 +20,7 @@ class EcmwfTotalPrecipitationService(BaseProductService):
     ZOOM_LEVELS = ZoomLevels(min=3, max=7)
     BOUNDING_BOX = BoundingBox(minx=-110.0, miny=-60.0, maxx=-30.0, maxy=-15.0)
     TILE_URL_PATTERN = (
-        "/products/ecmwf/total-precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
+        "/products/ecmwf-ifs/total-precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
     )
 
     def __init__(self) -> None:

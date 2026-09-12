@@ -84,7 +84,7 @@ class GfsService:
         # Hydrate each step's overlay list from the index, concurrently. Reading
         # it per step (rather than reusing the product catalogue) is what keeps
         # the listing honest while a cycle is still filling in: an overlay that
-        # tiles-processor has not uploaded yet is simply not advertised, so the
+        # tiles-processor has not uploaded yet is not advertised, so the
         # frontend never asks for a layer that would 404.
         layer_lists = await asyncio.gather(
             *(self._strategy.list_layers(product_id, cycle, s) for s in steps)

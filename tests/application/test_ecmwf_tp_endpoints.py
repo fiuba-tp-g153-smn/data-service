@@ -22,7 +22,7 @@ client = TestClient(app)
 
 FORECAST_TS = "20260330T1200Z"
 PERIOD_TS = "20260330T1500Z"
-BASE = "/products/ecmwf/total-precipitation"
+BASE = "/products/ecmwf-ifs/total-precipitation"
 
 
 def _forecast_list():
@@ -41,7 +41,7 @@ def _period_list():
     )
 
 
-# ── GET /products/ecmwf/total-precipitation ───────────────────────────────────
+# ── GET /products/ecmwf-ifs/total-precipitation ───────────────────────────────────
 
 
 def test_list_forecasts_returns_200():
@@ -88,7 +88,7 @@ def test_list_forecasts_200_on_etag_mismatch():
         assert response.status_code == 200
 
 
-# ── GET /products/ecmwf/total-precipitation/{forecast_ts} ─────────────────────
+# ── GET /products/ecmwf-ifs/total-precipitation/{forecast_ts} ─────────────────────
 
 
 def test_list_periods_returns_200():
@@ -125,7 +125,7 @@ def test_list_periods_304_on_etag_match():
         assert second.status_code == 304
 
 
-# ── GET /products/ecmwf/total-precipitation/{f}/{p}/{z}/{x}/{y}.webp ──────────
+# ── GET /products/ecmwf-ifs/total-precipitation/{f}/{p}/{z}/{x}/{y}.webp ──────────
 
 
 def test_get_tile_returns_200_webp():
@@ -179,7 +179,7 @@ def test_get_tile_returns_304_on_etag_match():
     assert response.status_code == 304
 
 
-# ── GET /products/ecmwf/total-precipitation/{f}/{p}/point ─────────────────────
+# ── GET /products/ecmwf-ifs/total-precipitation/{f}/{p}/point ─────────────────────
 
 
 def test_get_point_value_returns_200():
