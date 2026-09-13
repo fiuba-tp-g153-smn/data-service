@@ -500,3 +500,101 @@ async def test_bulk_layer_readers_skip_the_round_trip_when_there_are_no_steps():
         == {}
     )
     pipe.execute.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Bulk index counters (availability snapshot)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_count_radar_tilesets_bulk_is_one_zcard_pipeline():
+    client, mock_redis, pipe = _pipelined([3, 0])
+    combos = [("RMA1", "dbzh", "elev0"), ("RMA1", "kdp", "elev0")]
+
+    result = await client.count_radar_tilesets_bulk(combos)
+
+    assert result == {combos[0]: 3, combos[1]: 0}
+    pipe.execute.assert_awaited_once()
+    mock_redis.zcard.assert_not_awaited()
+    assert [c.args[0] for c in pipe.zcard.call_args_list] == [
+        "idx:radar:RMA1:dbzh:elev0:tilesets",
+        "idx:radar:RMA1:kdp:elev0:tilesets",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bulk_counter_keys_match_the_writer():
+    """A drifted key would silently report every product as empty."""
+    client, _, pipe = _pipelined([1])
+    await client.count_radar_tilesets_bulk([("RMA1", "dbzh", "elev0")])
+    read_key = pipe.zcard.call_args.args[0]
+
+    writer, writer_redis, writer_pipe = _pipelined([])
+    writer_redis.pipeline = AsyncMock(return_value=writer_pipe)
+    await writer.add_radar_index("RMA1", "dbzh", "elev0", "ts1", 1.0, ttl=60)
+
+    assert read_key == writer_pipe.zadd.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_wrongtype_key_counts_as_empty_not_a_failed_snapshot():
+    """A pre-migration plain-set key must not take the whole snapshot down."""
+    client, _, _ = _pipelined([ResponseError("WRONGTYPE"), 2])
+    combos = [("RMA1", "dbzh", "elev0"), ("RMA2", "dbzh", "elev0")]
+
+    result = await client.count_radar_tilesets_bulk(combos)
+
+    assert result == {combos[0]: 0, combos[1]: 2}
+
+
+@pytest.mark.asyncio
+async def test_satellite_wrf_and_gfs_counters_use_their_index_keys():
+    client, _, pipe = _pipelined([1, 0])
+    await client.count_satellite_tilesets_bulk(["goes19/abi/c13", "goes19/glm/fed"])
+    assert [c.args[0] for c in pipe.zcard.call_args_list] == [
+        "idx:sat:goes19/abi/c13",
+        "idx:sat:goes19/glm/fed",
+    ]
+
+    client, _, pipe = _pipelined([2])
+    await client.count_wrf_init_runs_bulk(["granizo"])
+    assert pipe.zcard.call_args.args[0] == "idx:wrf:granizo:init_runs"
+
+    client, _, pipe = _pipelined([2])
+    await client.count_gfs_cycles_bulk(["geopotential-500hpa"])
+    assert pipe.zcard.call_args.args[0] == "idx:gfs:geopotential-500hpa:cycles"
+
+
+@pytest.mark.asyncio
+async def test_bulk_counters_skip_the_round_trip_when_asked_for_nothing():
+    client, _, pipe = _pipelined([])
+
+    assert await client.count_radar_tilesets_bulk([]) == {}
+    assert await client.count_satellite_tilesets_bulk([]) == {}
+    pipe.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_wrf_index_registers_the_product():
+    """WRF has no static catalogue, so the index is the only enumeration path."""
+    client = RedisClient("redis://localhost:6379/0")
+    mock_redis = AsyncMock()
+    mock_pipeline = MagicMock()
+    mock_pipeline.execute = AsyncMock(return_value=[])
+    mock_redis.pipeline = AsyncMock(return_value=mock_pipeline)
+    client._redis = mock_redis
+
+    await client.add_wrf_index("granizo", "20260913_060000", "F001", 1.0, 2.0, ttl=60)
+
+    assert "idx:wrf:products" in [c.args[0] for c in mock_pipeline.sadd.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_products_reads_that_axis():
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.smembers = AsyncMock(return_value={b"mucape", b"granizo"})
+
+    assert await client.get_wrf_products() == ["granizo", "mucape"]
+    assert client._redis.smembers.await_args.args[0] == "idx:wrf:products"

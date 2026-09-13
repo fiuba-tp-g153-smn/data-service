@@ -113,6 +113,11 @@ class Settings:
     # download time so the frontier always advances. WRF uses its own value.
     sync_domain_timeout_seconds: int = 300
     cache_control_config: str
+    # How long the bundled /products/availability snapshot is memoised in
+    # process. It exists so N clients polling together collapse onto one walk
+    # of the indexes rather than N; keep it well under the frontend's re-probe
+    # cadence so a product un-greys promptly once its sync lands.
+    product_availability_ttl_seconds: float = 10.0
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
     # runs the background sync task (fcntl exclusive lock).
@@ -374,6 +379,7 @@ class Settings:
             "sync_min_sleep_seconds",
             "sync_domain_timeout_seconds",
             "cache_control_config",
+            "product_availability_ttl_seconds",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
             "s3_connect_timeout_seconds",

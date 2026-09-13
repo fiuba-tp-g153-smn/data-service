@@ -29,6 +29,7 @@ from dependencies import (
 )
 from gdal_config import configure_gdal_vsi_s3
 from routes import (
+    availability,
     basemap,
     ecmwf_mslp,
     ecmwf_tp,
@@ -55,7 +56,12 @@ from services.ecmwf_tp_sync_strategy import (
     EcmwfTpOnDemandStrategy,
     EcmwfTpSyncStrategy,
 )
+from services.gfs_config import product_ids as gfs_product_ids
 from services.point_value_service import point_value_service
+from services.product_availability_service import (
+    build_contributors,
+    product_availability_service,
+)
 from services.point_value_strategy import S3CogPointValueStrategy
 from services.radar_service import radar_service
 from services.radar_sync_strategy import (
@@ -292,6 +298,23 @@ async def configure_strategies(
         s3_client,
         wrf_strategy,
         gfs_strategy,
+    )
+
+
+def configure_product_availability(client_redis: RedisClient) -> None:
+    """Register every domain that can report whether its products have data.
+
+    Satellite and GFS declare their products statically; radar and WRF are
+    enumerated from their Redis index, which is why only those two need the
+    index to have been written at least once before they can answer.
+    """
+    product_availability_service.configure(
+        build_contributors(
+            client_redis,
+            satellite_channel_dirs=list(satellite_service.CHANNEL_DIR_MAPPING.values()),
+            gfs_product_ids=gfs_product_ids(),
+        ),
+        ttl_seconds=settings.product_availability_ttl_seconds,
     )
 
 
@@ -752,6 +775,7 @@ async def lifespan(_app: FastAPI):
     point_value_service.set_strategy(point_value_strategy)
     wrf_service.set_strategy(wrf_strategy)
     gfs_service.set_strategy(gfs_strategy)
+    configure_product_availability(redis_client)
 
     basemap_runtime = await configure_basemap(redis_client)
     weather_stations_runtime = await configure_weather_stations()
@@ -823,6 +847,8 @@ app.add_middleware(
 )
 
 app.include_router(general.router)
+app.include_router(availability.router)  # Literal /products/availability:
+# must precede satellite, whose /{product_id} would otherwise swallow it
 app.include_router(basemap.router)  # Base map tile proxy
 app.include_router(radar.router)  # Radar routes (most specific)
 app.include_router(ecmwf_tp.router)  # ECMWF total precipitation routes

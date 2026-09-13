@@ -6,14 +6,23 @@ and sync observability. Replaces filesystem storage for satellite tiles
 and provides a shared cache for radar tiles.
 """
 
+# TECH DEBT: one client class holds the key schema for every domain, so it grows
+# with each one and has now crossed pylint's 1000-line module cap. Splitting it
+# per domain (satellite/radar/ecmwf/wrf/gfs) behind the same facade is the real
+# fix — its own commit, rather than blocking each addition.
+# pylint: disable=too-many-lines
+
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
 logger = logging.getLogger(__name__)
+
+_RADAR_ROOT_KEY = "idx:radar:radars"
+_WRF_PRODUCTS_KEY = "idx:wrf:products"
 
 
 class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-public-methods
@@ -102,6 +111,41 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             raise RuntimeError("Redis not connected")
 
         return self._redis
+
+    async def _zcard_bulk(self, keys: List[str]) -> List[int]:
+        """Cardinality of many sorted sets in one pipelined round trip.
+
+        The availability snapshot only asks "does this product have anything",
+        so ZCARD is the whole answer — reading the members back to count them
+        would ship the entire index over the wire for a yes/no, and a radar
+        fleet is ~110 of these. A key left as a plain set by the set->zset
+        migration answers WRONGTYPE; count it as empty rather than failing the
+        whole snapshot, since the domain readers already self-heal it.
+        """
+        if not keys:
+            return []
+        pipe = await self._conn.pipeline(transaction=False)
+        for key in keys:
+            pipe.zcard(key)
+        replies = await pipe.execute(raise_on_error=False)
+        return [reply if isinstance(reply, int) else 0 for reply in replies]
+
+    async def count_satellite_tilesets_bulk(
+        self, channel_dirs: List[str]
+    ) -> Dict[str, int]:
+        """Tileset counts for many satellite channels, in one round trip."""
+        counts = await self._zcard_bulk([f"idx:sat:{d}" for d in channel_dirs])
+        return dict(zip(channel_dirs, counts))
+
+    async def count_wrf_init_runs_bulk(self, product_ids: List[str]) -> Dict[str, int]:
+        """Init-run counts for many WRF products, in one round trip."""
+        counts = await self._zcard_bulk([f"idx:wrf:{p}:init_runs" for p in product_ids])
+        return dict(zip(product_ids, counts))
+
+    async def count_gfs_cycles_bulk(self, product_ids: List[str]) -> Dict[str, int]:
+        """Cycle counts for many GFS products, in one round trip."""
+        counts = await self._zcard_bulk([f"idx:gfs:{p}:cycles" for p in product_ids])
+        return dict(zip(product_ids, counts))
 
     # ============== Satellite Tile Operations ==============
 
@@ -242,40 +286,93 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """
         pipe = await self._conn.pipeline()
 
-        radars_key = "idx:radar:radars"
+        radars_key = _RADAR_ROOT_KEY
         pipe.sadd(radars_key, radar_id.encode())
         pipe.expire(radars_key, ttl)
 
-        vars_key = f"idx:radar:{radar_id}:variables"
+        vars_key = self._radar_variables_key(radar_id)
         pipe.sadd(vars_key, variable_id.encode())
         pipe.expire(vars_key, ttl)
 
-        elevs_key = f"idx:radar:{radar_id}:{variable_id}:elevations"
+        elevs_key = self._radar_elevations_key(radar_id, variable_id)
         pipe.sadd(elevs_key, elevation_id.encode())
         pipe.expire(elevs_key, ttl)
 
-        tilesets_key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        tilesets_key = self._radar_tilesets_key(radar_id, variable_id, elevation_id)
         pipe.zadd(tilesets_key, {tileset_id.encode(): score})
         pipe.expire(tilesets_key, ttl)
 
         await pipe.execute()
 
+    @staticmethod
+    def _radar_variables_key(radar_id: str) -> str:
+        return f"idx:radar:{radar_id}:variables"
+
+    @staticmethod
+    def _radar_elevations_key(radar_id: str, variable_id: str) -> str:
+        return f"idx:radar:{radar_id}:{variable_id}:elevations"
+
+    @staticmethod
+    def _radar_tilesets_key(radar_id: str, variable_id: str, elevation_id: str) -> str:
+        return f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+
     async def get_radar_radars(self) -> List[str]:
         """Get all radar IDs."""
-        members = await self._conn.smembers("idx:radar:radars")  # type: ignore[misc]
+        members = await self._conn.smembers(_RADAR_ROOT_KEY)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
 
     async def get_radar_variables(self, radar_id: str) -> List[str]:
         """Get all variable IDs for a radar."""
-        members = await self._conn.smembers(f"idx:radar:{radar_id}:variables")  # type: ignore[misc]
+        members = await self._conn.smembers(  # type: ignore[misc]
+            self._radar_variables_key(radar_id)
+        )
         return sorted(m.decode() for m in members)
+
+    async def get_radar_variables_bulk(
+        self, radar_ids: List[str]
+    ) -> Dict[str, List[str]]:
+        """Variables for many radars in one pipelined round trip."""
+        if not radar_ids:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for radar_id in radar_ids:
+            pipe.smembers(self._radar_variables_key(radar_id))
+        replies = await pipe.execute()
+        return {
+            radar_id: sorted(m.decode() for m in members)
+            for radar_id, members in zip(radar_ids, replies)
+        }
 
     async def get_radar_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """Get all elevation IDs for a radar/variable."""
         members = await self._conn.smembers(  # type: ignore[misc]
-            f"idx:radar:{radar_id}:{variable_id}:elevations"
+            self._radar_elevations_key(radar_id, variable_id)
         )
         return sorted(m.decode() for m in members)
+
+    async def get_radar_elevations_bulk(
+        self, pairs: List[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], List[str]]:
+        """Elevations for many radar/variable pairs in one pipelined round trip."""
+        if not pairs:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for radar_id, variable_id in pairs:
+            pipe.smembers(self._radar_elevations_key(radar_id, variable_id))
+        replies = await pipe.execute()
+        return {
+            pair: sorted(m.decode() for m in members)
+            for pair, members in zip(pairs, replies)
+        }
+
+    async def count_radar_tilesets_bulk(
+        self, combos: List[Tuple[str, str, str]]
+    ) -> Dict[Tuple[str, str, str], int]:
+        """Tileset counts for many radar/variable/elevation combos, in one trip."""
+        counts = await self._zcard_bulk(
+            [self._radar_tilesets_key(r, v, e) for r, v, e in combos]
+        )
+        return dict(zip(combos, counts))
 
     async def get_radar_tilesets(
         self, radar_id: str, variable_id: str, elevation_id: str
@@ -508,6 +605,10 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Add entries to WRF index sorted sets with TTL."""
         pipe = await self._conn.pipeline()
 
+        products_key = _WRF_PRODUCTS_KEY
+        pipe.sadd(products_key, product_id.encode())
+        pipe.expire(products_key, ttl)
+
         init_key = f"idx:wrf:{product_id}:init_runs"
         pipe.zadd(init_key, {init_tag.encode(): init_score})
         pipe.expire(init_key, ttl)
@@ -517,6 +618,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         pipe.expire(steps_key, ttl)
 
         await pipe.execute()
+
+    async def get_wrf_products(self) -> List[str]:
+        """Every WRF product the sync loop has indexed.
+
+        WRF products are discovered from S3 rather than declared in a static
+        catalogue, so — unlike GFS — the only way to enumerate them for the
+        availability snapshot is an index axis, mirroring `idx:radar:radars`.
+        """
+        members = await self._conn.smembers(_WRF_PRODUCTS_KEY)  # type: ignore[misc]
+        return sorted(m.decode() for m in members)
 
     async def get_wrf_init_runs(self, product_id: str) -> List[str]:
         """Get all init run tags for a product, sorted descending (newest first)."""
