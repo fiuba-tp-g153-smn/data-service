@@ -1,6 +1,5 @@
 """Service for WRF model tiles and overlay GeoJSONs."""
 
-import asyncio
 from typing import List, Optional
 
 from models.base import BoundingBox, ZoomLevels
@@ -67,13 +66,16 @@ class WrfService(BaseProductService):
             return None
 
         steps = await self._strategy.list_steps(product_id, init_tag)
-        # Hydrate per-step GeoJSON layers concurrently — listing is cheap and
-        # callers (frontend) need the layer list to know which overlays to fetch.
-        layer_lists = await asyncio.gather(
-            *(self._strategy.list_layers(product_id, init_tag, s) for s in steps)
+        # Hydrate per-step GeoJSON layers in one bulk read — callers (frontend)
+        # need the layer list to know which overlays to fetch. Bulk rather than
+        # a per-step fan-out: an init run is hourly out to F073, and one
+        # in-flight read per step exhausts the shared Redis pool, which fails
+        # every other domain's requests too.
+        layers_by_step = await self._strategy.list_layers_bulk(
+            product_id, init_tag, steps
         )
         step_infos = [
-            WrfStepInfo(fxxx=s, layers=layers) for s, layers in zip(steps, layer_lists)
+            WrfStepInfo(fxxx=s, layers=layers_by_step.get(s, [])) for s in steps
         ]
         return WrfStepListResponse(
             product_id=product_id,

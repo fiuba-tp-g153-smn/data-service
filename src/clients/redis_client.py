@@ -30,6 +30,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         redis_url: str,
         *,
         max_connections: int = 100,
+        pool_wait_timeout_seconds: float = 5.0,
         socket_timeout_seconds: float = 5.0,
         socket_connect_timeout_seconds: float = 2.0,
         health_check_interval_seconds: int = 30,
@@ -37,6 +38,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments
         self._redis_url = redis_url
         self._max_connections = max_connections
+        self._pool_wait_timeout_seconds = pool_wait_timeout_seconds
         self._socket_timeout_seconds = socket_timeout_seconds
         self._socket_connect_timeout_seconds = socket_connect_timeout_seconds
         self._health_check_interval_seconds = health_check_interval_seconds
@@ -50,21 +52,31 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         swapping Redis fails fast instead of blocking every awaiting coroutine
         — sync loop and request serving alike — indefinitely. The lock + double
         check make a first-use race build a single pool rather than leaking one.
+
+        It is a *blocking* pool on purpose. The plain pool refuses on the
+        (max_connections + 1)-th concurrent command instead of queueing, so one
+        endpoint fanning out wider than the cap does not merely slow itself
+        down: it raises MaxConnectionsError, and because the pool is shared by
+        every domain it takes satellite, radar, ECMWF, GFS and basemap down
+        with it. Waiting turns that cliff into backpressure, still bounded by
+        `pool_wait_timeout_seconds` so a genuinely stuck pool surfaces.
         """
         if self._redis is not None:
             return
         async with self._connect_lock:
             if self._redis is not None:
                 return
-            self._redis = aioredis.from_url(
+            pool = aioredis.BlockingConnectionPool.from_url(
                 self._redis_url,
                 decode_responses=False,
                 max_connections=self._max_connections,
+                timeout=self._pool_wait_timeout_seconds,
                 socket_timeout=self._socket_timeout_seconds,
                 socket_connect_timeout=self._socket_connect_timeout_seconds,
                 socket_keepalive=True,
                 health_check_interval=self._health_check_interval_seconds,
             )
+            self._redis = aioredis.Redis(connection_pool=pool)
             logger.info("Connected to Redis at %s", self._redis_url)
 
     async def close(self) -> None:
@@ -567,20 +579,46 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Register the GeoJSON layers available for a WRF forecast step."""
         if not layers:
             return
-        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        key = self._wrf_layers_key(product_id, init_tag, fxxx)
         pipe = await self._conn.pipeline()
         for layer in layers:
             pipe.sadd(key, layer.encode())
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    @staticmethod
+    def _wrf_layers_key(product_id: str, init_tag: str, fxxx: str) -> str:
+        return f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+
     async def get_wrf_layers(
         self, product_id: str, init_tag: str, fxxx: str
     ) -> List[str]:
         """Get all GeoJSON layer names indexed for a forecast step."""
-        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        key = self._wrf_layers_key(product_id, init_tag, fxxx)
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    async def get_wrf_layers_bulk(
+        self, product_id: str, init_tag: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Layer names for many steps at once, over a single connection.
+
+        An init run is hourly out to F073, so reading the steps one await at a
+        time would take one pooled connection per step and blow the pool apart
+        on a couple of concurrent requests. Pipelining sends all the SMEMBERS
+        in one round trip on one connection, so the cost of a listing stops
+        scaling with the length of the forecast.
+        """
+        if not steps:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for fxxx in steps:
+            pipe.smembers(self._wrf_layers_key(product_id, init_tag, fxxx))
+        replies = await pipe.execute()
+        return {
+            fxxx: sorted(m.decode() for m in members)
+            for fxxx, members in zip(steps, replies)
+        }
 
     @staticmethod
     def _wrf_overlays_done_key(product_id: str, init_tag: str, fxxx: str) -> str:
@@ -688,18 +726,41 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Register which overlay layers a forecast step actually has."""
         if not layers:
             return
-        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        key = self._gfs_layers_key(product_id, cycle, fxxx)
         pipe = await self._conn.pipeline()
         for layer in layers:
             pipe.sadd(key, layer.encode())
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    @staticmethod
+    def _gfs_layers_key(product_id: str, cycle: str, fxxx: str) -> str:
+        return f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+
     async def get_gfs_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
         """Get the overlay layers indexed for a forecast step."""
-        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        key = self._gfs_layers_key(product_id, cycle, fxxx)
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    async def get_gfs_layers_bulk(
+        self, product_id: str, cycle: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Overlay layers for many steps at once, over a single connection.
+
+        Same reasoning as `get_wrf_layers_bulk`: one pipelined round trip so a
+        cycle listing costs one pooled connection rather than one per step.
+        """
+        if not steps:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for fxxx in steps:
+            pipe.smembers(self._gfs_layers_key(product_id, cycle, fxxx))
+        replies = await pipe.execute()
+        return {
+            fxxx: sorted(m.decode() for m in members)
+            for fxxx, members in zip(steps, replies)
+        }
 
     # ============== GFS Tile Operations (lazy, on-demand cache) ==============
 

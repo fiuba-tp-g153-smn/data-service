@@ -9,30 +9,38 @@ async def test_connect_and_close():
     """Verify connect creates Redis connection and close shuts it down."""
     with patch("clients.redis_client.aioredis") as mock_aioredis:
         mock_redis = AsyncMock()
-        mock_aioredis.from_url.return_value = mock_redis
+        mock_pool = MagicMock()
+        mock_aioredis.BlockingConnectionPool.from_url.return_value = mock_pool
+        mock_aioredis.Redis.return_value = mock_redis
 
         client = RedisClient(
             "redis://localhost:6379/0",
             max_connections=100,
+            pool_wait_timeout_seconds=5.0,
             socket_timeout_seconds=5.0,
             socket_connect_timeout_seconds=2.0,
             health_check_interval_seconds=30,
         )
         await client.connect()
 
-        mock_aioredis.from_url.assert_called_once_with(
+        # Blocking pool, not the plain one: the plain pool refuses the
+        # (max_connections + 1)-th command instead of queueing, which turns one
+        # wide fan-out into a 500 for every domain sharing the pool.
+        mock_aioredis.BlockingConnectionPool.from_url.assert_called_once_with(
             "redis://localhost:6379/0",
             decode_responses=False,
             max_connections=100,
+            timeout=5.0,
             socket_timeout=5.0,
             socket_connect_timeout=2.0,
             socket_keepalive=True,
             health_check_interval=30,
         )
+        mock_aioredis.Redis.assert_called_once_with(connection_pool=mock_pool)
 
         # connect() is idempotent: a second call must not build a second pool.
         await client.connect()
-        mock_aioredis.from_url.assert_called_once()
+        mock_aioredis.BlockingConnectionPool.from_url.assert_called_once()
 
         await client.close()
         mock_redis.close.assert_awaited_once()
@@ -384,3 +392,111 @@ async def test_wrf_overlays_complete_marker_roundtrip():
         await client.is_wrf_overlays_complete("precip", "20260430_060000", "F012")
         is True
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk layer readers
+#
+# A WRF init run is hourly out to F073 and a GFS cycle runs to f144. Reading
+# those one await at a time takes one pooled connection per step, so a couple
+# of concurrent listings exhaust a pool shared by every domain. These pin the
+# reads to a single pipelined round trip.
+# ---------------------------------------------------------------------------
+
+
+def _pipelined(replies):
+    """Client whose pipeline records the queued commands and replays `replies`."""
+    client = RedisClient("redis://localhost:6379/0")
+    mock_redis = AsyncMock()
+    mock_pipeline = MagicMock()
+    mock_pipeline.execute = AsyncMock(return_value=replies)
+    mock_redis.pipeline = AsyncMock(return_value=mock_pipeline)
+    client._redis = mock_redis
+    return client, mock_redis, mock_pipeline
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_layers_bulk_uses_one_pipelined_round_trip():
+    client, mock_redis, pipe = _pipelined([{b"barbs"}, {b"contours", b"barbs"}, set()])
+
+    result = await client.get_wrf_layers_bulk(
+        "precip", "20260430_060000", ["F001", "F002", "F003"]
+    )
+
+    assert result == {
+        "F001": ["barbs"],
+        "F002": ["barbs", "contours"],  # sorted, like the single-step reader
+        "F003": [],
+    }
+    # One connection for the whole run, not one per step.
+    pipe.execute.assert_awaited_once()
+    mock_redis.smembers.assert_not_awaited()
+    assert [c.args[0] for c in pipe.smembers.call_args_list] == [
+        "idx:wrf:precip:20260430_060000:F001:layers",
+        "idx:wrf:precip:20260430_060000:F002:layers",
+        "idx:wrf:precip:20260430_060000:F003:layers",
+    ]
+    # Read-only: no MULTI/EXEC wrapper to pay for.
+    assert mock_redis.pipeline.await_args.kwargs["transaction"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_layers_bulk_agrees_with_the_single_step_reader():
+    """The two readers must derive the same key, or a bulk listing reads nothing."""
+    bulk, _, bulk_pipe = _pipelined([{b"barbs"}])
+    await bulk.get_wrf_layers_bulk("precip", "20260430_060000", ["F012"])
+
+    single = RedisClient("redis://localhost:6379/0")
+    single._redis = AsyncMock()
+    single._redis.smembers = AsyncMock(return_value={b"barbs"})
+    await single.get_wrf_layers("precip", "20260430_060000", "F012")
+
+    assert (
+        bulk_pipe.smembers.call_args.args[0]
+        == single._redis.smembers.await_args.args[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_gfs_layers_bulk_uses_one_pipelined_round_trip():
+    client, mock_redis, pipe = _pipelined([{b"heights"}, set()])
+
+    result = await client.get_gfs_layers_bulk(
+        "geopotential-500hpa", "20260808T0000Z", ["f000", "f003"]
+    )
+
+    assert result == {"f000": ["heights"], "f003": []}
+    pipe.execute.assert_awaited_once()
+    mock_redis.smembers.assert_not_awaited()
+    assert [c.args[0] for c in pipe.smembers.call_args_list] == [
+        "idx:gfs:geopotential-500hpa:20260808T0000Z:f000:layers",
+        "idx:gfs:geopotential-500hpa:20260808T0000Z:f003:layers",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_gfs_layers_bulk_agrees_with_the_single_step_reader():
+    bulk, _, bulk_pipe = _pipelined([{b"heights"}])
+    await bulk.get_gfs_layers_bulk("geopotential-500hpa", "20260808T0000Z", ["f003"])
+
+    single = RedisClient("redis://localhost:6379/0")
+    single._redis = AsyncMock()
+    single._redis.smembers = AsyncMock(return_value={b"heights"})
+    await single.get_gfs_layers("geopotential-500hpa", "20260808T0000Z", "f003")
+
+    assert (
+        bulk_pipe.smembers.call_args.args[0]
+        == single._redis.smembers.await_args.args[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_layer_readers_skip_the_round_trip_when_there_are_no_steps():
+    client, _, pipe = _pipelined([])
+
+    assert await client.get_wrf_layers_bulk("precip", "20260430_060000", []) == {}
+    assert (
+        await client.get_gfs_layers_bulk("geopotential-500hpa", "20260808T0000Z", [])
+        == {}
+    )
+    pipe.execute.assert_not_awaited()

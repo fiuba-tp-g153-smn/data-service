@@ -51,6 +51,10 @@ class Settings:
     # fail fast rather than block every awaiting coroutine forever; the pool is
     # capped so a full-sync fan-out can't balloon FDs on the shared box.
     redis_max_connections: int = 100
+    # How long a command waits for a free pooled connection before giving up.
+    # The pool blocks rather than refusing, so this is the bound that keeps a
+    # wide fan-out as backpressure instead of a stall.
+    redis_pool_wait_timeout_seconds: float = 5.0
     redis_socket_timeout_seconds: float = 5.0
     redis_socket_connect_timeout_seconds: float = 2.0
     redis_health_check_interval_seconds: int = 30

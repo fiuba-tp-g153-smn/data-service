@@ -32,6 +32,10 @@ class FakeStrategy:
         self.calls.append(("list_layers", product_id, cycle, fxxx))
         return list(self.layers_by_step.get(fxxx, []))
 
+    async def list_layers_bulk(self, product_id, cycle, steps):
+        self.calls.append(("list_layers_bulk", product_id, cycle, tuple(steps)))
+        return {fxxx: list(self.layers_by_step.get(fxxx, [])) for fxxx in steps}
+
     async def get_tile(self, product_id, cycle, fxxx, z, x, y):
         self.calls.append(("get_tile", product_id))
         return self._payload
@@ -163,6 +167,22 @@ class TestListSteps:
     @pytest.mark.asyncio
     async def test_unknown_product_returns_none(self):
         assert await _service().list_steps("850hpa", CYCLE) is None
+
+    @pytest.mark.asyncio
+    async def test_listing_does_not_fan_out_one_call_per_step(self):
+        """Same regression WRF hit: per-step reads exhaust the shared pool."""
+        steps = [f"f{h:03d}" for h in range(0, 145, 3)]
+        strategy = FakeStrategy(steps=steps)
+        service = _service(strategy)
+
+        data = await service.list_steps("geopotential-500hpa", CYCLE)
+
+        assert len(data.steps) == len(steps)
+        assert not [c for c in strategy.calls if c[0] == "list_layers"]
+        bulk = [c for c in strategy.calls if c[0] == "list_layers_bulk"]
+        assert bulk == [
+            ("list_layers_bulk", "geopotential-500hpa", CYCLE, tuple(steps))
+        ]
 
     @pytest.mark.asyncio
     async def test_unknown_cycle_returns_none(self):

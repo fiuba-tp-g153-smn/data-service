@@ -20,6 +20,7 @@ def _redis() -> AsyncMock:
     redis.get_gfs_cycles = AsyncMock(return_value=[])
     redis.get_gfs_steps = AsyncMock(return_value=[])
     redis.get_gfs_layers = AsyncMock(return_value=[])
+    redis.get_gfs_layers_bulk = AsyncMock(return_value={})
     redis.get_cached_listing = AsyncMock(return_value=None)
     return redis
 
@@ -401,3 +402,75 @@ class TestFullSyncStrategy:
             is None
         )
         assert await strategy.list_cycles("geopotential-500hpa") == []
+
+
+class TestBulkLayerListing:
+    """A cycle listing must cost a bounded number of backend calls.
+
+    `list_steps` used to hydrate overlays with one `list_layers` per step, so a
+    long cycle took one pooled Redis connection per step and exhausted a pool
+    shared with every other domain.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warm_index_is_one_pipelined_read(self):
+        redis, s3 = _redis(), _s3()
+        redis.get_gfs_layers_bulk = AsyncMock(
+            return_value={"f000": ["heights"], "f003": ["heights", "isotherms"]}
+        )
+        strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
+
+        result = await strategy.list_layers_bulk(
+            "geopotential-500hpa", CYCLE, ["f000", "f003"]
+        )
+
+        assert result == {"f000": ["heights"], "f003": ["heights", "isotherms"]}
+        redis.get_gfs_layers_bulk.assert_awaited_once_with(
+            "geopotential-500hpa", CYCLE, ["f000", "f003"]
+        )
+        # Nothing per-step, and no S3 at all while the index is warm.
+        redis.get_gfs_layers.assert_not_awaited()
+        s3.try_list_object_basenames.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_only_unindexed_steps_reach_s3(self):
+        """A cycle still filling in must not re-discover what is already indexed."""
+        redis, s3 = _redis_with_listing_cache(), _s3()
+        redis.get_gfs_layers_bulk = AsyncMock(
+            return_value={"f000": ["heights"], "f003": []}
+        )
+        s3.try_list_object_basenames = AsyncMock(
+            return_value=[f"{CYCLE}_f003_isotherms"]
+        )
+        strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
+
+        result = await strategy.list_layers_bulk(
+            "geopotential-500hpa", CYCLE, ["f000", "f003"]
+        )
+
+        assert result == {"f000": ["heights"], "f003": ["isotherms"]}
+
+    @pytest.mark.asyncio
+    async def test_a_wholly_cold_cycle_costs_one_list_not_one_per_step(self):
+        redis, s3 = _redis_with_listing_cache(), _s3()
+        redis.get_gfs_layers_bulk = AsyncMock(return_value={})
+        s3.try_list_object_basenames = AsyncMock(
+            return_value=[f"{CYCLE}_f{h:03d}_heights" for h in range(0, 145, 3)]
+        )
+        strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
+        steps = [f"f{h:03d}" for h in range(0, 145, 3)]
+
+        result = await strategy.list_layers_bulk("geopotential-500hpa", CYCLE, steps)
+
+        assert len(result) == len(steps)
+        assert result["f144"] == ["heights"]
+        # 49 steps, one LIST — the cycle-wide map covers all of them.
+        assert s3.try_list_object_basenames.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_no_steps_touches_nothing(self):
+        redis, s3 = _redis(), _s3()
+        strategy = GfsFullSyncStrategy(redis, s3, 10, 10, 10)
+
+        assert await strategy.list_layers_bulk("geopotential-500hpa", CYCLE, []) == {}
+        s3.try_list_object_basenames.assert_not_awaited()

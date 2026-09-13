@@ -87,6 +87,7 @@ def mock_redis_client():
     client.add_wrf_index = AsyncMock()
     client.get_wrf_steps = AsyncMock(return_value=[])
     client.get_wrf_layers = AsyncMock(return_value=[])
+    client.get_wrf_layers_bulk = AsyncMock(return_value={})
     client.add_wrf_layers = AsyncMock()
     client.store_wrf_geojson = AsyncMock()
     client.prune_wrf_inits = AsyncMock(return_value=0)

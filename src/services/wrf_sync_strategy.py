@@ -2,12 +2,18 @@
 
 import asyncio
 import json
-from typing import List, Optional, Protocol
+from typing import Dict, List, Optional, Protocol
 
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 
 WRF_S3_PREFIX = "tiles/wrf-arg4k"
+
+# Cap on the per-step S3 layer discovery a cold init run fans out. The S3
+# client has its own semaphore, but each miss also touches Redis on the way in
+# and out, so the fan-out has to be bounded here too or a cold listing simply
+# moves the connection storm from SMEMBERS to the cache reads around it.
+_LAYER_DISCOVERY_CONCURRENCY = 8
 
 
 class WrfSyncStrategy(Protocol):
@@ -48,6 +54,11 @@ class WrfSyncStrategy(Protocol):
 
     async def list_layers(self, product_id: str, init_tag: str, fxxx: str) -> List[str]:
         """List GeoJSON layers available for a step, sorted ascending."""
+
+    async def list_layers_bulk(
+        self, product_id: str, init_tag: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Map `fxxx -> [layer]` for many steps, bounded regardless of count."""
 
 
 class WrfFullSyncStrategy:
@@ -149,6 +160,26 @@ class WrfFullSyncStrategy:
         if self._fallback is not None:
             return await self._fallback.list_layers(product_id, init_tag, fxxx)
         return []
+
+    async def list_layers_bulk(
+        self, product_id: str, init_tag: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """One pipelined index read, then S3 discovery only for what missed.
+
+        The warm case — the sync loop has indexed the run — is a single round
+        trip for the whole init run. Only steps the index has nothing for cost
+        an S3 LIST, and only those are handed to the fallback.
+        """
+        by_step = await self._redis.get_wrf_layers_bulk(product_id, init_tag, steps)
+        missing = [fxxx for fxxx in steps if not by_step.get(fxxx)]
+        if not missing or self._fallback is None:
+            return by_step
+
+        discovered = await self._fallback.list_layers_bulk(
+            product_id, init_tag, missing
+        )
+        by_step.update(discovered)
+        return by_step
 
 
 class WrfOnDemandStrategy:
@@ -295,3 +326,23 @@ class WrfOnDemandStrategy:
             cache_key, json.dumps(layers).encode(), self._listing_ttl
         )
         return layers
+
+    async def list_layers_bulk(
+        self, product_id: str, init_tag: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Discover layers for many steps, at most N in flight at a time.
+
+        There is no cycle-wide listing to lean on here — WRF nests overlays one
+        directory per step — so this stays a per-step fan-out, just a bounded
+        one. Discovery is the cold path; the warm path never reaches it.
+        """
+        if not steps:
+            return {}
+        semaphore = asyncio.Semaphore(_LAYER_DISCOVERY_CONCURRENCY)
+
+        async def discover(fxxx: str) -> List[str]:
+            async with semaphore:
+                return await self.list_layers(product_id, init_tag, fxxx)
+
+        results = await asyncio.gather(*(discover(fxxx) for fxxx in steps))
+        return dict(zip(steps, results))
