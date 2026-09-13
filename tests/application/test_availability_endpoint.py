@@ -23,7 +23,7 @@ def service():
     with patch("routes.availability.product_availability_service") as mock:
         mock.snapshot = AsyncMock(
             return_value=ProductAvailabilitySnapshot(
-                {"radar-sinarame/RMA1/dbzh/elev0": True, "gfs/x": False},
+                ["gfs/x", "radar-sinarame/RMA1/dbzh/elev0"],
                 ["gfs", "radar-sinarame"],
             )
         )
@@ -41,10 +41,7 @@ def test_availability_is_not_swallowed_by_the_satellite_catch_all(app_client, se
 def test_the_snapshot_is_returned_verbatim(app_client, service):
     body = app_client.get(URL).json()
 
-    assert body["products"] == {
-        "radar-sinarame/RMA1/dbzh/elev0": True,
-        "gfs/x": False,
-    }
+    assert body["available"] == ["gfs/x", "radar-sinarame/RMA1/dbzh/elev0"]
     assert body["domains"] == ["gfs", "radar-sinarame"]
 
 
@@ -63,9 +60,7 @@ def test_an_unchanged_snapshot_revalidates_to_304(app_client, service):
 def test_a_changed_snapshot_gets_a_new_etag(app_client, service):
     etag = app_client.get(URL).headers["etag"]
     service.snapshot = AsyncMock(
-        return_value=ProductAvailabilitySnapshot(
-            {"radar-sinarame/RMA1/dbzh/elev0": False}, ["radar-sinarame"]
-        )
+        return_value=ProductAvailabilitySnapshot([], ["radar-sinarame"])
     )
 
     response = app_client.get(URL, headers={"If-None-Match": etag})

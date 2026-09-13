@@ -46,6 +46,9 @@ class WrfSyncStrategy(Protocol):
     ) -> Optional[bytes]:
         """Get a rasterized WRF wind-barb WebP tile for (z, x, y)."""
 
+    async def list_products(self) -> List[str]:
+        """List available WRF product ids, sorted."""
+
     async def list_init_runs(self, product_id: str) -> List[str]:
         """List available initialization run tags, sorted descending."""
 
@@ -136,6 +139,14 @@ class WrfFullSyncStrategy:
             return None
         s3_key = S3Client.build_wrf_barb_tile_key(product_id, init_tag, fxxx, z, x, y)
         return await self._s3.download_tile(s3_key)
+
+    async def list_products(self) -> List[str]:
+        products = await self._redis.get_wrf_products()
+        if products:
+            return products
+        if self._fallback is not None:
+            return await self._fallback.list_products()
+        return []
 
     async def list_init_runs(self, product_id: str) -> List[str]:
         init_runs = await self._redis.get_wrf_init_runs(product_id)
@@ -262,6 +273,27 @@ class WrfOnDemandStrategy:
             return None
         s3_key = S3Client.build_wrf_barb_tile_key(product_id, init_tag, fxxx, z, x, y)
         return await self._s3.download_tile(s3_key)
+
+    async def list_products(self) -> List[str]:
+        """Products are the first level under the WRF tiles root in S3."""
+        cache_key = "cache:listing:wrf:products"
+        cached = await self._redis.get_cached_listing(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        if not self._s3:
+            return []
+
+        subdirs = await self._s3.try_get_subdirectories(WRF_S3_PREFIX)
+        products = sorted(
+            name
+            for name in (prefix.rstrip("/").split("/")[-1] for prefix in subdirs)
+            if name
+        )
+        await self._redis.cache_listing(
+            cache_key, json.dumps(products).encode(), self._listing_ttl
+        )
+        return products
 
     async def list_init_runs(self, product_id: str) -> List[str]:
         cache_key = f"cache:listing:wrf:{product_id}:init_runs"

@@ -301,17 +301,27 @@ async def configure_strategies(
     )
 
 
-def configure_product_availability(client_redis: RedisClient) -> None:
+def configure_product_availability(
+    radar_strategy,
+    satellite_strategy,
+    ecmwf_tp_strategy,
+    wrf_strategy,
+    gfs_strategy,
+) -> None:
     """Register every domain that can report whether its products have data.
 
-    Satellite and GFS declare their products statically; radar and WRF are
-    enumerated from their Redis index, which is why only those two need the
-    index to have been written at least once before they can answer.
+    Deliberately the same strategy objects the routes serve from, so the bundled
+    snapshot and an individual probe cannot disagree — see the module docstring
+    of `product_availability_service`.
     """
     product_availability_service.configure(
         build_contributors(
-            client_redis,
+            radar_strategy=radar_strategy,
+            satellite_strategy=satellite_strategy,
             satellite_channel_dirs=list(satellite_service.CHANNEL_DIR_MAPPING.values()),
+            ecmwf_tp_strategy=ecmwf_tp_strategy,
+            wrf_strategy=wrf_strategy,
+            gfs_strategy=gfs_strategy,
             gfs_product_ids=gfs_product_ids(),
         ),
         ttl_seconds=settings.product_availability_ttl_seconds,
@@ -775,7 +785,9 @@ async def lifespan(_app: FastAPI):
     point_value_service.set_strategy(point_value_strategy)
     wrf_service.set_strategy(wrf_strategy)
     gfs_service.set_strategy(gfs_strategy)
-    configure_product_availability(redis_client)
+    configure_product_availability(
+        radar_strategy, sat_strategy, ecmwf_tp_strategy, wrf_strategy, gfs_strategy
+    )
 
     basemap_runtime = await configure_basemap(redis_client)
     weather_stations_runtime = await configure_weather_stations()

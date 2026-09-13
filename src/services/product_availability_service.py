@@ -2,9 +2,20 @@
 
 The frontend greys out products with nothing to show, and it used to learn that
 by probing every product separately: 18 radars x 6 variables alone is 108 GETs,
-re-run on a timer, per client. Every one of those answers comes from an index
-already in Redis, so the whole fleet is a handful of pipelined reads — this
-module gathers them into a single response.
+re-run on a timer, per client. This gathers the same answers into one response.
+
+**Every contributor reads through the same strategy the individual endpoint
+reads through.** That is the whole design. An earlier version read the Redis
+indexes directly and so answered from a different source than the endpoints it
+summarised — which meant it could not be trusted, in either direction: reporting
+emptiness greyed out products whose data was in S3 waiting for a sync, and
+refusing to report emptiness left the client probing all 125 anyway. Going
+through the strategies makes the snapshot *the probes, batched*: identical
+answers by construction, so absence means empty and the client asks nothing.
+
+The strategies are Redis-first with an S3 fallback, so a warm sweep is index
+reads and a cold one does the S3 walk exactly once — server-side, memoised, and
+shared by every client, instead of once per client per product.
 
 Contributors are registered, not branched on: a new data domain implements
 `AvailabilityContributor` and is passed in at startup.
@@ -13,9 +24,16 @@ Contributors are registered, not branched on: a new data domain implements
 import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol, Sequence, Tuple
-
-from clients.redis_client import RedisClient
+from typing import (
+    Awaitable,
+    Callable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+    TypeVar,
+)
 
 RADAR_DOMAIN = "radar-sinarame"
 SATELLITE_DOMAIN = "goes19"
@@ -23,99 +41,120 @@ ECMWF_DOMAIN = "ecmwf-ifs"
 WRF_DOMAIN = "wrf-arg4k"
 GFS_DOMAIN = "gfs"
 
+# Cap on concurrent listing lookups inside one contributor. The strategies hit
+# Redis when warm and S3 when cold; either way an 18-radar fleet must not put
+# hundreds of calls in flight at once against a pool every domain shares.
+_LOOKUP_CONCURRENCY = 8
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+async def _map_bounded(
+    items: Sequence[T], call: Callable[[T], Awaitable[R]]
+) -> List[R]:
+    """Apply an async lookup to every item, at most N in flight."""
+    if not items:
+        return []
+    semaphore = asyncio.Semaphore(_LOOKUP_CONCURRENCY)
+
+    async def run(item: T) -> R:
+        async with semaphore:
+            return await call(item)
+
+    return list(await asyncio.gather(*(run(item) for item in items)))
+
 
 class AvailabilityContributor(Protocol):
     """One data domain's answer to "which of my products have data?"."""
 
     @property
     def domain(self) -> str:
-        """Leading path segment shared by every key this contributor emits."""
+        """Leading path segment shared by every path this contributor emits."""
 
-    async def availability(self) -> Dict[str, bool]:
-        """Map of product path -> has data. Keys are the product's API path."""
+    async def available(self) -> List[str]:
+        """Product API paths that have data, read exactly as the endpoint reads."""
 
 
 class RadarAvailability:
-    """Radar, walked from the index rather than a static fleet list.
+    """The radar fleet, enumerated the way `/products/radar-sinarame/...` is.
 
-    Three pipelined round trips (variables, elevations, tileset counts) for the
-    whole fleet, whatever its size — the index is the source of truth for which
-    combinations exist, so a decommissioned radar drops out on its own.
+    Four levels — radars, variables, elevations, tilesets — each Redis-first
+    with an S3 fallback, so the answer matches an individual probe whether the
+    index is warm, cold, or half-written mid-sync.
     """
 
     domain = RADAR_DOMAIN
 
-    def __init__(self, redis_client: RedisClient) -> None:
-        self._redis = redis_client
+    def __init__(self, strategy) -> None:
+        self._strategy = strategy
 
-    async def availability(self) -> Dict[str, bool]:
-        """Every indexed radar/variable/elevation, by whether it has tilesets."""
+    async def available(self) -> List[str]:
+        """Radar/variable/elevation combinations that have at least one tileset."""
         combos = await self._combinations()
-        if not combos:
-            return {}
-        counts = await self._redis.count_radar_tilesets_bulk(combos)
-        return {
-            f"{self.domain}/{radar}/{variable}/{elevation}": counts.get(combo, 0) > 0
-            for combo in combos
-            for radar, variable, elevation in [combo]
-        }
+        tilesets = await _map_bounded(
+            combos, lambda c: self._strategy.list_tilesets(*c)
+        )
+        return [
+            f"{self.domain}/{radar}/{variable}/{elevation}"
+            for (radar, variable, elevation), found in zip(combos, tilesets)
+            if found
+        ]
 
     async def _combinations(self) -> List[Tuple[str, str, str]]:
-        """Every indexed (radar, variable, elevation), two round trips deep."""
-        radars = await self._redis.get_radar_radars()
-        if not radars:
-            return []
-        by_radar = await self._redis.get_radar_variables_bulk(radars)
-        pairs = [(r, v) for r in radars for v in by_radar.get(r, [])]
-        by_pair = await self._redis.get_radar_elevations_bulk(pairs)
-        return [(r, v, e) for (r, v) in pairs for e in by_pair.get((r, v), [])]
+        """Every (radar, variable, elevation) the listing endpoints would serve."""
+        radars = await self._strategy.list_radars()
+        variables = await _map_bounded(radars, self._strategy.list_variables)
+        pairs = [(r, v) for r, vs in zip(radars, variables) for v in vs]
+        elevations = await _map_bounded(
+            pairs, lambda p: self._strategy.list_elevations(*p)
+        )
+        return [(r, v, e) for (r, v), es in zip(pairs, elevations) for e in es]
 
 
 class SatelliteAvailability:
-    """GOES-19 ABI + GLM, whose channel catalogue is static and tiny."""
+    """GOES-19 ABI + GLM. The channel catalogue is static; the data is not."""
 
     domain = SATELLITE_DOMAIN
 
-    def __init__(self, redis_client: RedisClient, channel_dirs: Sequence[str]) -> None:
-        self._redis = redis_client
+    def __init__(self, strategy, channel_dirs: Sequence[str]) -> None:
+        self._strategy = strategy
         # The channel dir IS the product path (`goes19/abi/c13`), so no mapping.
         self._channel_dirs = list(channel_dirs)
 
-    async def availability(self) -> Dict[str, bool]:
-        """Each catalogued channel, by whether its index holds tilesets."""
-        counts = await self._redis.count_satellite_tilesets_bulk(self._channel_dirs)
-        return {d: counts.get(d, 0) > 0 for d in self._channel_dirs}
+    async def available(self) -> List[str]:
+        """Catalogued channels with at least one tileset."""
+        tilesets = await _map_bounded(self._channel_dirs, self._strategy.get_tilesets)
+        return [d for d, found in zip(self._channel_dirs, tilesets) if found]
 
 
 class EcmwfTpAvailability:
-    """ECMWF total precipitation — a single product, so a single read."""
+    """ECMWF total precipitation — a single product, so a single lookup."""
 
     domain = ECMWF_DOMAIN
 
-    def __init__(self, redis_client: RedisClient) -> None:
-        self._redis = redis_client
+    def __init__(self, strategy) -> None:
+        self._strategy = strategy
 
-    async def availability(self) -> Dict[str, bool]:
-        """Total precipitation, by whether any forecast is indexed."""
-        forecasts = await self._redis.get_ecmwf_tp_forecasts()
-        return {f"{self.domain}/total-precipitation": bool(forecasts)}
+    async def available(self) -> List[str]:
+        """Total precipitation, when it has at least one forecast."""
+        forecasts = await self._strategy.list_forecasts()
+        return [f"{self.domain}/total-precipitation"] if forecasts else []
 
 
 class WrfAvailability:
-    """WRF, enumerated from the index because its products come from S3."""
+    """WRF, whose products are discovered rather than declared."""
 
     domain = WRF_DOMAIN
 
-    def __init__(self, redis_client: RedisClient) -> None:
-        self._redis = redis_client
+    def __init__(self, strategy) -> None:
+        self._strategy = strategy
 
-    async def availability(self) -> Dict[str, bool]:
-        """Each indexed WRF product, by whether it has init runs."""
-        products = await self._redis.get_wrf_products()
-        if not products:
-            return {}
-        counts = await self._redis.count_wrf_init_runs_bulk(products)
-        return {f"{self.domain}/{p}": counts.get(p, 0) > 0 for p in products}
+    async def available(self) -> List[str]:
+        """WRF products with at least one initialization run."""
+        products = await self._strategy.list_products()
+        init_runs = await _map_bounded(products, self._strategy.list_init_runs)
+        return [f"{self.domain}/{p}" for p, found in zip(products, init_runs) if found]
 
 
 class GfsAvailability:
@@ -123,21 +162,30 @@ class GfsAvailability:
 
     domain = GFS_DOMAIN
 
-    def __init__(self, redis_client: RedisClient, product_ids: Sequence[str]) -> None:
-        self._redis = redis_client
+    def __init__(self, strategy, product_ids: Sequence[str]) -> None:
+        self._strategy = strategy
         self._product_ids = list(product_ids)
 
-    async def availability(self) -> Dict[str, bool]:
-        """Each catalogued GFS product, by whether it has cycles."""
-        counts = await self._redis.count_gfs_cycles_bulk(self._product_ids)
-        return {f"{self.domain}/{p}": counts.get(p, 0) > 0 for p in self._product_ids}
+    async def available(self) -> List[str]:
+        """Catalogued GFS products with at least one cycle."""
+        cycles = await _map_bounded(self._product_ids, self._strategy.list_cycles)
+        return [
+            f"{self.domain}/{p}" for p, found in zip(self._product_ids, cycles) if found
+        ]
 
 
 @dataclass(frozen=True, slots=True)
 class ProductAvailabilitySnapshot:
-    """One gathered answer: the product map plus the domains behind it."""
+    """The products that have data, and which domains reported any.
 
-    products: Dict[str, bool] = field(default_factory=dict)
+    `available` is complete: it is what the individual endpoints would say, so
+    a product missing from it has no data and needs no probe.
+
+    `domains` is diagnostic — which domains contributed at least one product.
+    Useful for spotting a domain whose backing store is unreachable.
+    """
+
+    available: List[str] = field(default_factory=list)
     domains: List[str] = field(default_factory=list)
 
 
@@ -146,10 +194,9 @@ class ProductAvailabilityService:
 
     The memo is what makes this scale with clients rather than with clients x
     products: a room full of forecasters refreshing at the same moment collapses
-    onto one walk of the indexes. It is deliberately short — availability
-    changes when a sync cycle lands, and a few seconds of staleness on a greyed
-    row costs nothing, while the ETag means an unchanged snapshot is a 304
-    anyway.
+    onto one sweep. It is deliberately short — availability changes when a sync
+    cycle lands, and a few seconds of staleness on a greyed row costs nothing,
+    while the ETag means an unchanged snapshot is a 304 anyway.
     """
 
     def __init__(
@@ -184,23 +231,16 @@ class ProductAvailabilityService:
         return self._cached
 
     async def _gather(self) -> ProductAvailabilitySnapshot:
-        """Ask every contributor, in parallel — there are a handful of them.
-
-        A domain that returns nothing is reported as *not covered* rather than
-        as a set of empty products. The distinction matters to the client: an
-        index the sync loop has not populated yet means "unknown", and greying
-        every WRF product out because the service restarted a minute ago would
-        be a worse answer than saying nothing.
-        """
-        results = await asyncio.gather(*(c.availability() for c in self._contributors))
-        products: Dict[str, bool] = {}
+        """Ask every contributor, in parallel — there are a handful of them."""
+        results = await asyncio.gather(*(c.available() for c in self._contributors))
+        available: List[str] = []
         domains: List[str] = []
-        for contributor, result in zip(self._contributors, results):
-            if not result:
+        for contributor, paths in zip(self._contributors, results):
+            if not paths:
                 continue
-            products.update(result)
+            available.extend(paths)
             domains.append(contributor.domain)
-        return ProductAvailabilitySnapshot(products, sorted(domains))
+        return ProductAvailabilitySnapshot(sorted(available), sorted(domains))
 
     def configure(
         self, contributors: Sequence[AvailabilityContributor], ttl_seconds: float
@@ -213,17 +253,22 @@ class ProductAvailabilityService:
 
 
 def build_contributors(
-    redis_client: RedisClient,
+    *,
+    radar_strategy,
+    satellite_strategy,
     satellite_channel_dirs: Sequence[str],
+    ecmwf_tp_strategy,
+    wrf_strategy,
+    gfs_strategy,
     gfs_product_ids: Sequence[str],
 ) -> List[AvailabilityContributor]:
     """Every domain that can answer for its products, in a stable order."""
     return [
-        RadarAvailability(redis_client),
-        SatelliteAvailability(redis_client, satellite_channel_dirs),
-        EcmwfTpAvailability(redis_client),
-        WrfAvailability(redis_client),
-        GfsAvailability(redis_client, gfs_product_ids),
+        RadarAvailability(radar_strategy),
+        SatelliteAvailability(satellite_strategy, satellite_channel_dirs),
+        EcmwfTpAvailability(ecmwf_tp_strategy),
+        WrfAvailability(wrf_strategy),
+        GfsAvailability(gfs_strategy, gfs_product_ids),
     ]
 
 

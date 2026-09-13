@@ -14,7 +14,7 @@ and provides a shared cache for radar tiles.
 
 import asyncio
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
@@ -111,41 +111,6 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
             raise RuntimeError("Redis not connected")
 
         return self._redis
-
-    async def _zcard_bulk(self, keys: List[str]) -> List[int]:
-        """Cardinality of many sorted sets in one pipelined round trip.
-
-        The availability snapshot only asks "does this product have anything",
-        so ZCARD is the whole answer — reading the members back to count them
-        would ship the entire index over the wire for a yes/no, and a radar
-        fleet is ~110 of these. A key left as a plain set by the set->zset
-        migration answers WRONGTYPE; count it as empty rather than failing the
-        whole snapshot, since the domain readers already self-heal it.
-        """
-        if not keys:
-            return []
-        pipe = await self._conn.pipeline(transaction=False)
-        for key in keys:
-            pipe.zcard(key)
-        replies = await pipe.execute(raise_on_error=False)
-        return [reply if isinstance(reply, int) else 0 for reply in replies]
-
-    async def count_satellite_tilesets_bulk(
-        self, channel_dirs: List[str]
-    ) -> Dict[str, int]:
-        """Tileset counts for many satellite channels, in one round trip."""
-        counts = await self._zcard_bulk([f"idx:sat:{d}" for d in channel_dirs])
-        return dict(zip(channel_dirs, counts))
-
-    async def count_wrf_init_runs_bulk(self, product_ids: List[str]) -> Dict[str, int]:
-        """Init-run counts for many WRF products, in one round trip."""
-        counts = await self._zcard_bulk([f"idx:wrf:{p}:init_runs" for p in product_ids])
-        return dict(zip(product_ids, counts))
-
-    async def count_gfs_cycles_bulk(self, product_ids: List[str]) -> Dict[str, int]:
-        """Cycle counts for many GFS products, in one round trip."""
-        counts = await self._zcard_bulk([f"idx:gfs:{p}:cycles" for p in product_ids])
-        return dict(zip(product_ids, counts))
 
     # ============== Satellite Tile Operations ==============
 
@@ -328,51 +293,12 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         )
         return sorted(m.decode() for m in members)
 
-    async def get_radar_variables_bulk(
-        self, radar_ids: List[str]
-    ) -> Dict[str, List[str]]:
-        """Variables for many radars in one pipelined round trip."""
-        if not radar_ids:
-            return {}
-        pipe = await self._conn.pipeline(transaction=False)
-        for radar_id in radar_ids:
-            pipe.smembers(self._radar_variables_key(radar_id))
-        replies = await pipe.execute()
-        return {
-            radar_id: sorted(m.decode() for m in members)
-            for radar_id, members in zip(radar_ids, replies)
-        }
-
     async def get_radar_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """Get all elevation IDs for a radar/variable."""
         members = await self._conn.smembers(  # type: ignore[misc]
             self._radar_elevations_key(radar_id, variable_id)
         )
         return sorted(m.decode() for m in members)
-
-    async def get_radar_elevations_bulk(
-        self, pairs: List[Tuple[str, str]]
-    ) -> Dict[Tuple[str, str], List[str]]:
-        """Elevations for many radar/variable pairs in one pipelined round trip."""
-        if not pairs:
-            return {}
-        pipe = await self._conn.pipeline(transaction=False)
-        for radar_id, variable_id in pairs:
-            pipe.smembers(self._radar_elevations_key(radar_id, variable_id))
-        replies = await pipe.execute()
-        return {
-            pair: sorted(m.decode() for m in members)
-            for pair, members in zip(pairs, replies)
-        }
-
-    async def count_radar_tilesets_bulk(
-        self, combos: List[Tuple[str, str, str]]
-    ) -> Dict[Tuple[str, str, str], int]:
-        """Tileset counts for many radar/variable/elevation combos, in one trip."""
-        counts = await self._zcard_bulk(
-            [self._radar_tilesets_key(r, v, e) for r, v, e in combos]
-        )
-        return dict(zip(combos, counts))
 
     async def get_radar_tilesets(
         self, radar_id: str, variable_id: str, elevation_id: str

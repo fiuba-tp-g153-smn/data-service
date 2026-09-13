@@ -18,10 +18,14 @@ router = APIRouter(prefix="/products", tags=["Availability"])
     response_model=ProductAvailabilityResponse,
 )
 async def get_product_availability(request: Request) -> Response:
-    """Report which products have data, so a client asks once instead of ~125 times."""
+    """Report which products have data, so a client asks once instead of ~125 times.
+
+    Positive assertions only: a product absent from `available` has not been
+    declared empty, and the caller should fall back to its own endpoint.
+    """
     snapshot = await product_availability_service.snapshot()
     payload = ProductAvailabilityResponse(
-        products=snapshot.products, domains=snapshot.domains
+        available=snapshot.available, domains=snapshot.domains
     ).model_dump()
     return json_listing_response(
         payload, request.headers.get("if-none-match"), settings.cache_control_config

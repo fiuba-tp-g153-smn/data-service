@@ -1,12 +1,16 @@
 """Unit tests for the bundled product-availability snapshot.
 
-The point of this service is that answering for the whole fleet costs a bounded
-number of round trips rather than one per product, so the call counts are as
-much of the contract as the values.
+Two properties matter, and they pull against each other:
+  * the snapshot must agree with an individual probe in every state — cold
+    index, half-synced, warm — because it is what greys rows out;
+  * answering for ~125 products must cost a bounded number of lookups.
+
+Reading through the same strategies the endpoints read through is what buys the
+first; `_LOOKUP_CONCURRENCY` is what bounds the second.
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from typing import Dict, List
 
 import pytest
 
@@ -17,6 +21,7 @@ from services.product_availability_service import (
     RadarAvailability,
     SatelliteAvailability,
     WrfAvailability,
+    _LOOKUP_CONCURRENCY,
     build_contributors,
 )
 
@@ -24,146 +29,183 @@ CHANNEL_DIRS = ["goes19/abi/c13", "goes19/glm/fed"]
 GFS_IDS = ["mean-sea-level-pressure", "geopotential-500hpa"]
 
 
-def _redis() -> AsyncMock:
-    redis = AsyncMock()
-    redis.get_radar_radars = AsyncMock(return_value=[])
-    redis.get_radar_variables_bulk = AsyncMock(return_value={})
-    redis.get_radar_elevations_bulk = AsyncMock(return_value={})
-    redis.count_radar_tilesets_bulk = AsyncMock(return_value={})
-    redis.count_satellite_tilesets_bulk = AsyncMock(return_value={})
-    redis.get_ecmwf_tp_forecasts = AsyncMock(return_value=[])
-    redis.get_wrf_products = AsyncMock(return_value=[])
-    redis.count_wrf_init_runs_bulk = AsyncMock(return_value={})
-    redis.count_gfs_cycles_bulk = AsyncMock(return_value={})
-    return redis
+class FakeRadarStrategy:
+    """Radar strategy double: whatever it returns IS what the endpoint returns."""
+
+    def __init__(self, fleet: Dict[str, Dict[str, Dict[str, List[str]]]]):
+        self._fleet = fleet
+        self.inflight = 0
+        self.peak = 0
+
+    async def _tracked(self, value):
+        self.inflight += 1
+        self.peak = max(self.peak, self.inflight)
+        try:
+            await asyncio.sleep(0)
+            return value
+        finally:
+            self.inflight -= 1
+
+    async def list_radars(self) -> List[str]:
+        return sorted(self._fleet)
+
+    async def list_variables(self, radar_id: str) -> List[str]:
+        return await self._tracked(sorted(self._fleet.get(radar_id, {})))
+
+    async def list_elevations(self, radar_id: str, variable_id: str) -> List[str]:
+        return await self._tracked(
+            sorted(self._fleet.get(radar_id, {}).get(variable_id, {}))
+        )
+
+    async def list_tilesets(self, radar_id, variable_id, elevation_id) -> List[str]:
+        return await self._tracked(
+            list(
+                self._fleet.get(radar_id, {}).get(variable_id, {}).get(elevation_id, [])
+            )
+        )
+
+
+class FakeListStrategy:
+    """Stands in for the satellite / ECMWF / WRF / GFS listing strategies."""
+
+    def __init__(self, entries: Dict[str, List[str]]):
+        self._entries = entries
+        self.calls: List[str] = []
+
+    async def get_tilesets(self, channel_dir: str) -> List[str]:
+        self.calls.append(channel_dir)
+        return list(self._entries.get(channel_dir, []))
+
+    async def list_forecasts(self) -> List[str]:
+        return list(self._entries.get("forecasts", []))
+
+    async def list_products(self) -> List[str]:
+        return sorted(self._entries)
+
+    async def list_init_runs(self, product_id: str) -> List[str]:
+        return list(self._entries.get(product_id, []))
+
+    async def list_cycles(self, product_id: str) -> List[str]:
+        return list(self._entries.get(product_id, []))
 
 
 class TestRadarAvailability:
     @pytest.mark.asyncio
-    async def test_the_whole_fleet_costs_three_round_trips(self):
-        """18 radars x 6 variables is ~108 products; it must not be ~108 calls."""
-        redis = _redis()
-        radars = [f"RMA{n}" for n in range(1, 19)]
-        variables = ["dbzh", "dbzh-450km", "kdp", "vrad", "rhohv", "zdr"]
-        redis.get_radar_radars = AsyncMock(return_value=radars)
-        redis.get_radar_variables_bulk = AsyncMock(
-            return_value={r: list(variables) for r in radars}
-        )
-        redis.get_radar_elevations_bulk = AsyncMock(
-            side_effect=lambda pairs: {p: ["elev0"] for p in pairs}
-        )
-        redis.count_radar_tilesets_bulk = AsyncMock(
-            side_effect=lambda combos: {c: 1 for c in combos}
+    async def test_reports_only_combinations_that_have_tilesets(self):
+        strategy = FakeRadarStrategy(
+            {
+                "RMA1": {"dbzh": {"elev0": ["ts1"]}, "kdp": {"elev0": []}},
+                "RMA2": {"dbzh": {"elev0": ["ts1", "ts2"]}},
+            }
         )
 
-        result = await RadarAvailability(redis).availability()
+        result = await RadarAvailability(strategy).available()
 
-        assert len(result) == 18 * 6
-        assert result["radar-sinarame/RMA2/dbzh/elev0"] is True
-        # variables, elevations, counts — one bulk call each, whatever the size.
-        assert redis.get_radar_variables_bulk.await_count == 1
-        assert redis.get_radar_elevations_bulk.await_count == 1
-        assert redis.count_radar_tilesets_bulk.await_count == 1
+        assert result == [
+            "radar-sinarame/RMA1/dbzh/elev0",
+            "radar-sinarame/RMA2/dbzh/elev0",
+        ]
 
     @pytest.mark.asyncio
-    async def test_a_combination_with_no_tilesets_reports_false(self):
-        redis = _redis()
-        redis.get_radar_radars = AsyncMock(return_value=["RMA1"])
-        redis.get_radar_variables_bulk = AsyncMock(return_value={"RMA1": ["dbzh"]})
-        redis.get_radar_elevations_bulk = AsyncMock(
-            return_value={("RMA1", "dbzh"): ["elev0"]}
-        )
-        redis.count_radar_tilesets_bulk = AsyncMock(
-            return_value={("RMA1", "dbzh", "elev0"): 0}
-        )
-
-        result = await RadarAvailability(redis).availability()
-
-        assert result == {"radar-sinarame/RMA1/dbzh/elev0": False}
+    async def test_an_empty_fleet_reports_nothing(self):
+        assert await RadarAvailability(FakeRadarStrategy({})).available() == []
 
     @pytest.mark.asyncio
-    async def test_an_empty_index_asks_nothing_further(self):
-        redis = _redis()
+    async def test_the_whole_fleet_stays_within_the_concurrency_bound(self):
+        """18 radars x 6 variables x 3 elevations must not go in flight at once."""
+        fleet = {
+            f"RMA{n}": {
+                v: {f"elev{e}": ["ts"] for e in range(3)}
+                for v in ("dbzh", "dbzh-450km", "kdp", "vrad", "rhohv", "zdr")
+            }
+            for n in range(1, 19)
+        }
+        strategy = FakeRadarStrategy(fleet)
 
-        assert await RadarAvailability(redis).availability() == {}
-        redis.get_radar_variables_bulk.assert_not_awaited()
-        redis.count_radar_tilesets_bulk.assert_not_awaited()
+        result = await RadarAvailability(strategy).available()
+
+        assert len(result) == 18 * 6 * 3
+        assert strategy.peak <= _LOOKUP_CONCURRENCY
 
 
-class TestStaticCatalogueDomains:
+class TestOtherDomains:
     @pytest.mark.asyncio
     async def test_satellite_keys_are_the_product_paths(self):
-        redis = _redis()
-        redis.count_satellite_tilesets_bulk = AsyncMock(
-            return_value={"goes19/abi/c13": 4, "goes19/glm/fed": 0}
-        )
+        strategy = FakeListStrategy({"goes19/abi/c13": ["ts1"], "goes19/glm/fed": []})
 
-        result = await SatelliteAvailability(redis, CHANNEL_DIRS).availability()
+        result = await SatelliteAvailability(strategy, CHANNEL_DIRS).available()
 
-        assert result == {"goes19/abi/c13": True, "goes19/glm/fed": False}
+        assert result == ["goes19/abi/c13"]
 
     @pytest.mark.asyncio
-    async def test_ecmwf_reports_its_single_product(self):
-        redis = _redis()
-        redis.get_ecmwf_tp_forecasts = AsyncMock(return_value=["20260913T0000Z"])
-
-        result = await EcmwfTpAvailability(redis).availability()
-
-        assert result == {"ecmwf-ifs/total-precipitation": True}
+    async def test_ecmwf_reports_its_single_product_when_it_has_forecasts(self):
+        assert await EcmwfTpAvailability(
+            FakeListStrategy({"forecasts": ["20260913T0000Z"]})
+        ).available() == ["ecmwf-ifs/total-precipitation"]
+        assert await EcmwfTpAvailability(FakeListStrategy({})).available() == []
 
     @pytest.mark.asyncio
-    async def test_gfs_reports_every_catalogued_product(self):
-        redis = _redis()
-        redis.count_gfs_cycles_bulk = AsyncMock(
-            return_value={"mean-sea-level-pressure": 2, "geopotential-500hpa": 0}
-        )
+    async def test_wrf_products_are_discovered_then_checked(self):
+        strategy = FakeListStrategy({"granizo": ["20260913_060000"], "mucape": []})
 
-        result = await GfsAvailability(redis, GFS_IDS).availability()
+        result = await WrfAvailability(strategy).available()
 
-        assert result == {
-            "gfs/mean-sea-level-pressure": True,
-            "gfs/geopotential-500hpa": False,
-        }
-
-
-class TestWrfAvailability:
-    @pytest.mark.asyncio
-    async def test_products_come_from_the_index(self):
-        redis = _redis()
-        redis.get_wrf_products = AsyncMock(return_value=["granizo", "mucape"])
-        redis.count_wrf_init_runs_bulk = AsyncMock(
-            return_value={"granizo": 3, "mucape": 0}
-        )
-
-        result = await WrfAvailability(redis).availability()
-
-        assert result == {"wrf-arg4k/granizo": True, "wrf-arg4k/mucape": False}
+        assert result == ["wrf-arg4k/granizo"]
 
     @pytest.mark.asyncio
-    async def test_an_unwritten_index_reports_nothing_rather_than_all_empty(self):
-        """Before the first sync, "no answer" beats "every product is empty".
+    async def test_gfs_reports_catalogued_products_with_cycles(self):
+        strategy = FakeListStrategy({"mean-sea-level-pressure": ["c1"]})
 
-        An empty map leaves the domain out of `domains`, which the client reads
-        as unknown — greying every WRF row because the service just started
-        would be a worse answer than saying nothing.
-        """
-        redis = _redis()
+        result = await GfsAvailability(strategy, GFS_IDS).available()
 
-        assert await WrfAvailability(redis).availability() == {}
-        redis.count_wrf_init_runs_bulk.assert_not_awaited()
+        assert result == ["gfs/mean-sea-level-pressure"]
+
+
+class TestAgreesWithTheIndividualProbe:
+    """The property the whole design exists to guarantee.
+
+    Two earlier versions read the Redis indexes directly while the endpoints
+    read Redis-then-S3. That second source of truth made the snapshot either a
+    liar (greying out products whose data was in S3 awaiting a sync) or mute
+    (confirming nothing, so the client probed all ~125 anyway). Reading through
+    the same strategy is what makes these agree by construction.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_cold_index_still_reports_what_s3_would_serve(self):
+        """The strategies fall back to S3, so `available` is populated even
+        before the sync loop has written a single index entry."""
+        # This double answers as a cold-Redis strategy does: from S3.
+        strategy = FakeRadarStrategy({"RMA1": {"dbzh": {"elev0": ["from-s3"]}}})
+
+        result = await RadarAvailability(strategy).available()
+
+        assert result == ["radar-sinarame/RMA1/dbzh/elev0"]
+
+    @pytest.mark.asyncio
+    async def test_absence_means_the_probe_would_also_find_nothing(self):
+        """So the client can trust absence and skip the probe entirely."""
+        fleet = {"RMA1": {"dbzh": {"elev0": []}, "kdp": {"elev0": []}}}
+        strategy = FakeRadarStrategy(fleet)
+
+        result = await RadarAvailability(strategy).available()
+
+        assert result == []
+        # Same strategy, same answer: an individual probe finds nothing either.
+        assert await strategy.list_tilesets("RMA1", "dbzh", "elev0") == []
 
 
 class _Contributor:
     """Contributor double that counts how often it is actually consulted."""
 
-    def __init__(self, domain: str, result: dict):
+    def __init__(self, domain: str, result: list):
         self.domain = domain
         self._result = result
         self.calls = 0
 
-    async def availability(self) -> dict:
+    async def available(self) -> list:
         self.calls += 1
-        return dict(self._result)
+        return list(self._result)
 
 
 class TestSnapshotAggregation:
@@ -171,42 +213,24 @@ class TestSnapshotAggregation:
     async def test_every_contributor_is_merged_and_its_domain_listed(self):
         service = ProductAvailabilityService(
             [
-                _Contributor(
-                    "radar-sinarame", {"radar-sinarame/RMA1/dbzh/elev0": True}
-                ),
-                _Contributor("gfs", {"gfs/geopotential-500hpa": False}),
+                _Contributor("radar-sinarame", ["radar-sinarame/RMA1/dbzh/elev0"]),
+                _Contributor("gfs", ["gfs/geopotential-500hpa"]),
             ],
             ttl_seconds=10.0,
         )
 
         snapshot = await service.snapshot()
 
-        assert snapshot.products == {
-            "radar-sinarame/RMA1/dbzh/elev0": True,
-            "gfs/geopotential-500hpa": False,
-        }
+        assert snapshot.available == [
+            "gfs/geopotential-500hpa",
+            "radar-sinarame/RMA1/dbzh/elev0",
+        ]
         assert snapshot.domains == ["gfs", "radar-sinarame"]
 
     @pytest.mark.asyncio
-    async def test_a_silent_domain_is_left_out_of_domains(self):
-        """Absent-from-`domains` is how the client tells unknown from empty."""
-        service = ProductAvailabilityService(
-            [
-                _Contributor("wrf-arg4k", {}),
-                _Contributor("gfs", {"gfs/mean-sea-level-pressure": True}),
-            ],
-            ttl_seconds=10.0,
-        )
-
-        snapshot = await service.snapshot()
-
-        assert snapshot.domains == ["gfs"]
-        assert not [k for k in snapshot.products if k.startswith("wrf-arg4k/")]
-
-    @pytest.mark.asyncio
-    async def test_concurrent_callers_share_one_walk(self):
-        """The memo is the reason this scales with clients, not clients x products."""
-        contributor = _Contributor("gfs", {"gfs/x": True})
+    async def test_concurrent_callers_share_one_sweep(self):
+        """The memo is why this scales with clients, not clients x products."""
+        contributor = _Contributor("gfs", ["gfs/x"])
         service = ProductAvailabilityService([contributor], ttl_seconds=60.0)
 
         await asyncio.gather(*(service.snapshot() for _ in range(25)))
@@ -215,7 +239,7 @@ class TestSnapshotAggregation:
 
     @pytest.mark.asyncio
     async def test_the_memo_expires(self):
-        contributor = _Contributor("gfs", {"gfs/x": True})
+        contributor = _Contributor("gfs", ["gfs/x"])
         service = ProductAvailabilityService([contributor], ttl_seconds=0.0)
 
         await service.snapshot()
@@ -225,20 +249,28 @@ class TestSnapshotAggregation:
 
     @pytest.mark.asyncio
     async def test_reconfiguring_drops_the_memo(self):
-        stale = _Contributor("gfs", {"gfs/x": True})
+        stale = _Contributor("gfs", ["gfs/x"])
         service = ProductAvailabilityService([stale], ttl_seconds=60.0)
         await service.snapshot()
 
-        fresh = _Contributor("wrf-arg4k", {"wrf-arg4k/granizo": True})
+        fresh = _Contributor("wrf-arg4k", ["wrf-arg4k/granizo"])
         service.configure([fresh], ttl_seconds=60.0)
 
-        assert (await service.snapshot()).products == {"wrf-arg4k/granizo": True}
+        assert (await service.snapshot()).available == ["wrf-arg4k/granizo"]
 
 
 class TestContributorRegistry:
     def test_every_probeable_domain_is_registered(self):
         """The frontend greys rows off this list; a missing domain greys wrongly."""
-        contributors = build_contributors(_redis(), CHANNEL_DIRS, GFS_IDS)
+        contributors = build_contributors(
+            radar_strategy=FakeRadarStrategy({}),
+            satellite_strategy=FakeListStrategy({}),
+            satellite_channel_dirs=CHANNEL_DIRS,
+            ecmwf_tp_strategy=FakeListStrategy({}),
+            wrf_strategy=FakeListStrategy({}),
+            gfs_strategy=FakeListStrategy({}),
+            gfs_product_ids=GFS_IDS,
+        )
 
         assert sorted(c.domain for c in contributors) == [
             "ecmwf-ifs",
