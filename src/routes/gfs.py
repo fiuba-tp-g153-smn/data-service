@@ -5,13 +5,9 @@ the same cycle/step shape and differ only in which layers they carry, which the
 listing endpoints report per product.
 """
 
-import hashlib
-import json
-
 from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
-from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
 from models.gfs import (
@@ -23,6 +19,7 @@ from models.gfs import (
 from routes.utils import (
     create_tile_response,
     etag_pair,
+    json_listing_response,
     make_transparent_tile_response,
     not_modified,
 )
@@ -42,20 +39,10 @@ _STEP_DESC = "Forecast step (e.g. f003)"
 _VARIABLE_DESC = "Secondary variable: thickness, temperature or geopotential"
 
 
-def _etag(payload: dict) -> str:
-    return (
-        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
-    )
-
-
 def _json_or_304(request: Request, payload: dict) -> Response:
     """Serve a listing with an ETag, or 304 when the client already has it."""
-    etag = _etag(payload)
-    if request.headers.get("if-none-match") == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-    return JSONResponse(
-        content=payload,
-        headers={"Cache-Control": settings.cache_control_config, "ETag": etag},
+    return json_listing_response(
+        payload, request.headers.get("if-none-match"), settings.cache_control_config
     )
 
 

@@ -72,6 +72,15 @@ class RadarStationTilesetsResponse(BaseModel):
     tile_url_pattern: str
 
 
+class RadarTilesetListResponse(BaseModel):
+    """Tilesets available for one radar / variable / elevation."""
+
+    radar: str
+    variable: str
+    elevation: str
+    tilesets: List[str]
+
+
 class RadarPointValueResponse(BaseModel):
     """Response payload for point-value queries on radar COGs."""
 
