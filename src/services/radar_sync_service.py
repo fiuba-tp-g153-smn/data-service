@@ -10,7 +10,7 @@ from settings import Settings
 logger = logging.getLogger(__name__)
 
 # S3 prefix where radar data lives
-RADAR_S3_PREFIX = "tiles/radar"
+RADAR_S3_PREFIX = "tiles/radar/sinarame"
 
 
 class RadarSyncService(DomainSyncService):
@@ -47,20 +47,20 @@ class RadarSyncService(DomainSyncService):
         cutoff = now - self._settings.radar_tile_ttl
 
         try:
-            # 1. List radar IDs: tiles/radar/{radar_id}/
+            # 1. List radar IDs: tiles/radar/sinarame/{radar_id}/
             radar_prefixes = await self._client.get_subdirectories(RADAR_S3_PREFIX)
 
             for radar_prefix in radar_prefixes:
                 radar_id = radar_prefix.rstrip("/").split("/")[-1]
                 radar_ids_seen.add(radar_id)
 
-                # 2. List variables: tiles/radar/{radar_id}/{variable_id}/
+                # 2. List variables: tiles/radar/sinarame/{radar_id}/{variable_id}/
                 var_prefixes = await self._client.get_subdirectories(radar_prefix)
 
                 for var_prefix in var_prefixes:
                     variable_id = var_prefix.rstrip("/").split("/")[-1]
 
-                    # 3. List elevations: tiles/radar/{radar_id}/{variable_id}/elev{N}/
+                    # 3. List elevations: tiles/radar/sinarame/{radar_id}/{variable_id}/elev{N}/
                     elevation_prefixes = await self._client.get_subdirectories(
                         var_prefix
                     )

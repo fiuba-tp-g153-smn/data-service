@@ -9,30 +9,38 @@ async def test_connect_and_close():
     """Verify connect creates Redis connection and close shuts it down."""
     with patch("clients.redis_client.aioredis") as mock_aioredis:
         mock_redis = AsyncMock()
-        mock_aioredis.from_url.return_value = mock_redis
+        mock_pool = MagicMock()
+        mock_aioredis.BlockingConnectionPool.from_url.return_value = mock_pool
+        mock_aioredis.Redis.return_value = mock_redis
 
         client = RedisClient(
             "redis://localhost:6379/0",
             max_connections=100,
+            pool_wait_timeout_seconds=5.0,
             socket_timeout_seconds=5.0,
             socket_connect_timeout_seconds=2.0,
             health_check_interval_seconds=30,
         )
         await client.connect()
 
-        mock_aioredis.from_url.assert_called_once_with(
+        # Blocking pool, not the plain one: the plain pool refuses the
+        # (max_connections + 1)-th command instead of queueing, which turns one
+        # wide fan-out into a 500 for every domain sharing the pool.
+        mock_aioredis.BlockingConnectionPool.from_url.assert_called_once_with(
             "redis://localhost:6379/0",
             decode_responses=False,
             max_connections=100,
+            timeout=5.0,
             socket_timeout=5.0,
             socket_connect_timeout=2.0,
             socket_keepalive=True,
             health_check_interval=30,
         )
+        mock_aioredis.Redis.assert_called_once_with(connection_pool=mock_pool)
 
         # connect() is idempotent: a second call must not build a second pool.
         await client.connect()
-        mock_aioredis.from_url.assert_called_once()
+        mock_aioredis.BlockingConnectionPool.from_url.assert_called_once()
 
         await client.close()
         mock_redis.close.assert_awaited_once()
@@ -69,12 +77,14 @@ async def test_store_and_get_satellite_tile():
     tile_data = b"fake-webp-data"
     client._redis.get = AsyncMock(return_value=tile_data)
 
-    await client.store_satellite_tile("band_13", "tileset1", 5, 10, 15, tile_data)
+    await client.store_satellite_tile(
+        "goes19/abi/c13", "tileset1", 5, 10, 15, tile_data
+    )
     client._redis.set.assert_awaited_once_with(
-        "tile:sat:band_13/tileset1/5/10/15", tile_data
+        "tile:sat:goes19/abi/c13/tileset1/5/10/15", tile_data
     )
 
-    result = await client.get_satellite_tile("band_13", "tileset1", 5, 10, 15)
+    result = await client.get_satellite_tile("goes19/abi/c13", "tileset1", 5, 10, 15)
     assert result == tile_data
 
 
@@ -85,10 +95,10 @@ async def test_satellite_tileset_index():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"tileset1", b"tileset2"])
 
-    await client.add_satellite_tileset("band_13", "tileset1", 20250141230210.0)
+    await client.add_satellite_tileset("goes19/abi/c13", "tileset1", 20250141230210.0)
     client._redis.zadd.assert_awaited_once()
 
-    tilesets = await client.get_satellite_tilesets("band_13")
+    tilesets = await client.get_satellite_tilesets("goes19/abi/c13")
     assert tilesets == ["tileset1", "tileset2"]
 
 
@@ -99,10 +109,10 @@ async def test_delete_satellite_tileset():
     client._redis = AsyncMock()
     # Simulate scan returning some keys then finishing
     client._redis.scan = AsyncMock(
-        return_value=(0, [b"tile:sat:band_13/tileset1/5/10/15"])
+        return_value=(0, [b"tile:sat:goes19/abi/c13/tileset1/5/10/15"])
     )
 
-    await client.delete_satellite_tileset("band_13", "tileset1")
+    await client.delete_satellite_tileset("goes19/abi/c13", "tileset1")
 
     client._redis.zrem.assert_awaited_once()
     client._redis.delete.assert_awaited_once()
@@ -121,11 +131,11 @@ async def test_trim_satellite_index():
     client._redis = AsyncMock()
     client._redis.zremrangebyscore = AsyncMock(return_value=3)
 
-    removed = await client.trim_satellite_index("band_13", 1000.0)
+    removed = await client.trim_satellite_index("goes19/abi/c13", 1000.0)
 
     assert removed == 3
     client._redis.zremrangebyscore.assert_awaited_once_with(
-        "idx:sat:band_13", "-inf", "(1000.0"
+        "idx:sat:goes19/abi/c13", "-inf", "(1000.0"
     )
 
 
@@ -136,10 +146,10 @@ async def test_store_radar_tile_with_ttl():
     client._redis = AsyncMock()
 
     await client.store_radar_tile(
-        "RMA1", "DBZH", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600
+        "RMA1", "dbzh", "ts1", "elev0", 5, 10, 15, b"data", ttl=3600
     )
     client._redis.set.assert_awaited_once_with(
-        "tile:radar:RMA1/DBZH/ts1_elev0/5/10/15", b"data", ex=3600
+        "tile:radar:RMA1/dbzh/ts1_elev0/5/10/15", b"data", ex=3600
     )
 
 
@@ -153,11 +163,11 @@ async def test_radar_index_operations():
     mock_pipeline.execute = AsyncMock(return_value=[])
     client._redis = mock_redis
 
-    await client.add_radar_index("RMA1", "DBZH", "elev0", "ts1", 1234.0, ttl=3600)
+    await client.add_radar_index("RMA1", "dbzh", "elev0", "ts1", 1234.0, ttl=3600)
     mock_pipeline.execute.assert_awaited_once()
     # Tilesets axis is a scored sorted set; the dimension axes stay plain sets.
     mock_pipeline.zadd.assert_called_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", {b"ts1": 1234.0}
+        "idx:radar:RMA1:dbzh:elev0:tilesets", {b"ts1": 1234.0}
     )
     assert mock_pipeline.sadd.call_count == 3
 
@@ -174,11 +184,11 @@ async def test_get_radar_tilesets_returns_newest_first():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"ts1", b"ts2", b"ts3"])
 
-    tilesets = await client.get_radar_tilesets("RMA1", "DBZH", "elev0")
+    tilesets = await client.get_radar_tilesets("RMA1", "dbzh", "elev0")
 
     assert tilesets == ["ts3", "ts2", "ts1"]
     client._redis.zrange.assert_awaited_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", 0, -1
+        "idx:radar:RMA1:dbzh:elev0:tilesets", 0, -1
     )
     client._redis.delete.assert_not_called()
 
@@ -194,10 +204,10 @@ async def test_get_radar_tilesets_self_heals_legacy_wrongtype_key():
         )
     )
 
-    tilesets = await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+    tilesets = await client.get_radar_tilesets("RMA1", "vrad", "elev0")
 
     assert tilesets == []
-    client._redis.delete.assert_awaited_once_with("idx:radar:RMA1:VRAD:elev0:tilesets")
+    client._redis.delete.assert_awaited_once_with("idx:radar:RMA1:vrad:elev0:tilesets")
 
 
 @pytest.mark.asyncio
@@ -208,7 +218,7 @@ async def test_get_radar_tilesets_reraises_other_response_errors():
     client._redis.zrange = AsyncMock(side_effect=ResponseError("LOADING"))
 
     with pytest.raises(ResponseError):
-        await client.get_radar_tilesets("RMA1", "VRAD", "elev0")
+        await client.get_radar_tilesets("RMA1", "vrad", "elev0")
 
     client._redis.delete.assert_not_called()
 
@@ -220,11 +230,11 @@ async def test_trim_radar_index():
     client._redis = AsyncMock()
     client._redis.zremrangebyscore = AsyncMock(return_value=2)
 
-    removed = await client.trim_radar_index("RMA1", "DBZH", "elev0", 1000.0)
+    removed = await client.trim_radar_index("RMA1", "dbzh", "elev0", 1000.0)
 
     assert removed == 2
     client._redis.zremrangebyscore.assert_awaited_once_with(
-        "idx:radar:RMA1:DBZH:elev0:tilesets", "-inf", "(1000.0"
+        "idx:radar:RMA1:dbzh:elev0:tilesets", "-inf", "(1000.0"
     )
 
 
@@ -341,12 +351,12 @@ async def test_prune_gfs_cycles_uses_the_sorted_set_commands():
     )
 
     removed = await client.prune_gfs_cycles(
-        "mslp", ["20260816T0000Z", "20260815T1800Z"]
+        "mean-sea-level-pressure", ["20260816T0000Z", "20260815T1800Z"]
     )
 
     assert removed == 1
     client._redis.zrem.assert_awaited_once_with(
-        "idx:gfs:mslp:cycles", b"20260815T1200Z"
+        "idx:gfs:mean-sea-level-pressure:cycles", b"20260815T1200Z"
     )
     client._redis.smembers.assert_not_awaited()
 
@@ -358,7 +368,9 @@ async def test_prune_gfs_cycles_noop_when_all_active():
     client._redis = AsyncMock()
     client._redis.zrange = AsyncMock(return_value=[b"20260816T0000Z"])
 
-    removed = await client.prune_gfs_cycles("mslp", ["20260816T0000Z"])
+    removed = await client.prune_gfs_cycles(
+        "mean-sea-level-pressure", ["20260816T0000Z"]
+    )
 
     assert removed == 0
     client._redis.zrem.assert_not_awaited()
@@ -380,3 +392,136 @@ async def test_wrf_overlays_complete_marker_roundtrip():
         await client.is_wrf_overlays_complete("precip", "20260430_060000", "F012")
         is True
     )
+
+
+# ---------------------------------------------------------------------------
+# Bulk layer readers
+#
+# A WRF init run is hourly out to F073 and a GFS cycle runs to f144. Reading
+# those one await at a time takes one pooled connection per step, so a couple
+# of concurrent listings exhaust a pool shared by every domain. These pin the
+# reads to a single pipelined round trip.
+# ---------------------------------------------------------------------------
+
+
+def _pipelined(replies):
+    """Client whose pipeline records the queued commands and replays `replies`."""
+    client = RedisClient("redis://localhost:6379/0")
+    mock_redis = AsyncMock()
+    mock_pipeline = MagicMock()
+    mock_pipeline.execute = AsyncMock(return_value=replies)
+    mock_redis.pipeline = AsyncMock(return_value=mock_pipeline)
+    client._redis = mock_redis
+    return client, mock_redis, mock_pipeline
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_layers_bulk_uses_one_pipelined_round_trip():
+    client, mock_redis, pipe = _pipelined([{b"barbs"}, {b"contours", b"barbs"}, set()])
+
+    result = await client.get_wrf_layers_bulk(
+        "precip", "20260430_060000", ["F001", "F002", "F003"]
+    )
+
+    assert result == {
+        "F001": ["barbs"],
+        "F002": ["barbs", "contours"],  # sorted, like the single-step reader
+        "F003": [],
+    }
+    # One connection for the whole run, not one per step.
+    pipe.execute.assert_awaited_once()
+    mock_redis.smembers.assert_not_awaited()
+    assert [c.args[0] for c in pipe.smembers.call_args_list] == [
+        "idx:wrf:precip:20260430_060000:F001:layers",
+        "idx:wrf:precip:20260430_060000:F002:layers",
+        "idx:wrf:precip:20260430_060000:F003:layers",
+    ]
+    # Read-only: no MULTI/EXEC wrapper to pay for.
+    assert mock_redis.pipeline.await_args.kwargs["transaction"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_layers_bulk_agrees_with_the_single_step_reader():
+    """The two readers must derive the same key, or a bulk listing reads nothing."""
+    bulk, _, bulk_pipe = _pipelined([{b"barbs"}])
+    await bulk.get_wrf_layers_bulk("precip", "20260430_060000", ["F012"])
+
+    single = RedisClient("redis://localhost:6379/0")
+    single._redis = AsyncMock()
+    single._redis.smembers = AsyncMock(return_value={b"barbs"})
+    await single.get_wrf_layers("precip", "20260430_060000", "F012")
+
+    assert (
+        bulk_pipe.smembers.call_args.args[0]
+        == single._redis.smembers.await_args.args[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_gfs_layers_bulk_uses_one_pipelined_round_trip():
+    client, mock_redis, pipe = _pipelined([{b"heights"}, set()])
+
+    result = await client.get_gfs_layers_bulk(
+        "geopotential-500hpa", "20260808T0000Z", ["f000", "f003"]
+    )
+
+    assert result == {"f000": ["heights"], "f003": []}
+    pipe.execute.assert_awaited_once()
+    mock_redis.smembers.assert_not_awaited()
+    assert [c.args[0] for c in pipe.smembers.call_args_list] == [
+        "idx:gfs:geopotential-500hpa:20260808T0000Z:f000:layers",
+        "idx:gfs:geopotential-500hpa:20260808T0000Z:f003:layers",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_gfs_layers_bulk_agrees_with_the_single_step_reader():
+    bulk, _, bulk_pipe = _pipelined([{b"heights"}])
+    await bulk.get_gfs_layers_bulk("geopotential-500hpa", "20260808T0000Z", ["f003"])
+
+    single = RedisClient("redis://localhost:6379/0")
+    single._redis = AsyncMock()
+    single._redis.smembers = AsyncMock(return_value={b"heights"})
+    await single.get_gfs_layers("geopotential-500hpa", "20260808T0000Z", "f003")
+
+    assert (
+        bulk_pipe.smembers.call_args.args[0]
+        == single._redis.smembers.await_args.args[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_bulk_layer_readers_skip_the_round_trip_when_there_are_no_steps():
+    client, _, pipe = _pipelined([])
+
+    assert await client.get_wrf_layers_bulk("precip", "20260430_060000", []) == {}
+    assert (
+        await client.get_gfs_layers_bulk("geopotential-500hpa", "20260808T0000Z", [])
+        == {}
+    )
+    pipe.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_add_wrf_index_registers_the_product():
+    """WRF has no static catalogue, so the index is the only enumeration path."""
+    client = RedisClient("redis://localhost:6379/0")
+    mock_redis = AsyncMock()
+    mock_pipeline = MagicMock()
+    mock_pipeline.execute = AsyncMock(return_value=[])
+    mock_redis.pipeline = AsyncMock(return_value=mock_pipeline)
+    client._redis = mock_redis
+
+    await client.add_wrf_index("granizo", "20260913_060000", "F001", 1.0, 2.0, ttl=60)
+
+    assert "idx:wrf:products" in [c.args[0] for c in mock_pipeline.sadd.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_get_wrf_products_reads_that_axis():
+    client = RedisClient("redis://localhost:6379/0")
+    client._redis = AsyncMock()
+    client._redis.smembers = AsyncMock(return_value={b"mucape", b"granizo"})
+
+    assert await client.get_wrf_products() == ["granizo", "mucape"]
+    assert client._redis.smembers.await_args.args[0] == "idx:wrf:products"

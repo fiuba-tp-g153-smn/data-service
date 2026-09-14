@@ -1,12 +1,8 @@
 """WRF model product endpoints."""
 
-import hashlib
-import json
-
 from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
-from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
 from models.wrf import (
@@ -18,6 +14,7 @@ from models.wrf import (
 from routes.utils import (
     create_tile_response,
     etag_pair,
+    json_listing_response,
     make_transparent_tile_response,
     not_modified,
 )
@@ -28,7 +25,7 @@ from services.point_value_service import (
 )
 from services.wrf_service import wrf_service
 
-router = APIRouter(prefix="/products/wrf", tags=["WRF Model"])
+router = APIRouter(prefix="/products/wrf-arg4k", tags=["WRF Model"])
 
 _ZOOM_MIN = 4
 _ZOOM_MAX = 9
@@ -48,18 +45,10 @@ async def list_init_runs(
 ):
     """List available initialization runs for a WRF product."""
     data = await wrf_service.list_init_runs(product_id)
-    payload = data.model_dump()
-    etag = (
-        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
-    )
-
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-
-    return JSONResponse(
-        content=payload,
-        headers={"Cache-Control": settings.cache_control_config, "ETag": etag},
+    return json_listing_response(
+        data.model_dump(),
+        request.headers.get("if-none-match"),
+        settings.cache_control_config,
     )
 
 
@@ -84,18 +73,10 @@ async def list_steps(
             detail=f"Init run '{init_tag}' not found for product '{product_id}'",
         )
 
-    payload = data.model_dump()
-    etag = (
-        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
-    )
-
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-
-    return JSONResponse(
-        content=payload,
-        headers={"Cache-Control": settings.cache_control_config, "ETag": etag},
+    return json_listing_response(
+        data.model_dump(),
+        request.headers.get("if-none-match"),
+        settings.cache_control_config,
     )
 
 

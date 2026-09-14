@@ -60,8 +60,10 @@ def parse_estaciones_txt(content: str) -> List[StationMetadata]:
         if not raw_line.strip():
             continue
 
-        padded = raw_line if len(raw_line) >= _NAME_COLUMN_WIDTH else raw_line.ljust(
-            _NAME_COLUMN_WIDTH
+        padded = (
+            raw_line
+            if len(raw_line) >= _NAME_COLUMN_WIDTH
+            else raw_line.ljust(_NAME_COLUMN_WIDTH)
         )
         tail = padded[_NAME_COLUMN_WIDTH:]
 
@@ -84,9 +86,7 @@ def parse_estaciones_txt(content: str) -> List[StationMetadata]:
 
         match = _ROW_TAIL_RE.match(tail)
         if not match:
-            logger.warning(
-                "Could not parse SMN registry row: %r", raw_line[:80]
-            )
+            logger.warning("Could not parse SMN registry row: %r", raw_line[:80])
             continue
 
         try:

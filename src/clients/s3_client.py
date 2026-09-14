@@ -19,8 +19,14 @@ from types_aiobotocore_s3.client import S3Client as S3ClientType
 from types_aiobotocore_s3.type_defs import ObjectIdentifierTypeDef
 
 from clients.redis_client import RedisClient
+from log_throttle import BackoffLogThrottle
 
 logger = logging.getLogger(__name__)
+
+# Shared across every S3Client instance: an endpoint outage hits the read paths
+# of all of them at once, so one backoff schedule per error shape is what keeps
+# the log readable.
+_LISTING_LOG_THROTTLE = BackoffLogThrottle()
 
 # Default ceiling on tiles held in memory during a sync (downloaded, awaiting
 # their Redis write). Small — tiles are ~100KB webp — but enough to keep the S3
@@ -193,8 +199,8 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
 
         Args:
             redis_client: Redis client for storing tiles
-            s3_prefix: S3 key prefix for this tileset (e.g., "tiles/band_13/20260740300213/")
-            channel_dir: Channel directory name (e.g., "band_13")
+            s3_prefix: S3 key prefix for this tileset (e.g., "tiles/goes19/abi/c13/20260740300213/")
+            channel_dir: Channel path below the tiles root (e.g., "goes19/abi/c13")
             tileset_id: Tileset identifier
             tile_ttl: Optional TTL in seconds for stored tiles
 
@@ -313,30 +319,30 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
             logger.error("Error listing objects under %s: %s", prefix, e)
             raise
 
-    WRF_TILES_PREFIX = "tiles/wrf"
-    WRF_GEOJSON_PREFIX = "geojson/wrf"
+    WRF_TILES_PREFIX = "tiles/wrf-arg4k"
+    WRF_GEOJSON_PREFIX = "geojson/wrf-arg4k"
 
-    ECMWF_TP_TILES_PREFIX = "tiles/models/ecmwf/total_precipitation"
-    ECMWF_MSLP_COG_PREFIX = "cog/models/ecmwf/mean_sea_level_pressure"
+    ECMWF_TP_TILES_PREFIX = "tiles/ecmwf-ifs/total-precipitation"
+    ECMWF_MSLP_COG_PREFIX = "cog/ecmwf-ifs/mean-sea-level-pressure"
 
     @staticmethod
     def build_wrf_tile_key(
         product_id: str, init_tag: str, fxxx: str, z: int, x: int, y: int
     ) -> str:
         """Build S3 key for a WRF tile."""
-        return f"tiles/wrf/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
+        return f"tiles/wrf-arg4k/{product_id}/{init_tag}/{fxxx}/{z}/{x}/{y}.webp"
 
     @staticmethod
     def build_wrf_cog_key(product_id: str, init_tag: str, fxxx: str) -> str:
         """Build S3 key for a WRF primary-field COG."""
-        return f"cog/wrf/{product_id}/{init_tag}/{fxxx}.tif"
+        return f"cog/wrf-arg4k/{product_id}/{init_tag}/{fxxx}.tif"
 
     @staticmethod
     def build_wrf_geojson_key(
         product_id: str, init_tag: str, fxxx: str, layer: str
     ) -> str:
         """Build S3 key for a WRF GeoJSON layer (barbs, isobars, shear, ...)."""
-        return f"geojson/wrf/{product_id}/{init_tag}/{fxxx}/{layer}.json"
+        return f"geojson/wrf-arg4k/{product_id}/{init_tag}/{fxxx}/{layer}.json"
 
     @staticmethod
     def build_wrf_barb_tile_key(
@@ -344,7 +350,9 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> str:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Build S3 key for a WRF wind-barb GeoJSON tile (z/x/y)."""
-        return f"geojson/wrf/{product_id}/{init_tag}/{fxxx}/barbs/{z}/{x}/{y}.json"
+        return (
+            f"geojson/wrf-arg4k/{product_id}/{init_tag}/{fxxx}/barbs/{z}/{x}/{y}.json"
+        )
 
     async def sync_wrf_step_to_redis(
         self,
@@ -456,12 +464,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         forecast_ts: str, period_ts: str, z: int, x: int, y: int
     ) -> str:
         """Build S3 key for an ECMWF total precipitation tile."""
-        return f"tiles/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
+        return f"tiles/ecmwf-ifs/total-precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp"
 
     @staticmethod
     def build_ecmwf_tp_cog_key(forecast_ts: str, period_ts: str) -> str:
         """Build S3 key for an ECMWF total precipitation COG."""
-        return f"cog/models/ecmwf/total_precipitation/{forecast_ts}/{period_ts}.tif"
+        return f"cog/ecmwf-ifs/total-precipitation/{forecast_ts}/{period_ts}.tif"
 
     async def sync_ecmwf_tp_period_to_redis(
         self,
@@ -524,14 +532,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     @staticmethod
     def build_ecmwf_mslp_cog_key(forecast_ts: str, timestamp_ts: str) -> str:
         """Build S3 key for an ECMWF mean sea level pressure COG."""
-        return (
-            f"cog/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.tif"
-        )
+        return f"cog/ecmwf-ifs/mean-sea-level-pressure/{forecast_ts}/{timestamp_ts}.tif"
 
     @staticmethod
     def build_ecmwf_mslp_geojson_key(forecast_ts: str, timestamp_ts: str) -> str:
         """Build S3 key for an ECMWF mean sea level pressure isobars GeoJSON."""
-        return f"geojson/models/ecmwf/mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json"
+        return f"geojson/ecmwf-ifs/mean-sea-level-pressure/{forecast_ts}/{timestamp_ts}.json"
 
     # ============== GFS ==============
     #
@@ -549,7 +555,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     @staticmethod
     def gfs_cog_cycle_prefix(s3_segment: str) -> str:
         """Prefix holding every COG of one product, for listing cycles."""
-        return f"cog/models/gfs/{s3_segment}/"
+        return f"cog/gfs/{s3_segment}/"
 
     @classmethod
     def build_gfs_tile_key(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -557,13 +563,13 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> str:
         """Build S3 key for a GFS raster tile."""
         step = cls._gfs_step_id(cycle, fxxx)
-        return f"tiles/models/gfs/{s3_segment}/{cycle}/{step}/{z}/{x}/{y}.webp"
+        return f"tiles/gfs/{s3_segment}/{cycle}/{step}/{z}/{x}/{y}.webp"
 
     @classmethod
     def build_gfs_cog_key(cls, s3_segment: str, cycle: str, fxxx: str) -> str:
         """Build S3 key for a GFS COG (pressure in hPa, or wind speed in kt)."""
         step = cls._gfs_step_id(cycle, fxxx)
-        return f"cog/models/gfs/{s3_segment}/{cycle}/{step}.tif"
+        return f"cog/gfs/{s3_segment}/{cycle}/{step}.tif"
 
     @classmethod
     def build_gfs_secondary_cog_key(
@@ -571,12 +577,12 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> str:
         """Build S3 key for a GFS secondary point-query COG."""
         step = cls._gfs_step_id(cycle, fxxx)
-        return f"cog/models/gfs/{s3_segment}/{cycle}/{variable}/{step}.tif"
+        return f"cog/gfs/{s3_segment}/{cycle}/{variable}/{step}.tif"
 
     @staticmethod
     def gfs_geojson_cycle_prefix(s3_segment: str, cycle: str) -> str:
         """Prefix holding every single-file overlay of one cycle."""
-        return f"geojson/models/gfs/{s3_segment}/{cycle}/"
+        return f"geojson/gfs/{s3_segment}/{cycle}/"
 
     @classmethod
     def build_gfs_geojson_key(
@@ -592,7 +598,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> str:
         """Build S3 key for one GFS wind-barb GeoJSON tile."""
         step = cls._gfs_step_id(cycle, fxxx)
-        return f"geojson/models/gfs/{s3_segment}/{cycle}/{step}_barbs/{z}/{x}/{y}.json"
+        return f"geojson/gfs/{s3_segment}/{cycle}/{step}_barbs/{z}/{x}/{y}.json"
 
     async def list_object_basenames(
         self, prefix: str, suffix: str, delimiter: str = ""
@@ -713,7 +719,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
     ) -> str:
         """Build S3 key for a radar tile."""
         return (
-            f"tiles/radar/{radar_id}/{variable_id}/"
+            f"tiles/radar/sinarame/{radar_id}/{variable_id}/"
             f"{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp"
         )
 
@@ -990,21 +996,19 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         if not prefix.endswith("/"):
             prefix += "/"
 
-        try:
-            paginator = client.get_paginator("list_objects_v2")
-            async for page in cast(
-                AsyncIterator[dict],
-                paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"),
-            ):
-                for common_prefix in page.get("CommonPrefixes", []):
-                    subdirs.append(common_prefix["Prefix"])
-            return subdirs
-        except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            # Raise on an infra failure so a real outage isn't masked as "no
-            # subdirectories". Sync loops count it (except → errors += 1); read
-            # paths use try_get_subdirectories, which degrades to [].
-            logger.error("Error listing subdirectories for %s: %s", prefix, e)
-            raise
+        # Infra failures propagate so a real outage isn't masked as "no
+        # subdirectories". Sync loops count it (except → errors += 1); read
+        # paths use try_get_subdirectories, which degrades to []. Logging is
+        # left to those callers — they all report it, and logging here too
+        # doubled every line during an outage.
+        paginator = client.get_paginator("list_objects_v2")
+        async for page in cast(
+            AsyncIterator[dict],
+            paginator.paginate(Bucket=self._bucket, Prefix=prefix, Delimiter="/"),
+        ):
+            for common_prefix in page.get("CommonPrefixes", []):
+                subdirs.append(common_prefix["Prefix"])
+        return subdirs
 
     async def try_get_subdirectories(self, prefix: str) -> List[str]:
         """Read-path variant of ``get_subdirectories``: ``[]`` on infra error.
@@ -1016,7 +1020,18 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         try:
             return await self.get_subdirectories(prefix)
         except (ClientError, BotoCoreError, asyncio.TimeoutError, OSError) as e:
-            logger.warning("Subdirectory listing degraded to [] for %s: %s", prefix, e)
+            # One request per tileset endpoint means an S3 outage produces a
+            # line per poll per product. There's no retry loop to pace here, so
+            # the line itself backs off, keyed by error shape rather than by
+            # prefix — the endpoint being down is one fact, not thirty.
+            suppressed = _LISTING_LOG_THROTTLE.check(type(e).__name__)
+            if suppressed is not None:
+                logger.warning(
+                    "Subdirectory listing degraded to [] for %s: %s%s",
+                    prefix,
+                    e,
+                    f" (+{suppressed} suppressed)" if suppressed else "",
+                )
             return []
 
     async def delete_object(self, key: str) -> bool:

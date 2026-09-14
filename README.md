@@ -2,7 +2,7 @@
 
 <img src="https://uptime.mapasmn.com/api/badge/5/status?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/uptime?style=flat-square" /> <img src="https://uptime.mapasmn.com/api/badge/5/ping?style=flat-square" />
 
-The Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles (GOES-19 ABI and GOES-19 GLM), radar data, ECMWF precipitation forecasts, and base-map tiles (argenmap, satellite, etc.) via REST API. It syncs tile data from an S3/SeaweedFS bucket — populated by the `tiles-processor` service — and backs up provider base-map tiles to a dedicated S3 bucket via a built-in scraper. Redis is used as a hot cache across all domains.
+The Data Service is a FastAPI microservice (Python 3.13) that serves satellite imagery tiles (GOES-19 ABI and GOES-19 GLM), radar data, ECMWF / WRF / GFS model layers, SMN weather-station observations, and base-map tiles (argenmap, satellite, etc.) via REST API. It syncs tile data from an S3/SeaweedFS bucket — populated by the `tiles-processor` service — and backs up provider base-map tiles to a dedicated S3 bucket via a built-in scraper. Redis is used as a hot cache across all domains.
 
 ### Team members
 
@@ -22,14 +22,14 @@ The Data Service is a FastAPI microservice (Python 3.13) that serves satellite i
    - [Data domains](#data-domains)
    - [Basemap cache modes](#basemap-cache-modes)
 1. [Dependencies](#dependencies)
-1. [Setup for development](#Setup-for-development)
+1. [Setup for development](#setup-for-development)
 1. [S3 Integration](#s3-integration)
-1. [Makefile Commands](#Makefile-Commands)
-1. [Running Tests](#Running-Tests)
-1. [Dockerfiles](#Dockerfiles)
+1. [Makefile Commands](#makefile-commands)
+1. [Running Tests](#running-tests)
+1. [Dockerfiles](#dockerfiles)
 1. [Configuration (`settings.json`)](#configuration-settingsjson)
 1. [Environment Variables](#environment-variables)
-1. [API Documentation](#API-Documentation)
+1. [API Documentation](#api-documentation)
 
 ## Architecture
 
@@ -53,17 +53,21 @@ The Data Service is a FastAPI microservice (Python 3.13) that serves satellite i
 
 ### Data domains
 
-The service exposes four independent data domains, each with its own
-route prefix, service, and sync mechanism:
+Each data domain has its own route prefix, service, and sync mechanism.
+The four below are the ones whose sync is under a mode knob; the service
+also serves WRF (`/products/wrf-arg4k/...`), GFS (`/products/gfs/...`), SMN
+weather stations (`/weather-stations/...`), background-sync status
+(`/sync/status`) and dashboard metrics (`/metrics/...`) — `/docs` has the
+full list.
 
 | Domain        | Route prefix                                                   | Source                                   | Sync control                                                |
 | :------------ | :------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------- |
 | **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                          |
-| **Radar**     | `/products/radar/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
-| **ECMWF**     | `/ecmwf/...`                                                   | ECMWF precipitation forecast tiles       | `sync_mode` (`full` / `on_demand`)                          |
+| **Radar**     | `/products/radar-sinarame/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
+| **ECMWF**     | `/products/ecmwf-ifs/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_mode` (`full` / `on_demand`)                          |
 | **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_sync_mode` (independent of `sync_mode`; see below) |
 
-Satellite, radar, and ECMWF share the same `sync_mode` knob. Basemap
+Satellite, radar, ECMWF, WRF and GFS share the same `sync_mode` knob. Basemap
 has its own `basemap_sync_mode` because the volume and caching
 economics are different — the scraper writes to a dedicated S3 bucket
 (`S3_BASEMAP_BUCKET_NAME`) and populates Redis with small PNG tiles
@@ -82,14 +86,17 @@ Set it in `settings.json` or via the `BASEMAP_SYNC_MODE` env var.
 | `no_cache`         |     yes      |        yes        |          no          |    **no**    |    yes    |     yes      |
 | `relay_only`       |    **no**    |         —         |          —           |      no      |  **no**   |     yes      |
 
-- **`full`** — the default. Scraper pre-warms both Redis and S3; reader
-  uses Redis → S3 → relay. Best read-path latency, highest Redis RAM.
+- **`full`** — the code default; `settings.json` currently sets
+  `no_cache`. Scraper pre-warms both Redis and S3. The reader chain is
+  provider → Redis → S3 (`BasemapTileReader`: upstream is authoritative,
+  the caches answer when it fails). Highest Redis RAM.
 - **`on_demand`** — scraper still builds the S3 cold backup but leaves
   Redis alone; reader lazily populates Redis on the first cold read.
   Use this when the full sweep's RAM footprint is too high.
 - **`no_cache`** — scraper writes only S3; reader skips Redis entirely
   (no GET, no write-through, no negative-cache tombstones). Useful
-  when Redis memory is at a premium — every request re-probes S3.
+  when Redis memory is at a premium — every request the provider can't
+  serve re-probes S3.
 - **`relay_only`** — scraper off, both caches off. Reader is a pure
   provider proxy. Requires `basemap_online_fallback_enabled=true`
   (enforced at startup); otherwise the service has no data source.
@@ -181,13 +188,15 @@ SeaweedFS running, or a brief production blip:
 - The bucket **lifecycle policy** (S3 object expiry after
   `basemap_s3_object_ttl_days`) is applied from inside the scrape
   loop as well. A failed application on cycle N is retried on cycle
-  N+1; a success latches. An S3-down boot no longer blocks startup
-  and no longer leaves the bucket mis-configured forever.
+  N+1; a success latches, so applying it is not a hard startup
+  dependency and one failed application no longer leaves the bucket
+  mis-configured forever.
 
-Practical consequence: `docker compose up` with SeaweedFS offline
-boots successfully, the scraper logs storage warnings each minute,
-and the moment SeaweedFS comes up the next sweep persists tiles
-and applies the lifecycle rule — no manual intervention needed.
+Practical consequence: a SeaweedFS outage after startup needs no manual
+intervention — the scraper logs storage warnings each minute and the first
+sweep after recovery persists tiles and applies the lifecycle rule. A cold
+boot with S3 configured but unreachable is the other path: startup blocks on
+the reachability probe (see [Sync loops and failure modes](#sync-loops-and-failure-modes)).
 
 #### Switching modes at runtime: Redis rehydration caveat
 
@@ -195,11 +204,12 @@ There is **no dedicated service that rehydrates Redis from the S3 cold
 backup** when you flip the mode (e.g. `no_cache` → `full`). Redis fills
 back up through two mechanisms:
 
-1. **Reader lazy warm (per-request).** On a Redis miss the reader hits
-   S3 and, on an S3 hit, schedules a background write-through into
-   Redis. So the first user request for each tile repopulates Redis
-   from S3 for free. Heavily-used tiles warm up within seconds of the
-   flip; the long tail only warms when actually requested.
+1. **Reader lazy warm (per-request).** Every tile the reader resolves is
+   scheduled as a background Redis write-through — after a provider hit and
+   after an S3 hit alike (`BasemapTileReader._schedule_cache_write`). So the
+   first user request for each tile repopulates Redis for free. Heavily-used
+   tiles warm up within seconds of the flip; the long tail only warms when
+   actually requested.
 2. **Next scheduled sweep (bulk).** `BasemapScraperService` stamps
    `basemap_scrape_last_completed` per provider and respects it across
    restarts (see `basemap_scrape_interval_seconds`, default 1 week).
@@ -239,14 +249,17 @@ You need to have the next dependencies installed:
 
 2. Copy the example environment file:
    `cp .env.example .env`
-   Edit `.env` to configure your environment variables (e.g., database connections, secrets).
+   Edit `.env` to set the S3 endpoint and credentials, `REDIS_URL`, the SMN API credentials and `WEATHER_STATIONS_ADMIN_PASSWORD`.
 
 3. For local development:
 
    With Docker:
-   - Run `make up`.
+   - Run `make up`. It starts Redis plus two containers off the same image:
+     `data-service-api-dev` (`APP_ROLE=web`) and `data-service-sync-dev`
+     (`APP_ROLE=worker`).
 
-     The app will be available at http://localhost:8080.
+     The API is published on `APP_HOST_PORT` (default 6006):
+     http://localhost:6006.
 
    Without Docker:
    - Create a virtual environment running the following command: `python -m venv .venv`
@@ -260,39 +273,47 @@ You need to have the next dependencies installed:
 
 The Data Service syncs tile data from a SeaweedFS S3 bucket, typically populated by the `tiles-processor` service. This decouples tile generation from tile serving.
 
-### How It Works
+### Sync loops and failure modes
 
-1. **Background Sync Service**: On startup, data-service starts a background task that periodically syncs tiles from SeaweedFS to local storage.
-2. **Sync Interval**: Configurable via `SYNC_INTERVAL_SECONDS` (default: 60 seconds).
-3. **Incremental Sync**: Only downloads new or changed files, deletes local files removed from S3.
-4. **Graceful Handling**: If SeaweedFS is not configured or unavailable, the service continues without sync (uses existing local tiles).
+1. **One loop per product**: a process that runs background jobs
+   (`APP_ROLE=worker` or `all`) and has `sync_mode=full` starts six
+   independent, `fcntl`-gated loops — satellite, radar, ECMWF-TP,
+   ECMWF-MSLP, WRF, GFS — each with its own S3 client, interval and
+   watchdog, so no product can monopolize another's scheduling or S3
+   budget (`services/domain_sync_service.py`).
+2. **Sync Interval**: configurable via `SYNC_INTERVAL_SECONDS` (default: 60 seconds). WRF and GFS have their own cadence (`WRF_SYNC_INTERVAL_SECONDS` / `GFS_SYNC_INTERVAL_SECONDS`, both 120 s).
+3. **The sync target is Redis, not local disk**: a cycle downloads new tilesets into Redis under the domain's `*_tile_ttl` and adds them to a per-channel index. Reads are Redis-first with an S3 fallback, so an eviction makes a read slower, never unservable.
+4. **Incremental Sync**: a tileset already in the Redis index is skipped; index entries older than the tile TTL are trimmed every cycle, so the index stays bounded to the live-tile window.
+5. **S3 unreachable**: when S3 is configured, startup blocks on a reachability probe (`main._wait_for_s3_reachable`) — capped at 120 s under `APP_ENV=production`, after which startup fails so the orchestrator restarts it; unbounded in development, self-healing when S3 returns. With S3 not configured at all, the service starts and serves whatever is already in Redis.
 
 ### S3 Bucket Structure
 
 The service expects tiles in the following structure across **two S3
 buckets** (names configurable via `S3_TILES_DATA_BUCKET_NAME` and
-`S3_BASEMAP_BUCKET_NAME`):
+`S3_BASEMAP_BUCKET_NAME`). The weather-stations subsystem adds two more
+buckets, `S3_WEATHER_STATIONS_BUCKET_NAME` and `S3_API_KEYS_BUCKET_NAME`,
+not shown here:
 
 ```
 tiles-data/                              # S3_TILES_DATA_BUCKET_NAME
 ├── tiles/
-│   ├── band_2|band_9|band_13/           # GOES-19 ABI
+│   ├── goes19/abi/{c02|c09|c13}/         # GOES-19 ABI
 │   │   └── {tileset_id}/{z}/{x}/{y}.webp
-│   ├── glm_fed|glm_toe|glm_mfa/         # GOES-19 GLM
+│   ├── goes19/glm/{fed|toe|mfa}/         # GOES-19 GLM
 │   │   └── {tileset_id}/{z}/{x}/{y}.webp
-│   ├── radar/
-│   │   └── {radar_id}/{variable}/elev{N}/{tileset_id}/{z}/{x}/{y}.webp
-│   └── models/ecmwf/
-│       └── total_precipitation/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp
+│   ├── radar/sinarame/
+│   │   └── {radar_id}/{product_id}/elev{N}/{tileset_id}/{z}/{x}/{y}.webp
+│   └── ecmwf-ifs/
+│       └── tp/{forecast_ts}/{period_ts}/{z}/{x}/{y}.webp
 ├── cog/
-│   ├── {band_id}/{tileset_id}.tif
-│   ├── radar/{radar_id}/{variable}/elev{N}/{tileset_id}.tif
-│   └── models/ecmwf/
-│       ├── total_precipitation/{forecast_ts}/{period_ts}.tif
-│       └── mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.tif
+│   ├── goes19/{abi/c02|abi/c09|abi/c13|glm/fed|glm/toe|glm/mfa}/{tileset_id}.tif
+│   ├── radar/sinarame/{radar_id}/{product_id}/elev{N}/{tileset_id}.tif
+│   └── ecmwf-ifs/
+│       ├── tp/{forecast_ts}/{period_ts}.tif
+│       └── mslp/{forecast_ts}/{timestamp_ts}.tif
 └── geojson/
-    └── models/ecmwf/
-        └── mean_sea_level_pressure/{forecast_ts}/{timestamp_ts}.json
+    └── ecmwf-ifs/
+        └── mslp/{forecast_ts}/{timestamp_ts}.json
 
 basemap-tiles/                           # S3_BASEMAP_BUCKET_NAME
 └── basemap/
@@ -323,7 +344,7 @@ When running both services separately:
    docker compose up -d
    ```
 
-   SeaweedFS will be available at `localhost:9000` (S3 API) and `localhost:9001` (Console).
+   SeaweedFS publishes the S3 API on `S3_TILES_DATA_PORT` (`9000` in tiles-processor's `.env.example`), the Filer on `8888`, the Master on `9333` and the Admin UI on `23646`.
 
 2. **Configure data-service** to connect:
 
@@ -345,23 +366,29 @@ The data-service will sync tiles from tiles-processor's S3/SeaweedFS and serve t
 
 ## Makefile Commands
 
-The `Makefile` provides convenient targets for common tasks. Run them from the project root:
+Run these from the project root:
 
 - `make install`:
   Installs Poetry and all dependencies (including dev/test deps). Required before running `make local` or bare `pytest` commands.
 
 - `make up`:
-  Builds the development image (`Dockerfile.dev`) and runs the container.
-  - Mounts `./src` for live reloading.
-  - Mounts `.env` for configuration.
-  - Exposes the app at http://localhost:8080.
+  Builds the development image (`Dockerfile.dev`) and starts `docker-compose-dev.yaml`: Redis, the `web`-role container and the `worker`-role container.
+  - Mounts `./src` (live reload), `settings.json`, `alembic.ini`, `migrations/` and `./data` (metrics + basemap scraper SQLite).
+  - Reads `.env` for the compose variable substitutions.
+  - Publishes the API on `APP_HOST_PORT`, default http://localhost:6006.
     Stop with Ctrl+C or `make down`.
 
+- `make data`:
+  Brings up only the two data-service containers (`docker-compose.data.yaml`, project `data-service-data`), for the split deployment where Redis runs in its own stack.
+
+- `make redis`:
+  Brings up only Redis (`docker-compose.redis.yaml`, project `data-service-redis`), publishing `6379`. Both stacks attach to the external network `data_service_network` — create it once with `docker network create data_service_network`.
+
 - `make down`:
-  Stops all running containers.
+  Stops the `docker-compose.yaml` and `docker-compose-dev.yaml` stacks.
 
 - `make clean`:
-  Stops containers and removes Docker volumes.
+  Stops both stacks, drops their named volumes, and wipes the contents of the `./data` bind mount (metrics + basemap scraper state SQLite; API keys live in S3, not here).
 
 - `make test`:
   Builds the test image (`Dockerfile.run_test`) and runs all tests.
@@ -379,7 +406,7 @@ The `Makefile` provides convenient targets for common tasks. Run them from the p
   Runs pre-commit hooks (black formatter, pylint static analysis, mypy type checking).
 
 - `make prod`:
-  Builds the production Docker image.
+  Builds and starts the production stack (`docker-compose.yaml`): Redis, the `web` container and the `worker` container.
 
 ## Running Tests
 
@@ -406,7 +433,7 @@ The project includes three Dockerfiles for different environments:
 - **Dockerfile** (Production):
   Builds a production image based on Python 3.13 slim.
   - Installs only runtime dependencies (skips dev/test deps).
-  - Copies the source code (`./src`) into the container.
+  - Copies `./src` into `/app`, plus `settings.json`, `alembic.ini` and `migrations/` at `/` (the metrics-DB migrations resolve the repo root to `/` once `./src` is flattened into `/app`).
   - Runs the app with Uvicorn on port 8080.
     Use this for **deployment**.
 
@@ -425,7 +452,7 @@ The project includes three Dockerfiles for different environments:
   - Generates reports in `/app/reports` (mounted to `./reports` on host).
     Use this to execute **tests in an isolated environment** in a production-like environment.
 
-All images use Python 3.13.13-slim-trixie as the base for minimal size.
+`Dockerfile` and `Dockerfile.dev` build on `python:3.13-slim-trixie`; `Dockerfile.run_test` pins `python:3.13.13-slim-trixie`. All three add `libexpat1` for rasterio's bundled GDAL bindings.
 
 ## Configuration (`settings.json`)
 
@@ -453,13 +480,13 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 
 | Key                           | Description                                                                                                                               |
 | :---------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, and ECMWF.                                   |
-| `satellite_tile_ttl`          | Redis TTL in seconds for cached **satellite** tiles (band_2/9/13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
-| `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles (default: 2592000 = 30 days).                                                             |
+| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, ECMWF, WRF and GFS.                          |
+| `satellite_tile_ttl`          | Redis TTL in seconds for cached **satellite** tiles (ABI c02/c09/c13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
+| `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles (`settings.json`: 21600 = 6 h; no code default, so the key must be present).              |
 | `ecmwf_tile_ttl`              | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                 |
 | `ecmwf_forecasts_to_keep`     | How many ECMWF forecast cycles to retain in the hot cache.                                                                                |
 | `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                  |
-| `sync_interval_seconds`       | Seconds between background sync cycles (`full` mode); one shared loop covers satellite + radar + ECMWF.                                   |
+| `sync_interval_seconds`       | Seconds between background sync cycles (`full` mode) for satellite, radar and both ECMWF products. WRF and GFS use `wrf_sync_interval_seconds` / `gfs_sync_interval_seconds` (120 s each). |
 | `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                 |
 | `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                               |
 | `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                |
@@ -468,12 +495,12 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 
 | Key                                                                                                          | Description                                                                                                                                                                                                                                                                     |
 | :----------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `basemap_sync_mode`                                                                                          | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); default: `"full"`).                                                                                                                                                  |
+| `basemap_sync_mode`                                                                                          | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); code default `"full"`, `settings.json` sets `"no_cache"`).                                                                                                       |
 | `basemap_providers`                                                                                          | List of `{ "id": ..., "enabled": ... }` selecting which external providers are served. URLs live in `.env` (`BASEMAP_*_URL`).                                                                                                                                                   |
-| `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (default: 2592000 = 30 days).                                                                                                                                                                                                                |
+| `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (code default 2592000 = 30 days; `settings.json` sets 86400 = 1 day).                                                                                                                                                                        |
 | `basemap_scrape_interval_seconds`                                                                            | Seconds between full-sweep scrape cycles (default: 604800 = weekly). Must be strictly less than `basemap_s3_object_ttl_days` so S3 objects are refreshed before the lifecycle expires them.                                                                                     |
 | `basemap_scrape_concurrent`                                                                                  | HTTP concurrency budget for the scraper (default: 20).                                                                                                                                                                                                                          |
-| `basemap_scrape_parallelism_mode`                                                                            | `"sequential"` (default; one provider at a time) / `"per_origin"` (providers sharing a host stay serial, different hosts run in parallel) / `"full"` (all providers concurrent).                                                                                                |
+| `basemap_scrape_parallelism_mode`                                                                            | `"sequential"` (code default; one provider at a time) / `"per_origin"` (providers sharing a host stay serial, different hosts run in parallel; what `settings.json` sets) / `"full"` (all providers concurrent).                                                               |
 | `basemap_scrape_per_host_concurrent`                                                                         | Max concurrent scraper requests to a single upstream host. Stacks under `basemap_scrape_concurrent` (default: 8). Must be ≤ the global budget.                                                                                                                                  |
 | `basemap_scrape_delay_ms`                                                                                    | Per-request delay in the scraper to be a polite scraping citizen (default: 30 ms).                                                                                                                                                                                              |
 | `basemap_cache_max_zoom`                                                                                     | Maximum zoom level the scraper backs up (default: 11). Deeper zooms are relay-only even in `full` mode.                                                                                                                                                                         |
@@ -484,14 +511,14 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_request_deadline_seconds`                                                                           | Hard wall-clock deadline per reader request, bounding single-flight waiters and the relay fallback (default: 4.0).                                                                                                                                                              |
 | `basemap_s3_object_ttl_days`                                                                                 | Lifecycle policy applied at startup to the basemap S3 bucket (default: 35 days — one scrape cycle of headroom over the 30-day Redis TTL).                                                                                                                                       |
 | `basemap_online_fallback_enabled`                                                                            | When `false`, disables tier-3 provider proxy — the service serves only from Redis/S3 (fully offline reads). Always required in `relay_only`.                                                                                                                                    |
-| `basemap_provider_availability_ttl`                                                                              | TTL for the Redis-backed "has any tile in S3?" check used by `/basemap/providers` when online fallback is disabled.                                                                                                                                                             |
+| `basemap_provider_availability_ttl`                                                                          | TTL in seconds for the Redis-backed per-provider availability answers served by `/basemap/providers` (default: 240). Each refresh probes upstream and checks the S3 fallback, so the TTL is the freshness/cost trade-off.                                                        |
 | `basemap_scrape_state_db_path`                                                                               | SQLite file backing the resumable-scrape cursor + failed-tile queue (default: `data/basemap_scraper_state.sqlite`).                                                                                                                                                             |
 | `basemap_scrape_checkpoint_every` / `basemap_scrape_checkpoint_seconds`                                      | How often the scraper flushes its watermark to SQLite.                                                                                                                                                                                                                          |
-| `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300, immutable`).                                                                                                                                                           |
+| `basemap_cache_control_tile_miss`                                                                            | `Cache-Control` header for the transparent-PNG fallback served on misses (default: `public, max-age=300`). Deliberately not `immutable`: a gap is temporary and must be revalidated once the tile lands.                                                                         |
 | `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=2592000, immutable` = 30 days — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
 | `basemap_provider_cooldown_schedule`                                                                         | Exponential backoff list (seconds) indexed by consecutive trip count, capped at the last element (default: `[300, 900, 3600, 10800, 21600]` = 5 min → 6 h). Must be non-empty, positive, monotonically non-decreasing. Persists across restarts via SQLite.                     |
 
-Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
+Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `SATELLITE_TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
 
 About cache-control headers:
 
@@ -511,16 +538,17 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | :----------------------------------- | :----------------------------------------------------------------------------------------- | :------------------------- |
 | `LOG_LEVEL`                          | Logging verbosity (DEBUG, INFO, WARNING, ERROR).                                           | `INFO`                     |
 | `APP_ENV`                            | Application environment (development, production).                                         | `production`               |
-| `APP_HOST_PORT`                      | Host port for the API service.                                                             | `6006`                     |
+| `APP_HOST_PORT`                      | Host port the `web` container publishes (container port is always 8080).                   | `6006`                     |
+| `APP_ROLE`                           | `web` (serve HTTP only) / `worker` (background sync, scrape and metrics loops only) / `all` (both). Compose runs one container of each. | `all`                      |
 | `S3_TILES_DATA_ENDPOINT`             | S3/SeaweedFS endpoint (host:port). Use `host.docker.internal:9000` for local.              | Required for sync          |
 | `S3_TILES_DATA_ACCESS_KEY`           | S3/SeaweedFS access key.                                                                   | Required for sync          |
 | `S3_TILES_DATA_SECRET_KEY`           | S3/SeaweedFS secret key.                                                                   | Required for sync          |
 | `S3_TILES_DATA_BUCKET_NAME`          | S3 bucket name for satellite / radar / ECMWF tiles.                                        | `tiles-data`               |
 | `S3_TILES_DATA_SECURE`               | Use HTTPS for S3 connection (`true`/`false`).                                              | `false`                    |
 | `S3_BASEMAP_BUCKET_NAME`             | S3 bucket name for the basemap cold backup.                                                | `basemap-tiles`            |
-| `REDIS_URL`                          | Redis connection URL.                                                                      | `redis://localhost:6379/0` |
-| `WEB_CONCURRENCY`                    | Number of Uvicorn workers.                                                                 | `1`                        |
-| `SYNC_MODE`                          | `full` / `on_demand` — applies to satellite, radar, ECMWF.                                 | `full`                     |
+| `REDIS_URL`                          | Redis connection URL. No code default — must be set.                                       | `redis://redis:6379/0` in `.env.example` |
+| `WEB_CONCURRENCY`                    | Uvicorn workers for the `web` container. The `worker` container uses `WORKER_CONCURRENCY`.  | `3` in `.env.example` (`WORKER_CONCURRENCY`: 1) |
+| `SYNC_MODE`                          | `full` / `on_demand` — applies to satellite, radar, ECMWF, WRF and GFS.                    | `full`                     |
 | `BASEMAP_SYNC_MODE`                  | `full` / `on_demand` / `no_cache` / `relay_only`.                                          | `full`                     |
 | `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
 | `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |
@@ -531,11 +559,15 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 Basemap tuning (scrape cadence, HTTP client budgets, bounding box,
 negative-cache TTL, etc.) is also settable via env; see `settings.py`
 for the complete list (every `basemap_*` setting has a matching
-`BASEMAP_*` env var).
+`BASEMAP_*` env var). The SMN weather-stations subsystem adds its own
+env-only vars (`SMN_API_*`, `S3_WEATHER_STATIONS_BUCKET_NAME`,
+`S3_API_KEYS_BUCKET_NAME`, `WEATHER_STATIONS_ADMIN_PASSWORD`) — all in
+`.env.example`. `Settings._validate` fails startup if API-key auth is on
+(the default) without an admin password or without S3 configured.
 
 ## API Documentation
 
-- **Swagger UI**: http://localhost:8080/docs (when the app is running)
-  Explore endpoints, try requests, and view schemas interactively.
+- **Swagger UI**: `/docs` on the running app — http://localhost:6006/docs after `make up`, http://localhost:8080/docs after `make local`. Explore endpoints, try requests, and view schemas interactively.
+- **Health check**: `GET /health`, also used by the container healthcheck.
 
-In production, replace `localhost:8080` with your deployed URL (e.g., https://api.example.com/docs).
+In production, replace the host with the deployed one.

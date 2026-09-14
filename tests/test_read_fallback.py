@@ -44,26 +44,28 @@ async def test_satellite_tile_falls_back_to_s3(mock_redis_client):
     s3 = _s3_with_tile()
     strategy = SatelliteFullSyncStrategy(mock_redis_client, s3, 3600, 30)
 
-    result = await strategy.get_tile("band_13", "20260101T0000Z", 5, 10, 15)
+    result = await strategy.get_tile("goes19/abi/c13", "20260101T0000Z", 5, 10, 15)
 
     assert result == TILE
     s3.download_tile.assert_awaited_once_with(
-        S3Client.build_satellite_tile_key("band_13", "20260101T0000Z", 5, 10, 15)
+        S3Client.build_satellite_tile_key("goes19/abi/c13", "20260101T0000Z", 5, 10, 15)
     )
 
 
 @pytest.mark.asyncio
 async def test_satellite_tile_no_s3_returns_none(mock_redis_client):
     strategy = SatelliteFullSyncStrategy(mock_redis_client)  # Redis-only
-    assert await strategy.get_tile("band_13", "ts", 5, 0, 0) is None
+    assert await strategy.get_tile("goes19/abi/c13", "ts", 5, 0, 0) is None
 
 
 @pytest.mark.asyncio
 async def test_satellite_listing_falls_back_to_s3(mock_redis_client):
-    s3 = _s3_listing(["tiles/band_13/20260101T0000Z/", "tiles/band_13/20260101T0010Z/"])
+    s3 = _s3_listing(
+        ["tiles/goes19/abi/c13/20260101T0000Z/", "tiles/goes19/abi/c13/20260101T0010Z/"]
+    )
     strategy = SatelliteFullSyncStrategy(mock_redis_client, s3, 3600, 30)
 
-    result = await strategy.get_tilesets("band_13")
+    result = await strategy.get_tilesets("goes19/abi/c13")
 
     assert result == ["20260101T0000Z", "20260101T0010Z"]
 
@@ -76,17 +78,17 @@ async def test_radar_tile_falls_back_to_s3(mock_redis_client):
     s3 = _s3_with_tile()
     strategy = RadarFullSyncStrategy(mock_redis_client, s3, 2592000, 30)
 
-    result = await strategy.get_tile("RMA1", "ZDR", "elev0", "ts", 5, 10, 15)
+    result = await strategy.get_tile("RMA1", "zdr", "elev0", "ts", 5, 10, 15)
 
     assert result == TILE
     s3.download_tile.assert_awaited_once_with(
-        S3Client.build_radar_tile_key("RMA1", "ZDR", "ts", "elev0", 5, 10, 15)
+        S3Client.build_radar_tile_key("RMA1", "zdr", "ts", "elev0", 5, 10, 15)
     )
 
 
 @pytest.mark.asyncio
 async def test_radar_list_radars_falls_back_to_s3(mock_redis_client):
-    s3 = _s3_listing(["tiles/radar/RMA1/", "tiles/radar/RMA2/"])
+    s3 = _s3_listing(["tiles/radar/sinarame/RMA1/", "tiles/radar/sinarame/RMA2/"])
     strategy = RadarFullSyncStrategy(mock_redis_client, s3, 2592000, 30)
 
     assert await strategy.list_radars() == ["RMA1", "RMA2"]
@@ -149,13 +151,13 @@ async def test_wrf_tile_falls_back_to_s3(mock_redis_client):
     strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30)
 
     result = await strategy.get_tile(
-        "Precipitacion1h", "20260603_060000", "F010", 5, 10, 15
+        "precipitacion-1h", "20260603_060000", "F010", 5, 10, 15
     )
 
     assert result == TILE
     s3.download_tile.assert_awaited_once_with(
         S3Client.build_wrf_tile_key(
-            "Precipitacion1h", "20260603_060000", "F010", 5, 10, 15
+            "precipitacion-1h", "20260603_060000", "F010", 5, 10, 15
         )
     )
 
@@ -172,14 +174,14 @@ async def test_wrf_list_init_runs_falls_back_to_s3(mock_redis_client):
     mock_redis_client.get_wrf_init_runs = AsyncMock(return_value=[])
     s3 = _s3_listing(
         [
-            "tiles/wrf/Precipitacion1h/20260603_000000/",
-            "tiles/wrf/Precipitacion1h/20260603_060000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_000000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_060000/",
         ]
     )
     strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30)
 
     # On-demand returns init runs sorted descending (newest first).
-    assert await strategy.list_init_runs("Precipitacion1h") == [
+    assert await strategy.list_init_runs("precipitacion-1h") == [
         "20260603_060000",
         "20260603_000000",
     ]
@@ -191,14 +193,14 @@ async def test_wrf_cold_listing_is_capped_at_inits_to_keep(mock_redis_client):
     mock_redis_client.get_wrf_init_runs = AsyncMock(return_value=[])
     s3 = _s3_listing(
         [
-            "tiles/wrf/Precipitacion1h/20260603_000000/",
-            "tiles/wrf/Precipitacion1h/20260603_060000/",
-            "tiles/wrf/Precipitacion1h/20260603_120000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_000000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_060000/",
+            "tiles/wrf-arg4k/precipitacion-1h/20260603_120000/",
         ]
     )
     strategy = WrfFullSyncStrategy(mock_redis_client, s3, 2592000, 2592000, 30, 2)
 
-    assert await strategy.list_init_runs("Precipitacion1h") == [
+    assert await strategy.list_init_runs("precipitacion-1h") == [
         "20260603_120000",
         "20260603_060000",
     ]

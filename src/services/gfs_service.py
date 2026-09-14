@@ -1,6 +1,5 @@
 """Service exposing GFS tiles, overlays and listings."""
 
-import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -81,14 +80,13 @@ class GfsService:
         if not steps:
             return None
 
-        # Hydrate each step's overlay list from the index, concurrently. Reading
-        # it per step (rather than reusing the product catalogue) is what keeps
-        # the listing honest while a cycle is still filling in: an overlay that
-        # tiles-processor has not uploaded yet is simply not advertised, so the
-        # frontend never asks for a layer that would 404.
-        layer_lists = await asyncio.gather(
-            *(self._strategy.list_layers(product_id, cycle, s) for s in steps)
-        )
+        # Hydrate each step's overlay list from the index, in one bulk read.
+        # Reading it per step (rather than reusing the product catalogue) is
+        # what keeps the listing honest while a cycle is still filling in: an
+        # overlay that tiles-processor has not uploaded yet is not advertised,
+        # so the frontend never asks for a layer that would 404. Bulk keeps
+        # that honesty without one pooled Redis connection per step.
+        layers_by_step = await self._strategy.list_layers_bulk(product_id, cycle, steps)
         return GfsStepListResponse(
             product_id=product_id,
             cycle=cycle,
@@ -96,9 +94,9 @@ class GfsService:
                 GfsStepInfo(
                     fxxx=fxxx,
                     valid_ts=valid_timestamp(cycle, fxxx) or "",
-                    layers=layers,
+                    layers=layers_by_step.get(fxxx, []),
                 )
-                for fxxx, layers in zip(steps, layer_lists)
+                for fxxx in steps
             ],
             tile_url_pattern=self._tile_url_pattern(product_id),
             barb_tile_url_pattern=self._barb_url_pattern(product_id),

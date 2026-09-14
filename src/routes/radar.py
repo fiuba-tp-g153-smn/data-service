@@ -5,17 +5,18 @@ from fastapi import Path as PathParam
 from fastapi import Request, Response, status
 
 from dependencies import logger, settings
-from models.radar import RadarPointValueResponse
+from models.radar import RadarPointValueResponse, RadarTilesetListResponse
 from routes.utils import (
     create_tile_response,
     etag_pair,
+    json_listing_response,
     make_transparent_tile_response,
     not_modified,
 )
 from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
 from services.radar_service import radar_service
 
-router = APIRouter(prefix="/products/radar", tags=["Radar"])
+router = APIRouter(prefix="/products/radar-sinarame", tags=["Radar"])
 
 
 @router.get(
@@ -28,7 +29,7 @@ async def list_radars():
     """
     List all available radars (e.g., RMA1, RMA2, ...)
     """
-    logger.info("API: Listing all radars")
+    logger.debug("API: Listing all radars")
     return await radar_service.list_radars()
 
 
@@ -42,7 +43,7 @@ async def list_radar_variables(
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1, RMA2)")
 ):
     """List all variables for a given radar."""
-    logger.info("API: Listing variables for radar: %s", radar_id)
+    logger.debug("API: Listing variables for radar: %s", radar_id)
     return await radar_service.list_radar_variables(radar_id)
 
 
@@ -57,7 +58,7 @@ async def list_radar_elevations(
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
 ):
     """List all elevations for a given radar variable."""
-    logger.info(
+    logger.debug(
         "API: Listing elevations for radar: %s, variable: %s", radar_id, variable_id
     )
     return await radar_service.list_radar_elevations(radar_id, variable_id)
@@ -68,8 +69,10 @@ async def list_radar_elevations(
     status_code=status.HTTP_200_OK,
     summary="List tilesets for a radar variable and elevation",
     response_description="Returns all available tilesets for a radar variable and elevation",
+    response_model=RadarTilesetListResponse,
 )
 async def list_radar_tilesets(
+    request: Request,
     radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
     variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
     elevation_id: str = PathParam(
@@ -77,13 +80,16 @@ async def list_radar_tilesets(
     ),
 ):
     """List all tilesets for a radar variable and elevation."""
-    logger.info(
+    logger.debug(
         "API: Listing tilesets for radar: %s, variable: %s, elevation: %s",
         radar_id,
         variable_id,
         elevation_id,
     )
-    return await radar_service.list_radar_tilesets(radar_id, variable_id, elevation_id)
+    data = await radar_service.list_radar_tilesets(radar_id, variable_id, elevation_id)
+    return json_listing_response(
+        data, request.headers.get("if-none-match"), settings.cache_control_config
+    )
 
 
 @router.get(

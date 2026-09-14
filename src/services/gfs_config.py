@@ -23,11 +23,13 @@ class GfsProduct:
     secondary_vars: Mapping[str, str] = field(default_factory=dict)
 
 
-# `mslp` is abbreviated in the URL but keeps the long S3 segment written by
-# tiles-processor. The other two match on both sides.
+# All three now spell the same id in the URL and in S3. `s3_segment` is kept
+# as its own field rather than collapsed into `product_id`: it is the seam that
+# let mslp differ from its URL id before, and it is what would absorb a future
+# divergence without touching the route.
 GFS_MSLP = GfsProduct(
-    product_id="mslp",
-    s3_segment="mean_sea_level_pressure",
+    product_id="mean-sea-level-pressure",
+    s3_segment="mean-sea-level-pressure",
     layers=("isobars", "thickness"),
     unit="hPa",
     # The SMN's `slpb.gs` chart is pure contours, so no raster is produced.
@@ -36,8 +38,8 @@ GFS_MSLP = GfsProduct(
 )
 
 GFS_500HPA = GfsProduct(
-    product_id="500hpa",
-    s3_segment="500hpa",
+    product_id="geopotential-500hpa",
+    s3_segment="geopotential-500hpa",
     layers=("heights", "isotherms"),
     unit="kt",
     has_tiles=True,
@@ -46,8 +48,8 @@ GFS_500HPA = GfsProduct(
 )
 
 GFS_250HPA = GfsProduct(
-    product_id="250hpa",
-    s3_segment="250hpa",
+    product_id="geopotential-250hpa",
+    s3_segment="geopotential-250hpa",
     layers=("heights",),
     unit="kt",
     has_tiles=True,

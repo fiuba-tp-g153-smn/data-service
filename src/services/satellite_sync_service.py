@@ -15,22 +15,22 @@ class SatelliteSyncService(DomainSyncService):
 
     # Prefixes to sync from S3 (matches tiles-processor output structure)
     DEFAULT_SYNC_PREFIXES = [
-        "tiles/band_13",
-        "tiles/band_9",
-        "tiles/band_2",
-        "tiles/glm_fed",
-        "tiles/glm_toe",
-        "tiles/glm_mfa",
+        "tiles/goes19/abi/c13",
+        "tiles/goes19/abi/c09",
+        "tiles/goes19/abi/c02",
+        "tiles/goes19/glm/fed",
+        "tiles/goes19/glm/toe",
+        "tiles/goes19/glm/mfa",
     ]
 
     # Maps S3 prefix to channel_dir for Redis key construction
     PREFIX_TO_CHANNEL = {
-        "tiles/band_13": "band_13",
-        "tiles/band_9": "band_9",
-        "tiles/band_2": "band_2",
-        "tiles/glm_fed": "glm_fed",
-        "tiles/glm_toe": "glm_toe",
-        "tiles/glm_mfa": "glm_mfa",
+        "tiles/goes19/abi/c13": "goes19/abi/c13",
+        "tiles/goes19/abi/c09": "goes19/abi/c09",
+        "tiles/goes19/abi/c02": "goes19/abi/c02",
+        "tiles/goes19/glm/fed": "goes19/glm/fed",
+        "tiles/goes19/glm/toe": "goes19/glm/toe",
+        "tiles/goes19/glm/mfa": "goes19/glm/mfa",
     }
 
     def __init__(

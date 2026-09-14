@@ -32,6 +32,10 @@ class FakeStrategy:
         self.calls.append(("list_layers", product_id, cycle, fxxx))
         return list(self.layers_by_step.get(fxxx, []))
 
+    async def list_layers_bulk(self, product_id, cycle, steps):
+        self.calls.append(("list_layers_bulk", product_id, cycle, tuple(steps)))
+        return {fxxx: list(self.layers_by_step.get(fxxx, [])) for fxxx in steps}
+
     async def get_tile(self, product_id, cycle, fxxx, z, x, y):
         self.calls.append(("get_tile", product_id))
         return self._payload
@@ -93,7 +97,7 @@ class TestListCycles:
     @pytest.mark.asyncio
     async def test_reports_step_count_per_cycle(self):
         strategy = FakeStrategy(cycles=[CYCLE], steps=["f000", "f003", "f006"])
-        data = await _service(strategy).list_cycles("500hpa")
+        data = await _service(strategy).list_cycles("geopotential-500hpa")
         assert data is not None
         assert data.cycles[0].cycle == CYCLE
         assert data.cycles[0].step_count == 3
@@ -107,7 +111,7 @@ class TestListCycles:
         )
         with patch("services.gfs_service.settings") as mock_settings:
             mock_settings.gfs_cycles_to_keep = 2
-            data = await _service(strategy).list_cycles("500hpa")
+            data = await _service(strategy).list_cycles("geopotential-500hpa")
 
         assert data is not None
         assert [c.cycle for c in data.cycles] == [
@@ -118,13 +122,13 @@ class TestListCycles:
     @pytest.mark.asyncio
     async def test_advertises_only_single_file_layers(self):
         """`layers` must never hold `barbs`: it 404s as `barbs.json`."""
-        data = await _service().list_cycles("500hpa")
+        data = await _service().list_cycles("geopotential-500hpa")
         assert data is not None
         assert data.layers == ["heights", "isotherms"]
 
     @pytest.mark.asyncio
     async def test_barbs_are_advertised_through_their_own_fields(self):
-        data = await _service().list_cycles("500hpa")
+        data = await _service().list_cycles("geopotential-500hpa")
         assert data is not None
         assert data.barb_tile_url_pattern is not None
         assert "barbs/{z}/{x}/{y}.json" in data.barb_tile_url_pattern
@@ -132,7 +136,7 @@ class TestListCycles:
 
     @pytest.mark.asyncio
     async def test_products_without_barbs_advertise_no_barb_pattern(self):
-        for product_id in ("250hpa", "mslp"):
+        for product_id in ("geopotential-250hpa", "mean-sea-level-pressure"):
             data = await _service().list_cycles(product_id)
             assert data is not None
             assert data.barb_tile_url_pattern is None
@@ -141,20 +145,20 @@ class TestListCycles:
     @pytest.mark.asyncio
     async def test_mslp_advertises_no_tile_pattern(self):
         """Contour-only product: the frontend must not build tile URLs for it."""
-        data = await _service().list_cycles("mslp")
+        data = await _service().list_cycles("mean-sea-level-pressure")
         assert data is not None
         assert data.tile_url_pattern is None
 
     @pytest.mark.asyncio
     async def test_raster_products_advertise_a_tile_pattern(self):
-        data = await _service().list_cycles("250hpa")
+        data = await _service().list_cycles("geopotential-250hpa")
         assert data is not None
         assert data.tile_url_pattern is not None
         assert "{z}/{x}/{y}.webp" in data.tile_url_pattern
 
     @pytest.mark.asyncio
     async def test_without_a_strategy_returns_an_empty_but_valid_payload(self):
-        data = await GfsService().list_cycles("500hpa")
+        data = await GfsService().list_cycles("geopotential-500hpa")
         assert data is not None
         assert data.cycles == []
 
@@ -165,16 +169,35 @@ class TestListSteps:
         assert await _service().list_steps("850hpa", CYCLE) is None
 
     @pytest.mark.asyncio
+    async def test_listing_does_not_fan_out_one_call_per_step(self):
+        """Same regression WRF hit: per-step reads exhaust the shared pool."""
+        steps = [f"f{h:03d}" for h in range(0, 145, 3)]
+        strategy = FakeStrategy(steps=steps)
+        service = _service(strategy)
+
+        data = await service.list_steps("geopotential-500hpa", CYCLE)
+
+        assert len(data.steps) == len(steps)
+        assert not [c for c in strategy.calls if c[0] == "list_layers"]
+        bulk = [c for c in strategy.calls if c[0] == "list_layers_bulk"]
+        assert bulk == [
+            ("list_layers_bulk", "geopotential-500hpa", CYCLE, tuple(steps))
+        ]
+
+    @pytest.mark.asyncio
     async def test_unknown_cycle_returns_none(self):
         assert (
-            await _service(FakeStrategy(steps=[])).list_steps("500hpa", CYCLE) is None
+            await _service(FakeStrategy(steps=[])).list_steps(
+                "geopotential-500hpa", CYCLE
+            )
+            is None
         )
 
     @pytest.mark.asyncio
     async def test_cycle_outside_the_advertised_window_returns_none(self):
         """tiles-processor keeps more cycles in S3 than the API advertises."""
         strategy = FakeStrategy(cycles=["20260808T1200Z"], steps=["f000"])
-        assert await _service(strategy).list_steps("500hpa", CYCLE) is None
+        assert await _service(strategy).list_steps("geopotential-500hpa", CYCLE) is None
 
     @pytest.mark.asyncio
     async def test_cycle_beyond_the_cap_returns_none_even_if_indexed(self):
@@ -184,19 +207,22 @@ class TestListSteps:
         )
         with patch("services.gfs_service.settings") as mock_settings:
             mock_settings.gfs_cycles_to_keep = 2
-            assert await _service(strategy).list_steps("500hpa", CYCLE) is None
+            assert (
+                await _service(strategy).list_steps("geopotential-500hpa", CYCLE)
+                is None
+            )
 
     @pytest.mark.asyncio
     async def test_retired_cycle_never_reaches_the_strategy_listing(self):
         """The guard must cut before the S3 fallback can resurrect the cycle."""
         strategy = FakeStrategy(cycles=["20260808T1200Z"], steps=["f000"])
-        await _service(strategy).list_steps("500hpa", CYCLE)
+        await _service(strategy).list_steps("geopotential-500hpa", CYCLE)
         assert not [call for call in strategy.calls if call[0] == "list_steps"]
 
     @pytest.mark.asyncio
     async def test_each_step_carries_its_valid_timestamp(self):
         strategy = FakeStrategy(steps=["f000", "f003"])
-        data = await _service(strategy).list_steps("500hpa", CYCLE)
+        data = await _service(strategy).list_steps("geopotential-500hpa", CYCLE)
         assert data is not None
         assert [s.valid_ts for s in data.steps] == [CYCLE, "20260808T0300Z"]
 
@@ -209,7 +235,7 @@ class TestListSteps:
         """
         strategy = FakeStrategy(steps=["f000", "f003"])
         strategy.layers_by_step = {"f000": ["heights", "isotherms"], "f003": []}
-        data = await _service(strategy).list_steps("500hpa", CYCLE)
+        data = await _service(strategy).list_steps("geopotential-500hpa", CYCLE)
         assert data is not None
         assert data.steps[0].layers == ["heights", "isotherms"]
         assert data.steps[1].layers == []
@@ -226,7 +252,9 @@ class TestProductGating:
     @pytest.mark.asyncio
     async def test_mslp_has_no_tiles(self):
         strategy = FakeStrategy()
-        result = await _service(strategy).get_tile_data("mslp", CYCLE, "f003", 5, 9, 17)
+        result = await _service(strategy).get_tile_data(
+            "mean-sea-level-pressure", CYCLE, "f003", 5, 9, 17
+        )
         assert result is None
         assert not any(c[0] == "get_tile" for c in strategy.calls)
 
@@ -234,7 +262,7 @@ class TestProductGating:
     async def test_250hpa_has_no_barbs(self):
         strategy = FakeStrategy()
         result = await _service(strategy).get_barb_tile(
-            "250hpa", CYCLE, "f003", 4, 5, 9
+            "geopotential-250hpa", CYCLE, "f003", 4, 5, 9
         )
         assert result is None
         assert not any(c[0] == "get_barb_tile" for c in strategy.calls)
@@ -243,7 +271,7 @@ class TestProductGating:
     async def test_500hpa_serves_barbs(self):
         strategy = FakeStrategy()
         result = await _service(strategy).get_barb_tile(
-            "500hpa", CYCLE, "f003", 4, 5, 9
+            "geopotential-500hpa", CYCLE, "f003", 4, 5, 9
         )
         assert result == b"data"
 
@@ -252,7 +280,7 @@ class TestProductGating:
         """`isotherms` exists at 500 hPa but not at 250 hPa."""
         strategy = FakeStrategy()
         result = await _service(strategy).get_geojson(
-            "250hpa", CYCLE, "f003", "isotherms"
+            "geopotential-250hpa", CYCLE, "f003", "isotherms"
         )
         assert result is None
         assert not any(c[0] == "get_geojson" for c in strategy.calls)
@@ -261,12 +289,16 @@ class TestProductGating:
     async def test_barbs_are_not_reachable_as_a_single_file_overlay(self):
         """Barbs are per-tile; asking for `barbs.json` must not hit S3."""
         strategy = FakeStrategy()
-        result = await _service(strategy).get_geojson("500hpa", CYCLE, "f003", "barbs")
+        result = await _service(strategy).get_geojson(
+            "geopotential-500hpa", CYCLE, "f003", "barbs"
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_valid_overlay_is_served(self):
-        result = await _service().get_geojson("mslp", CYCLE, "f003", "thickness")
+        result = await _service().get_geojson(
+            "mean-sea-level-pressure", CYCLE, "f003", "thickness"
+        )
         assert result == b"data"
 
     @pytest.mark.asyncio

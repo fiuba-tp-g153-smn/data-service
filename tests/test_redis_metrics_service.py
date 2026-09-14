@@ -15,7 +15,7 @@ from services.redis_metrics_service import (
 
 
 def test_classify_key_maps_known_prefixes():
-    assert classify_key(b"tile:sat:band_2/ts/3/1/1") == "satellite"
+    assert classify_key(b"tile:sat:goes19/abi/c02/ts/3/1/1") == "satellite"
     assert classify_key(b"tile:radar:r/v/t/3/1/1") == "radar"
     assert classify_key(b"tile:ecmwf_tp:f/p/3/1/1") == "ecmwf_tp"
     assert classify_key(b"geojson:ecmwf_mslp:f/t") == "ecmwf_mslp"
@@ -25,7 +25,7 @@ def test_classify_key_maps_known_prefixes():
     assert classify_key(b"tile:basemap:miss:argenmap:3:1:1") == "basemap"
     assert classify_key(b"basemap:availability:argenmap") == "basemap"
     assert classify_key(b"cache:ws:latest") == "weather_stations"
-    assert classify_key(b"idx:sat:band_2") == "indexes"
+    assert classify_key(b"idx:sat:goes19/abi/c02") == "indexes"
     assert classify_key(b"cache:radar:listing") == "listings"
     assert classify_key(b"sync:status") == "sync"
 
@@ -88,10 +88,10 @@ async def store(tmp_path):
 @pytest.mark.asyncio
 async def test_run_sync_aggregates_memory_by_domain(store):
     sizes = {
-        b"tile:sat:band_2/ts/3/1/1": 100,
-        b"tile:sat:band_2/ts/3/1/2": 150,
+        b"tile:sat:goes19/abi/c02/ts/3/1/1": 100,
+        b"tile:sat:goes19/abi/c02/ts/3/1/2": 150,
         b"tile:radar:r/v/t/3/1/1": 200,
-        b"idx:sat:band_2": 50,
+        b"idx:sat:goes19/abi/c02": 50,
         b"cache:ws:latest": 30,
         b"sync:status": None,  # key vanished mid-scan -> counts, 0 bytes
         b"weirdkey": 10,
@@ -117,7 +117,7 @@ async def test_run_sync_aggregates_memory_by_domain(store):
 @pytest.mark.asyncio
 async def test_run_sync_samples_large_domains(store):
     """Domains over the cap are measured via <= cap sampled keys, extrapolated."""
-    sizes = {f"tile:sat:band_2/ts/3/1/{i}".encode(): 100 for i in range(10)}
+    sizes = {f"tile:sat:goes19/abi/c02/ts/3/1/{i}".encode(): 100 for i in range(10)}
     redis = _FakeRedis(sizes, info={}, dbsize=10)
     svc = RedisMetricsService(
         _settings(redis_metrics_memory_sample_per_domain=2), redis, store
@@ -135,7 +135,7 @@ async def test_run_sync_samples_large_domains(store):
 @pytest.mark.asyncio
 async def test_run_sync_zero_sample_cap_is_exact_census(store):
     """Cap 0 disables sampling: every key is measured (old exact behavior)."""
-    sizes = {f"tile:sat:band_2/ts/3/1/{i}".encode(): 100 + i for i in range(10)}
+    sizes = {f"tile:sat:goes19/abi/c02/ts/3/1/{i}".encode(): 100 + i for i in range(10)}
     redis = _FakeRedis(sizes, info={}, dbsize=10)
     svc = RedisMetricsService(
         _settings(redis_metrics_memory_sample_per_domain=0), redis, store

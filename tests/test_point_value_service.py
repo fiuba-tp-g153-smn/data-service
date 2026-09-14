@@ -22,7 +22,7 @@ async def test_sample_satellite_point_uses_unit():
     strategy.sample_cog_value = AsyncMock(return_value=123.4)
     service.set_strategy(strategy)
 
-    sample = await service.sample_satellite_point("band_13", "t1", -34.0, -58.0)
+    sample = await service.sample_satellite_point("goes19/abi/c13", "t1", -34.0, -58.0)
 
     assert sample.value == 123.4
     assert sample.unit == "K"
@@ -35,7 +35,7 @@ async def test_sample_satellite_point_uses_unit_for_glm_band():
     strategy.sample_cog_value = AsyncMock(return_value=123.4)
     service.set_strategy(strategy)
 
-    sample = await service.sample_satellite_point("glm_fed", "t1", -34.0, -58.0)
+    sample = await service.sample_satellite_point("goes19/glm/fed", "t1", -34.0, -58.0)
 
     assert sample.value == 123.4
     assert sample.unit == "flashes/min"
@@ -49,7 +49,7 @@ async def test_sample_raises_cog_not_found():
     service.set_strategy(strategy)
 
     with pytest.raises(CogNotFoundError):
-        await service.sample_satellite_point("band_13", "missing", -34.0, -58.0)
+        await service.sample_satellite_point("goes19/abi/c13", "missing", -34.0, -58.0)
 
 
 @pytest.mark.asyncio
@@ -60,7 +60,7 @@ async def test_sample_raises_no_data_or_outside():
     service.set_strategy(strategy)
 
     with pytest.raises(NoDataOrOutsideError):
-        await service.sample_satellite_point("band_13", "t1", -34.0, -58.0)
+        await service.sample_satellite_point("goes19/abi/c13", "t1", -34.0, -58.0)
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,7 @@ async def test_sample_ecmwf_tp_point_builds_correct_cog_key():
     )
 
     expected_key = (
-        "cog/models/ecmwf/total_precipitation" "/20260330T1200Z/20260330T1500Z.tif"
+        "cog/ecmwf-ifs/total-precipitation" "/20260330T1200Z/20260330T1500Z.tif"
     )
     strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)
 
@@ -144,6 +144,6 @@ async def test_sample_ecmwf_mslp_point_builds_correct_cog_key():
     )
 
     expected_key = (
-        "cog/models/ecmwf/mean_sea_level_pressure" "/20260413T1200Z/20260413T1500Z.tif"
+        "cog/ecmwf-ifs/mean-sea-level-pressure" "/20260413T1200Z/20260413T1500Z.tif"
     )
     strategy.sample_cog_value.assert_awaited_once_with(expected_key, -34.0, -58.0)

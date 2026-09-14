@@ -51,6 +51,10 @@ class Settings:
     # fail fast rather than block every awaiting coroutine forever; the pool is
     # capped so a full-sync fan-out can't balloon FDs on the shared box.
     redis_max_connections: int = 100
+    # How long a command waits for a free pooled connection before giving up.
+    # The pool blocks rather than refusing, so this is the bound that keeps a
+    # wide fan-out as backpressure instead of a stall.
+    redis_pool_wait_timeout_seconds: float = 5.0
     redis_socket_timeout_seconds: float = 5.0
     redis_socket_connect_timeout_seconds: float = 2.0
     redis_health_check_interval_seconds: int = 30
@@ -109,6 +113,11 @@ class Settings:
     # download time so the frontier always advances. WRF uses its own value.
     sync_domain_timeout_seconds: int = 300
     cache_control_config: str
+    # How long the bundled /products/availability snapshot is memoised in
+    # process. It exists so N clients polling together collapse onto one walk
+    # of the indexes rather than N; keep it well under the frontend's re-probe
+    # cadence so a product un-greys promptly once its sync lands.
+    product_availability_ttl_seconds: float = 10.0
     cache_control_tile: str
     # File locks used by sync services so that only one uvicorn worker
     # runs the background sync task (fcntl exclusive lock).
@@ -370,6 +379,7 @@ class Settings:
             "sync_min_sleep_seconds",
             "sync_domain_timeout_seconds",
             "cache_control_config",
+            "product_availability_ttl_seconds",
             "cache_control_tile",
             "s3_max_concurrent_downloads",
             "s3_connect_timeout_seconds",

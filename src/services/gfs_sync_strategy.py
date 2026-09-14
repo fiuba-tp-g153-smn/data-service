@@ -51,6 +51,11 @@ class GfsSyncStrategy(Protocol):
     async def list_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
         """List the overlay layers a step actually has, sorted."""
 
+    async def list_layers_bulk(
+        self, product_id: str, cycle: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Map `fxxx -> [layer]` for many steps, bounded regardless of count."""
+
 
 def _s3_segment(product_id: str) -> Optional[str]:
     """S3 path segment for a product id, or None when the id is unknown."""
@@ -230,6 +235,20 @@ class GfsOnDemandStrategy:
         by_step = await self._cycle_layer_map(product_id, cycle)
         return sorted(by_step.get(fxxx, []))
 
+    async def list_layers_bulk(
+        self, product_id: str, cycle: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Layers for many steps, resolved from the one cycle-wide LIST.
+
+        `_cycle_layer_map` already covers every step of the cycle in a single
+        delimited LIST, so asking for many steps costs exactly what asking for
+        one does — no fan-out to bound.
+        """
+        if not steps:
+            return {}
+        by_step = await self._cycle_layer_map(product_id, cycle)
+        return {fxxx: sorted(by_step.get(fxxx, [])) for fxxx in steps}
+
     async def _cycle_layer_map(
         self, product_id: str, cycle: str
     ) -> Dict[str, List[str]]:
@@ -367,3 +386,21 @@ class GfsFullSyncStrategy:
         if layers:
             return layers
         return await self._fallback.list_layers(product_id, cycle, fxxx)
+
+    async def list_layers_bulk(
+        self, product_id: str, cycle: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """One pipelined index read, then S3 discovery only for what missed.
+
+        A cycle still filling in has steps whose overlays are not indexed yet,
+        and those resolve through the fallback's single cycle-wide LIST — so a
+        partial miss costs one extra call, not one per missing step.
+        """
+        by_step = await self._redis.get_gfs_layers_bulk(product_id, cycle, steps)
+        missing = [fxxx for fxxx in steps if not by_step.get(fxxx)]
+        if not missing:
+            return by_step
+
+        discovered = await self._fallback.list_layers_bulk(product_id, cycle, missing)
+        by_step.update(discovered)
+        return by_step

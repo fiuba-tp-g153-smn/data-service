@@ -200,7 +200,7 @@ class WeatherStationsScraperService(  # pylint: disable=too-many-instance-attrib
         """Fail-soft: skip if download/unzip fails; carry on with existing copy.
 
         Precedence is live > stored > bundled. When the fetch fails the stored
-        copy is authoritative and we simply skip; the repo-bundled registry is
+        copy is authoritative and we skip; the repo-bundled registry is
         only ever used to SEED an empty bucket (`_registry_hash is None`), so a
         bundle that has drifted behind SMN can never overwrite fresher data.
         """

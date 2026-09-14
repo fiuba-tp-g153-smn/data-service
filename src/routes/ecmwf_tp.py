@@ -1,12 +1,8 @@
 """ECMWF total precipitation endpoints."""
 
-import hashlib
-import json
-
 from fastapi import APIRouter, HTTPException, Query
 from fastapi import Path as PathParam
 from fastapi import Request, Response, status
-from fastapi.responses import JSONResponse
 
 from dependencies import logger, settings
 from models.ecmwf_tp import (
@@ -14,7 +10,7 @@ from models.ecmwf_tp import (
     ForecastListResponse,
     PeriodListResponse,
 )
-from routes.utils import create_tile_response
+from routes.utils import create_tile_response, json_listing_response
 from services.ecmwf_tp_service import ecmwf_tp_service
 from services.point_value_service import (
     CogNotFoundError,
@@ -22,7 +18,7 @@ from services.point_value_service import (
     point_value_service,
 )
 
-router = APIRouter(prefix="/products/ecmwf", tags=["ECMWF Total Precipitation"])
+router = APIRouter(prefix="/products/ecmwf-ifs", tags=["ECMWF Total Precipitation"])
 
 _ZOOM_MIN = 3
 _ZOOM_MAX = 7
@@ -37,18 +33,10 @@ _ZOOM_MAX = 7
 async def list_forecasts(request: Request):
     """List available ECMWF total precipitation forecast runs."""
     data = await ecmwf_tp_service.list_forecasts()
-    payload = data.model_dump()
-    etag = (
-        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
-    )
-
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-
-    return JSONResponse(
-        content=payload,
-        headers={"Cache-Control": settings.cache_control_config, "ETag": etag},
+    return json_listing_response(
+        data.model_dump(),
+        request.headers.get("if-none-match"),
+        settings.cache_control_config,
     )
 
 
@@ -72,18 +60,10 @@ async def list_periods(
             detail=f"Forecast '{forecast_ts}' not found",
         )
 
-    payload = data.model_dump()
-    etag = (
-        f'"{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"'
-    )
-
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
-
-    return JSONResponse(
-        content=payload,
-        headers={"Cache-Control": settings.cache_control_config, "ETag": etag},
+    return json_listing_response(
+        data.model_dump(),
+        request.headers.get("if-none-match"),
+        settings.cache_control_config,
     )
 
 

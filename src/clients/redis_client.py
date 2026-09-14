@@ -6,6 +6,12 @@ and sync observability. Replaces filesystem storage for satellite tiles
 and provides a shared cache for radar tiles.
 """
 
+# TECH DEBT: one client class holds the key schema for every domain, so it grows
+# with each one and has now crossed pylint's 1000-line module cap. Splitting it
+# per domain (satellite/radar/ecmwf/wrf/gfs) behind the same facade is the real
+# fix — its own commit, rather than blocking each addition.
+# pylint: disable=too-many-lines
+
 import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -14,6 +20,9 @@ import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
 logger = logging.getLogger(__name__)
+
+_RADAR_ROOT_KEY = "idx:radar:radars"
+_WRF_PRODUCTS_KEY = "idx:wrf:products"
 
 
 class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-public-methods
@@ -30,6 +39,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         redis_url: str,
         *,
         max_connections: int = 100,
+        pool_wait_timeout_seconds: float = 5.0,
         socket_timeout_seconds: float = 5.0,
         socket_connect_timeout_seconds: float = 2.0,
         health_check_interval_seconds: int = 30,
@@ -37,6 +47,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         # pylint: disable=too-many-arguments
         self._redis_url = redis_url
         self._max_connections = max_connections
+        self._pool_wait_timeout_seconds = pool_wait_timeout_seconds
         self._socket_timeout_seconds = socket_timeout_seconds
         self._socket_connect_timeout_seconds = socket_connect_timeout_seconds
         self._health_check_interval_seconds = health_check_interval_seconds
@@ -50,21 +61,31 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         swapping Redis fails fast instead of blocking every awaiting coroutine
         — sync loop and request serving alike — indefinitely. The lock + double
         check make a first-use race build a single pool rather than leaking one.
+
+        It is a *blocking* pool on purpose. The plain pool refuses on the
+        (max_connections + 1)-th concurrent command instead of queueing, so one
+        endpoint fanning out wider than the cap does not merely slow itself
+        down: it raises MaxConnectionsError, and because the pool is shared by
+        every domain it takes satellite, radar, ECMWF, GFS and basemap down
+        with it. Waiting turns that cliff into backpressure, still bounded by
+        `pool_wait_timeout_seconds` so a genuinely stuck pool surfaces.
         """
         if self._redis is not None:
             return
         async with self._connect_lock:
             if self._redis is not None:
                 return
-            self._redis = aioredis.from_url(
+            pool = aioredis.BlockingConnectionPool.from_url(
                 self._redis_url,
                 decode_responses=False,
                 max_connections=self._max_connections,
+                timeout=self._pool_wait_timeout_seconds,
                 socket_timeout=self._socket_timeout_seconds,
                 socket_connect_timeout=self._socket_connect_timeout_seconds,
                 socket_keepalive=True,
                 health_check_interval=self._health_check_interval_seconds,
             )
+            self._redis = aioredis.Redis(connection_pool=pool)
             logger.info("Connected to Redis at %s", self._redis_url)
 
     async def close(self) -> None:
@@ -230,38 +251,52 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """
         pipe = await self._conn.pipeline()
 
-        radars_key = "idx:radar:radars"
+        radars_key = _RADAR_ROOT_KEY
         pipe.sadd(radars_key, radar_id.encode())
         pipe.expire(radars_key, ttl)
 
-        vars_key = f"idx:radar:{radar_id}:variables"
+        vars_key = self._radar_variables_key(radar_id)
         pipe.sadd(vars_key, variable_id.encode())
         pipe.expire(vars_key, ttl)
 
-        elevs_key = f"idx:radar:{radar_id}:{variable_id}:elevations"
+        elevs_key = self._radar_elevations_key(radar_id, variable_id)
         pipe.sadd(elevs_key, elevation_id.encode())
         pipe.expire(elevs_key, ttl)
 
-        tilesets_key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        tilesets_key = self._radar_tilesets_key(radar_id, variable_id, elevation_id)
         pipe.zadd(tilesets_key, {tileset_id.encode(): score})
         pipe.expire(tilesets_key, ttl)
 
         await pipe.execute()
 
+    @staticmethod
+    def _radar_variables_key(radar_id: str) -> str:
+        return f"idx:radar:{radar_id}:variables"
+
+    @staticmethod
+    def _radar_elevations_key(radar_id: str, variable_id: str) -> str:
+        return f"idx:radar:{radar_id}:{variable_id}:elevations"
+
+    @staticmethod
+    def _radar_tilesets_key(radar_id: str, variable_id: str, elevation_id: str) -> str:
+        return f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+
     async def get_radar_radars(self) -> List[str]:
         """Get all radar IDs."""
-        members = await self._conn.smembers("idx:radar:radars")  # type: ignore[misc]
+        members = await self._conn.smembers(_RADAR_ROOT_KEY)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
 
     async def get_radar_variables(self, radar_id: str) -> List[str]:
         """Get all variable IDs for a radar."""
-        members = await self._conn.smembers(f"idx:radar:{radar_id}:variables")  # type: ignore[misc]
+        members = await self._conn.smembers(  # type: ignore[misc]
+            self._radar_variables_key(radar_id)
+        )
         return sorted(m.decode() for m in members)
 
     async def get_radar_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """Get all elevation IDs for a radar/variable."""
         members = await self._conn.smembers(  # type: ignore[misc]
-            f"idx:radar:{radar_id}:{variable_id}:elevations"
+            self._radar_elevations_key(radar_id, variable_id)
         )
         return sorted(m.decode() for m in members)
 
@@ -496,6 +531,10 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Add entries to WRF index sorted sets with TTL."""
         pipe = await self._conn.pipeline()
 
+        products_key = _WRF_PRODUCTS_KEY
+        pipe.sadd(products_key, product_id.encode())
+        pipe.expire(products_key, ttl)
+
         init_key = f"idx:wrf:{product_id}:init_runs"
         pipe.zadd(init_key, {init_tag.encode(): init_score})
         pipe.expire(init_key, ttl)
@@ -505,6 +544,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         pipe.expire(steps_key, ttl)
 
         await pipe.execute()
+
+    async def get_wrf_products(self) -> List[str]:
+        """Every WRF product the sync loop has indexed.
+
+        WRF products are discovered from S3 rather than declared in a static
+        catalogue, so — unlike GFS — the only way to enumerate them for the
+        availability snapshot is an index axis, mirroring `idx:radar:radars`.
+        """
+        members = await self._conn.smembers(_WRF_PRODUCTS_KEY)  # type: ignore[misc]
+        return sorted(m.decode() for m in members)
 
     async def get_wrf_init_runs(self, product_id: str) -> List[str]:
         """Get all init run tags for a product, sorted descending (newest first)."""
@@ -567,20 +616,46 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Register the GeoJSON layers available for a WRF forecast step."""
         if not layers:
             return
-        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        key = self._wrf_layers_key(product_id, init_tag, fxxx)
         pipe = await self._conn.pipeline()
         for layer in layers:
             pipe.sadd(key, layer.encode())
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    @staticmethod
+    def _wrf_layers_key(product_id: str, init_tag: str, fxxx: str) -> str:
+        return f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+
     async def get_wrf_layers(
         self, product_id: str, init_tag: str, fxxx: str
     ) -> List[str]:
         """Get all GeoJSON layer names indexed for a forecast step."""
-        key = f"idx:wrf:{product_id}:{init_tag}:{fxxx}:layers"
+        key = self._wrf_layers_key(product_id, init_tag, fxxx)
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    async def get_wrf_layers_bulk(
+        self, product_id: str, init_tag: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Layer names for many steps at once, over a single connection.
+
+        An init run is hourly out to F073, so reading the steps one await at a
+        time would take one pooled connection per step and blow the pool apart
+        on a couple of concurrent requests. Pipelining sends all the SMEMBERS
+        in one round trip on one connection, so the cost of a listing stops
+        scaling with the length of the forecast.
+        """
+        if not steps:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for fxxx in steps:
+            pipe.smembers(self._wrf_layers_key(product_id, init_tag, fxxx))
+        replies = await pipe.execute()
+        return {
+            fxxx: sorted(m.decode() for m in members)
+            for fxxx, members in zip(steps, replies)
+        }
 
     @staticmethod
     def _wrf_overlays_done_key(product_id: str, init_tag: str, fxxx: str) -> str:
@@ -688,18 +763,41 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """Register which overlay layers a forecast step actually has."""
         if not layers:
             return
-        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        key = self._gfs_layers_key(product_id, cycle, fxxx)
         pipe = await self._conn.pipeline()
         for layer in layers:
             pipe.sadd(key, layer.encode())
         pipe.expire(key, ttl)
         await pipe.execute()
 
+    @staticmethod
+    def _gfs_layers_key(product_id: str, cycle: str, fxxx: str) -> str:
+        return f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+
     async def get_gfs_layers(self, product_id: str, cycle: str, fxxx: str) -> List[str]:
         """Get the overlay layers indexed for a forecast step."""
-        key = f"idx:gfs:{product_id}:{cycle}:{fxxx}:layers"
+        key = self._gfs_layers_key(product_id, cycle, fxxx)
         members = await self._conn.smembers(key)  # type: ignore[misc]
         return sorted(m.decode() for m in members)
+
+    async def get_gfs_layers_bulk(
+        self, product_id: str, cycle: str, steps: List[str]
+    ) -> Dict[str, List[str]]:
+        """Overlay layers for many steps at once, over a single connection.
+
+        Same reasoning as `get_wrf_layers_bulk`: one pipelined round trip so a
+        cycle listing costs one pooled connection rather than one per step.
+        """
+        if not steps:
+            return {}
+        pipe = await self._conn.pipeline(transaction=False)
+        for fxxx in steps:
+            pipe.smembers(self._gfs_layers_key(product_id, cycle, fxxx))
+        replies = await pipe.execute()
+        return {
+            fxxx: sorted(m.decode() for m in members)
+            for fxxx, members in zip(steps, replies)
+        }
 
     # ============== GFS Tile Operations (lazy, on-demand cache) ==============
 

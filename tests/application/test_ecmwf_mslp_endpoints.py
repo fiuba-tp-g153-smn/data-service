@@ -23,7 +23,7 @@ client = TestClient(app)
 
 FORECAST_TS = "20260413T1200Z"
 TIMESTAMP_TS = "20260413T1500Z"
-BASE = "/products/ecmwf/mean-sea-level-pressure"
+BASE = "/products/ecmwf-ifs/mean-sea-level-pressure"
 
 
 def _forecast_list():
@@ -40,7 +40,7 @@ def _timestamp_list():
     )
 
 
-# ── GET /products/ecmwf/mean-sea-level-pressure ───────────────────────────────
+# ── GET /products/ecmwf-ifs/mean-sea-level-pressure ───────────────────────────────
 
 
 def test_list_forecasts_returns_200():
@@ -78,7 +78,7 @@ def test_list_forecasts_304_on_etag_match():
         assert second.status_code == 304
 
 
-# ── GET /products/ecmwf/mean-sea-level-pressure/{forecast_ts} ─────────────────
+# ── GET /products/ecmwf-ifs/mean-sea-level-pressure/{forecast_ts} ─────────────────
 
 
 def test_list_timestamps_returns_200():
@@ -115,7 +115,7 @@ def test_list_timestamps_does_not_expose_zoom_or_url_pattern():
         assert "zoom_levels" not in data
 
 
-# ── GET /products/ecmwf/mean-sea-level-pressure/{f}/{t}.json ──────────────────
+# ── GET /products/ecmwf-ifs/mean-sea-level-pressure/{f}/{t}.json ──────────────────
 
 
 def test_get_isobars_geojson_returns_200():
@@ -155,7 +155,7 @@ def test_get_isobars_geojson_304_on_etag_match():
         assert second.status_code == 304
 
 
-# ── GET /products/ecmwf/mean-sea-level-pressure/{f}/{t}/point ─────────────────
+# ── GET /products/ecmwf-ifs/mean-sea-level-pressure/{f}/{t}/point ─────────────────
 
 
 def test_get_point_value_returns_200():

@@ -23,9 +23,9 @@ async def test_sync_prefix_to_redis(mock_redis_client):
     # Mock S3 listing
     client._list_objects = AsyncMock(
         return_value=[
-            {"Key": "tiles/band_13/tileset1/5/10/15.webp", "Size": 100},
-            {"Key": "tiles/band_13/tileset1/5/10/16.webp", "Size": 200},
-            {"Key": "tiles/band_13/tileset1/metadata.json", "Size": 50},
+            {"Key": "tiles/goes19/abi/c13/tileset1/5/10/15.webp", "Size": 100},
+            {"Key": "tiles/goes19/abi/c13/tileset1/5/10/16.webp", "Size": 200},
+            {"Key": "tiles/goes19/abi/c13/tileset1/metadata.json", "Size": 50},
         ]
     )
 
@@ -45,8 +45,8 @@ async def test_sync_prefix_to_redis(mock_redis_client):
     # Run sync
     downloaded = await client.sync_prefix_to_redis(
         mock_redis_client,
-        "tiles/band_13/tileset1/",
-        "band_13",
+        "tiles/goes19/abi/c13/tileset1/",
+        "goes19/abi/c13",
         "tileset1",
     )
 
@@ -73,8 +73,8 @@ async def test_sync_prefix_to_redis_no_objects(mock_redis_client):
 
     downloaded = await client.sync_prefix_to_redis(
         mock_redis_client,
-        "tiles/band_13/tileset1/",
-        "band_13",
+        "tiles/goes19/abi/c13/tileset1/",
+        "goes19/abi/c13",
         "tileset1",
     )
 
@@ -96,8 +96,8 @@ async def test_sync_releases_download_slot_before_redis_write(mock_redis_client)
     )
     client._list_objects = AsyncMock(
         return_value=[
-            {"Key": "tiles/band_13/tileset1/5/10/15.webp", "Size": 100},
-            {"Key": "tiles/band_13/tileset1/5/10/16.webp", "Size": 100},
+            {"Key": "tiles/goes19/abi/c13/tileset1/5/10/15.webp", "Size": 100},
+            {"Key": "tiles/goes19/abi/c13/tileset1/5/10/16.webp", "Size": 100},
         ]
     )
 
@@ -127,7 +127,10 @@ async def test_sync_releases_download_slot_before_redis_write(mock_redis_client)
 
     task = asyncio.create_task(
         client.sync_prefix_to_redis(
-            mock_redis_client, "tiles/band_13/tileset1/", "band_13", "tileset1"
+            mock_redis_client,
+            "tiles/goes19/abi/c13/tileset1/",
+            "goes19/abi/c13",
+            "tileset1",
         )
     )
     # Pump the loop (no wall-clock sleeps) while both Redis writes stay blocked.
@@ -146,16 +149,18 @@ async def test_sync_releases_download_slot_before_redis_write(mock_redis_client)
 
 def test_build_satellite_tile_key_uses_tiles_root():
     """Satellite tile keys must be rooted at tiles/<band_id>/..."""
-    key = S3Client.build_satellite_tile_key("band_13", "20260740300213", 5, 10, 15)
-    assert key == "tiles/band_13/20260740300213/5/10/15.webp"
+    key = S3Client.build_satellite_tile_key(
+        "goes19/abi/c13", "20260740300213", 5, 10, 15
+    )
+    assert key == "tiles/goes19/abi/c13/20260740300213/5/10/15.webp"
 
 
 def test_build_radar_tile_key_splits_elevation_and_timestamp():
     """Radar tile keys must use .../<elevation>/<tileset_id>/... hierarchy."""
     key = S3Client.build_radar_tile_key(
-        "RMA1", "DBZH", "20260114T170328Z", "elev0", 5, 10, 15
+        "RMA1", "dbzh", "20260114T170328Z", "elev0", 5, 10, 15
     )
-    assert key == "tiles/radar/RMA1/DBZH/elev0/20260114T170328Z/5/10/15.webp"
+    assert key == "tiles/radar/sinarame/RMA1/dbzh/elev0/20260114T170328Z/5/10/15.webp"
 
 
 @pytest.mark.asyncio
@@ -169,12 +174,12 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
     mock_s3.try_get_subdirectories = AsyncMock(
         side_effect=[
             [
-                "tiles/radar/RMA1/DBZH/elev0/",
-                "tiles/radar/RMA1/DBZH/elev1/",
+                "tiles/radar/sinarame/RMA1/dbzh/elev0/",
+                "tiles/radar/sinarame/RMA1/dbzh/elev1/",
             ],
             [
-                "tiles/radar/RMA1/DBZH/elev0/20260114T170328Z/",
-                "tiles/radar/RMA1/DBZH/elev0/20260114T160328Z/",
+                "tiles/radar/sinarame/RMA1/dbzh/elev0/20260114T170328Z/",
+                "tiles/radar/sinarame/RMA1/dbzh/elev0/20260114T160328Z/",
             ],
         ]
     )
@@ -186,8 +191,8 @@ async def test_radar_on_demand_lists_new_elevations_and_tilesets(mock_redis_clie
         listing_ttl=30,
     )
 
-    elevations = await strategy.list_elevations("RMA1", "DBZH")
-    tilesets = await strategy.list_tilesets("RMA1", "DBZH", "elev0")
+    elevations = await strategy.list_elevations("RMA1", "dbzh")
+    tilesets = await strategy.list_tilesets("RMA1", "dbzh", "elev0")
 
     assert elevations == ["elev0", "elev1"]
     assert tilesets == ["20260114T170328Z", "20260114T160328Z"]
@@ -284,8 +289,8 @@ async def test_sync_satellite_trims_expired_each_cycle(mock_redis_client):
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
         return_value=[
-            "tiles/band_13/20260740300213/",
-            "tiles/band_13/20260740400213/",
+            "tiles/goes19/abi/c13/20260740300213/",
+            "tiles/goes19/abi/c13/20260740400213/",
         ]
     )
     # Both S3 tilesets are already indexed -> zero new tilesets this cycle.
@@ -293,7 +298,9 @@ async def test_sync_satellite_trims_expired_each_cycle(mock_redis_client):
         return_value=["20260740300213", "20260740400213"]
     )
 
-    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/band_13"])
+    service = _make_satellite(
+        mock_s3, mock_redis_client, prefixes=["tiles/goes19/abi/c13"]
+    )
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -305,7 +312,7 @@ async def test_sync_satellite_trims_expired_each_cycle(mock_redis_client):
     # Trim still fires once, bounding the index regardless of new arrivals.
     mock_redis_client.trim_satellite_index.assert_awaited_once()
     channel_dir, cutoff = mock_redis_client.trim_satellite_index.await_args.args
-    assert channel_dir == "band_13"
+    assert channel_dir == "goes19/abi/c13"
     # cutoff = now - tile_ttl(3600); a recent epoch, well below "now".
     assert isinstance(cutoff, float)
     assert cutoff < time.time() - 3599
@@ -317,12 +324,14 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
     before = time.time()
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
-        return_value=["tiles/band_13/20260740300213/"]
+        return_value=["tiles/goes19/abi/c13/20260740300213/"]
     )
     mock_s3.sync_prefix_to_redis = AsyncMock(return_value=4)
     mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
 
-    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/band_13"])
+    service = _make_satellite(
+        mock_s3, mock_redis_client, prefixes=["tiles/goes19/abi/c13"]
+    )
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -330,7 +339,7 @@ async def test_sync_satellite_scores_new_tileset_with_insertion_time(mock_redis_
     assert errors == 0
     mock_redis_client.add_satellite_tileset.assert_awaited_once()
     args = mock_redis_client.add_satellite_tileset.await_args
-    assert args.args[0] == "band_13"
+    assert args.args[0] == "goes19/abi/c13"
     assert args.args[1] == "20260740300213"
     score = args.args[2]
     assert isinstance(score, float)
@@ -349,13 +358,15 @@ async def test_sync_satellite_skips_indexing_on_zero_download(mock_redis_client)
     """
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
-        return_value=["tiles/glm_fed/20260611550000/"]
+        return_value=["tiles/goes19/glm/fed/20260611550000/"]
     )
     # Download stores nothing (e.g. transient S3 listing failure -> [] -> 0).
     mock_s3.sync_prefix_to_redis = AsyncMock(return_value=0)
     mock_redis_client.get_satellite_tilesets = AsyncMock(return_value=[])
 
-    service = _make_satellite(mock_s3, mock_redis_client, prefixes=["tiles/glm_fed"])
+    service = _make_satellite(
+        mock_s3, mock_redis_client, prefixes=["tiles/goes19/glm/fed"]
+    )
 
     downloaded, errors = await service._sync_satellite_prefixes()
 
@@ -375,10 +386,10 @@ async def test_sync_radar_trims_expired_each_cycle(mock_redis_client):
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
         side_effect=[
-            ["tiles/radar/RMA1/"],  # radars
-            ["tiles/radar/RMA1/DBZH/"],  # variables
-            ["tiles/radar/RMA1/DBZH/elev0/"],  # elevations
-            ["tiles/radar/RMA1/DBZH/elev0/ts1/"],  # tilesets under elev0
+            ["tiles/radar/sinarame/RMA1/"],  # radars
+            ["tiles/radar/sinarame/RMA1/dbzh/"],  # variables
+            ["tiles/radar/sinarame/RMA1/dbzh/elev0/"],  # elevations
+            ["tiles/radar/sinarame/RMA1/dbzh/elev0/ts1/"],  # tilesets under elev0
         ]
     )
     # The S3 tileset is already indexed -> zero new tilesets this cycle.
@@ -395,7 +406,7 @@ async def test_sync_radar_trims_expired_each_cycle(mock_redis_client):
 
     mock_redis_client.trim_radar_index.assert_awaited_once()
     radar, var, elev, cutoff = mock_redis_client.trim_radar_index.await_args.args
-    assert (radar, var, elev) == ("RMA1", "DBZH", "elev0")
+    assert (radar, var, elev) == ("RMA1", "dbzh", "elev0")
     assert isinstance(cutoff, float)
     assert cutoff < time.time() - 3599  # now - tile_ttl(3600)
 
@@ -407,10 +418,10 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
     mock_s3 = AsyncMock()
     mock_s3.get_subdirectories = AsyncMock(
         side_effect=[
-            ["tiles/radar/RMA1/"],
-            ["tiles/radar/RMA1/DBZH/"],
-            ["tiles/radar/RMA1/DBZH/elev0/"],
-            ["tiles/radar/RMA1/DBZH/elev0/ts1/"],
+            ["tiles/radar/sinarame/RMA1/"],
+            ["tiles/radar/sinarame/RMA1/dbzh/"],
+            ["tiles/radar/sinarame/RMA1/dbzh/elev0/"],
+            ["tiles/radar/sinarame/RMA1/dbzh/elev0/ts1/"],
         ]
     )
     mock_s3.sync_radar_prefix_to_redis = AsyncMock(return_value=3)
@@ -424,7 +435,7 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
     assert downloaded == 3
     mock_redis_client.add_radar_index.assert_awaited_once()
     args = mock_redis_client.add_radar_index.await_args
-    assert args.args[:4] == ("RMA1", "DBZH", "elev0", "ts1")
+    assert args.args[:4] == ("RMA1", "dbzh", "elev0", "ts1")
     score = args.args[4]
     assert isinstance(score, float)
     assert before <= score <= time.time()
@@ -820,7 +831,7 @@ async def test_list_object_basenames_delimiter_reaches_paginator():
             async def _pages():
                 yield {
                     "Contents": [
-                        {"Key": "geojson/wrf/p/i/F001/gust_threshold.json"},
+                        {"Key": "geojson/wrf-arg4k/p/i/F001/gust_threshold.json"},
                     ]
                 }
 
@@ -831,13 +842,13 @@ async def test_list_object_basenames_delimiter_reaches_paginator():
     client._client = mock_client
 
     names = await client.list_object_basenames(
-        "geojson/wrf/p/i/F001/", ".json", delimiter="/"
+        "geojson/wrf-arg4k/p/i/F001/", ".json", delimiter="/"
     )
     assert names == ["gust_threshold"]
     assert captured["Delimiter"] == "/"
 
     captured.clear()
-    await client.list_object_basenames("geojson/wrf/p/i/F001/", ".json")
+    await client.list_object_basenames("geojson/wrf-arg4k/p/i/F001/", ".json")
     assert "Delimiter" not in captured  # default keeps the old recursive listing
 
 
