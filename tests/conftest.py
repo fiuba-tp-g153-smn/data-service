@@ -26,6 +26,25 @@ os.environ.setdefault("S3_TILES_DATA_SECRET_KEY", "test-secret-key")
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
 import pytest  # noqa: E402
+import uvloop  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def event_loop_policy():
+    """Run the whole suite on uvloop, the loop production runs on.
+
+    `main.py` sets this policy at module scope, so before this fixture existed
+    whether a test got uvloop or plain asyncio depended on whether some earlier
+    module had imported `main` — five of them do. Timing-sensitive tests then
+    passed alone and failed in a full run, which is how a real early-wake bug in
+    the basemap scraper's circuit cooldown stayed hidden (uvloop timers have
+    ~1 ms granularity and can fire before the deadline; plain asyncio does not).
+
+    Overriding pytest-asyncio's fixture rather than calling
+    `asyncio.set_event_loop_policy()` here keeps the policy scoped to the suite,
+    and avoids a setter deprecated from Python 3.14.
+    """
+    return uvloop.EventLoopPolicy()
 
 
 @pytest.fixture
