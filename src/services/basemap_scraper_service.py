@@ -860,12 +860,22 @@ class BasemapScraperService(BaseSyncService):
     async def _await_storage_cooldown(self) -> None:
         """Block until the S3 circuit admits its next half-open probe.
 
-        Bounded by the circuit's cooldown cap, so this sleeps for at most
-        `_STORAGE_MAX_COOLDOWN_SECONDS` at a time and only while the circuit
-        is actually open.
+        Re-checks after each sleep rather than assuming one was enough. A timer
+        that fires a hair early leaves the circuit still closed, and every tile
+        in the chunk that follows is then skipped without a fetch — uvloop's
+        timers have ~1 ms granularity and do wake early, which is how this was
+        found. Looping on `cooldown_remaining()` is exact, not a safety margin:
+        it returns 0 on precisely the condition `_in_probe_window()` tests, the
+        same clock against the same deadline.
+
+        Terminates because each pass sleeps toward a fixed deadline, and nothing
+        can push that deadline out mid-wait: only a failed write re-arms the
+        circuit, and callers wait at chunk boundaries where no write is in
+        flight. Bounded by the circuit's cooldown cap per pass, so this sleeps
+        for at most `_STORAGE_MAX_COOLDOWN_SECONDS` at a time and only while the
+        circuit is actually open.
         """
-        remaining = self._s3_circuit.cooldown_remaining()
-        if remaining > 0:
+        while (remaining := self._s3_circuit.cooldown_remaining()) > 0:
             await asyncio.sleep(remaining)
 
     async def _sweep_chunk(
