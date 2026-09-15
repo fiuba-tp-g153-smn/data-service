@@ -331,23 +331,24 @@ def configure_product_availability(
 async def configure_basemap(
     client_redis: RedisClient,
 ) -> Optional[BasemapRuntime]:
-    """Bring up the basemap subsystem using the active `basemap_sync_mode`.
+    """Bring up the basemap subsystem using the active `basemap_backup_mode`.
 
-    Modes (set via `settings.json::basemap_sync_mode` or `BASEMAP_SYNC_MODE`):
-      * ``full``       — scraper on (writes Redis + S3); reader tries
-                         upstream first, then falls back to Redis, then S3.
-      * ``on_demand``  — scraper on but writes only S3; reader tries
-                         upstream first, then Redis (lazily populated by
-                         the reader on hits), then S3.
-      * ``no_cache``   — scraper on, S3-only. Reader skips Redis tier
-                         entirely (upstream → S3).
-      * ``relay_only`` — scraper off, Redis off, S3 off. Reader is a pure
-                         provider proxy.
+    Modes (set via `settings.json::basemap.backup_mode` or
+    `BASEMAP_BACKUP_MODE`):
+      * ``backup_and_prefetch`` — sweep on, writes S3 and Redis; reader
+        tries upstream first, then falls back to Redis, then S3.
+      * ``backup_and_cache_on_read`` — sweep on, writes S3 only; reader tries
+        upstream first, then Redis (which it populates itself on a hit),
+        then S3.
+      * ``backup_only`` — sweep on, writes S3 only; reader skips the Redis
+        tier entirely (upstream → S3).
+      * ``relay_only`` — sweep off, Redis off, S3 off. Reader is a pure
+        provider proxy.
 
     `relay_only` is the only mode that skips S3 reads, so an S3 backend
     outage doesn't take the service down under `relay_only`. For every
-    other mode, S3 must be configured — a cold backup without S3 storage
-    defeats the point of having a backup.
+    other mode, S3 must be configured — a backup with nowhere to write
+    defeats the point of having one.
 
     When enabled, populates the module-level `basemap_service` singleton via
     `configure()` and returns its backing runtime for lifespan-scoped shutdown.
@@ -359,19 +360,24 @@ async def configure_basemap(
         logger.info("Basemap disabled: no providers enabled in settings.json")
         return None
 
-    mode = settings.basemap_sync_mode
+    mode = settings.basemap_backup_mode
+    s3_backed = (
+        "backup_and_prefetch",
+        "backup_and_cache_on_read",
+        "backup_only",
+    )
     # The reader (serving) is always built below; the scraper only runs in a
     # background-job role so the web role doesn't scrape.
-    run_scraper = mode in ("full", "on_demand", "no_cache") and _runs_background_jobs()
-    scraper_writes_redis = mode == "full"
-    redis_cache_enabled = mode in ("full", "on_demand")
-    s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
+    run_scraper = mode in s3_backed and _runs_background_jobs()
+    scraper_writes_redis = mode == "backup_and_prefetch"
+    redis_cache_enabled = mode in ("backup_and_prefetch", "backup_and_cache_on_read")
+    s3_cache_enabled = mode in s3_backed
 
     if s3_cache_enabled and not settings.is_s3_configured():
         logger.error(
             "Basemap refused to start: S3 is not configured but basemap "
             "mode=%s requires S3 storage. Configure S3 credentials, switch "
-            "to basemap_sync_mode=relay_only, or disable basemap_providers "
+            "to basemap_backup_mode=relay_only, or disable basemap_providers "
             "in settings.json.",
             mode,
         )
@@ -438,7 +444,7 @@ async def configure_basemap(
     # regardless of this process's role. The worker writes it; the web role
     # only reads it to serve /metrics/basemap/providers. WAL mode lets the web
     # reader and the worker writer share the file across processes/containers.
-    if s3_cache_enabled:  # mode in (full, on_demand, no_cache) — not relay_only
+    if s3_cache_enabled:  # any S3-backed mode — not relay_only
         state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
         await state_store.connect()
         set_basemap_state_store(state_store)

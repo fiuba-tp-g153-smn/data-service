@@ -145,12 +145,13 @@ class BasemapScraperService(BaseSyncService):
     A fully-completed sweep clears all persistent state, so the next
     interval-triggered cycle starts as a fresh full scrape.
 
-    Driven by `settings.basemap_sync_mode` (independent of the global
-    `sync_mode`, which only controls satellite/radar/ECMWF). Runs in
-    ``"full"``, ``"on_demand"``, and ``"no_cache"`` — only ``"relay_only"``
-    skips the scraper entirely. The `redis_writes_enabled` flag controls
+    Driven by `settings.basemap_backup_mode` (independent of the global
+    sync knob, which only controls satellite/radar/ECMWF). Runs in
+    ``"backup_and_prefetch"``, ``"backup_and_cache_on_read"`` and
+    ``"backup_only"`` — only ``"relay_only"`` skips the scraper
+    entirely. The `redis_writes_enabled` flag controls
     whether the scraper populates Redis during the sweep; it's only True
-    in ``"full"`` mode.
+    in ``"backup_and_prefetch"`` mode.
     """
 
     def __init__(

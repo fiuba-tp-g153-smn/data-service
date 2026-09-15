@@ -10,11 +10,48 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+# --- Deprecated settings names, accepted for one release --------------------
+#
+# A settings rename renames the attribute, its settings.json key *and* the
+# `UPPERCASE` env override derived from it by `_flatten`. Since
+# `_load_from_json` drops unrecognized keys with a warning rather than failing,
+# a deployment still carrying the old env var would otherwise fall back to the
+# code default without anything failing — the scraper quietly switching on, a
+# TTL quietly reverting. `_DEPRECATED_KEYS` maps each old flattened key to its
+# replacement plus, where the rename also changed the value's shape, a
+# converter. Both load paths consult it (`_load_from_json` for the file,
+# `_env` for the environment), warn naming the replacement, and apply the
+# migrated value. Remove the table — and the entries below — one release after
+# every deployment has been updated.
+
+# Pre-rename `basemap_sync_mode` values, mapped onto `basemap_backup_mode`.
+# Each old name said less than it should about the S3 backup: "no_cache"
+# claimed nothing was stored while the sweep wrote every tile to S3, and
+# "on_demand" described the sweep as lazy when only the Redis fill is.
+# "relay_only" was already accurate and carries over unchanged.
+_BASEMAP_BACKUP_MODE_RENAMES = {
+    "full": "backup_and_prefetch",
+    "on_demand": "backup_and_cache_on_read",
+    "no_cache": "backup_only",
+}
+
+
+def _to_basemap_backup_mode(value: Any) -> Any:
+    """Map a pre-rename basemap sync mode onto its backup-mode equivalent."""
+    return _BASEMAP_BACKUP_MODE_RENAMES.get(value, value)
+
+
+_DEPRECATED_KEYS: Dict[str, Tuple[str, Optional[Callable[[Any], Any]]]] = {
+    # Phase 1: basemap backup mode
+    "basemap_sync_mode": ("basemap_backup_mode", _to_basemap_backup_mode),
+}
 
 
 class Settings:
@@ -247,11 +284,23 @@ class Settings:
     # radar / ECMWF tiles rotate every few hours. 2592000s = 30 days matches
     # the Redis TTL (basemap_tile_ttl).
     basemap_cache_control_tile: str = "public, max-age=2592000, immutable"
-    # Per-domain sync mode for basemap, independent of `sync_mode`. One of
-    # "full" (scraper on + Redis cache on), "on_demand" (scraper off, Redis
-    # populated lazily on cold reads), "no_cache" (scraper off, reader
-    # streams straight from S3/relay — nothing lands in Redis).
-    basemap_sync_mode: str = "full"
+    # How the basemap subsystem maintains its S3 backup of the external
+    # providers, and which tiers the reader falls back through. Independent of
+    # the global sync knob. Read by `main.configure_basemap`, which derives
+    # four booleans from it; the table is those derivations, not a paraphrase:
+    #
+    #   mode                      sweep  ->S3  ->Redis  read Redis  read S3
+    #   backup_and_prefetch       on     yes   yes      yes         yes
+    #   backup_and_cache_on_read  on     yes   no       yes         yes
+    #   backup_only               on     yes   no       no          yes
+    #   relay_only                off    —     —        no          no
+    #
+    # The three backup modes all run the sweep and all write S3 — the bucket is
+    # a cold mirror, not a cache, so it is kept current regardless of traffic.
+    # They differ only in Redis: filled up front, filled on a read, or unused.
+    # `relay_only` keeps no copy at all and is the only mode that survives an
+    # S3 outage, since the reader tries the upstream provider first either way.
+    basemap_backup_mode: str = "backup_and_prefetch"
     # Scrape parallelism mode controls how providers are dispatched within one
     # scrape cycle. "sequential" runs providers one at a time (default, matches
     # pre-parallelism behavior). "per_origin" groups providers by URL host and
@@ -359,7 +408,12 @@ class Settings:
     redis_metrics_memory_batch_size: int = 500
     redis_metrics_memory_sample_per_domain: int = 2000
 
-    _BASEMAP_SYNC_MODES = ("full", "on_demand", "no_cache", "relay_only")
+    _BASEMAP_BACKUP_MODES = (
+        "backup_and_prefetch",
+        "backup_and_cache_on_read",
+        "backup_only",
+        "relay_only",
+    )
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
     _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
     _APP_ROLES = ("web", "worker", "all")
@@ -367,6 +421,12 @@ class Settings:
     # flattened to underscore-joined names by `_flatten`. Anything else in the
     # file is ignored with a warning (see `_load_from_json`). Grouped by domain
     # for navigability; membership — not order — is what matters.
+    # New env var -> the pre-rename env var it replaced, derived from
+    # `_DEPRECATED_KEYS` so the two can never drift apart.
+    _DEPRECATED_ENV: Dict[str, str] = {
+        new_key.upper(): old_key.upper()
+        for old_key, (new_key, _) in _DEPRECATED_KEYS.items()
+    }
     _JSON_KEYS: frozenset[str] = frozenset(
         {
             # Shared: sync cadence, S3 client, cache-control headers
@@ -434,7 +494,7 @@ class Settings:
             "basemap_request_deadline_seconds",
             "basemap_cache_control_tile_miss",
             "basemap_cache_control_tile",
-            "basemap_sync_mode",
+            "basemap_backup_mode",
             "basemap_scrape_parallelism_mode",
             "basemap_scrape_per_host_concurrent",
             "basemap_provider_cooldown_schedule",
@@ -499,7 +559,7 @@ class Settings:
         with open(settings_json_path, encoding="utf-8") as f:
             data = json.load(f)
 
-        flat = self._flatten(data)
+        flat = self._migrate_deprecated(self._flatten(data))
 
         unknown = sorted(set(flat) - self._JSON_KEYS)
         if unknown:
@@ -510,6 +570,72 @@ class Settings:
         for key in self._JSON_KEYS:
             if key in flat:
                 setattr(self, key, flat[key])
+
+    def _migrate_deprecated(self, flat: Dict[str, Any]) -> Dict[str, Any]:
+        """Rewrite deprecated settings.json keys onto their replacements.
+
+        Runs before the unknown-key check so a stale key is migrated and warned
+        about by name rather than reported as unrecognized. An explicit new key
+        always wins over a deprecated one, so a file carrying both is not
+        ambiguous.
+        """
+        migrated = dict(flat)
+        for old_key, (new_key, convert) in _DEPRECATED_KEYS.items():
+            if old_key not in migrated:
+                continue
+            value = migrated.pop(old_key)
+            if new_key in migrated:
+                self._warn_deprecated(old_key, new_key, superseded=True)
+                continue
+            self._warn_deprecated(old_key, new_key)
+            migrated[new_key] = convert(value) if convert is not None else value
+        return migrated
+
+    @staticmethod
+    def _warn_deprecated(old: str, new: str, superseded: bool = False) -> None:
+        """Log a rename so a stale key/env var is visible, never silent."""
+        tail = (
+            f"ignored because {new!r} is also set"
+            if superseded
+            else f"use {new!r} instead"
+        )
+        logging.getLogger(__name__).warning(
+            "Deprecated setting %r: %s. Support is removed next release.",
+            old,
+            tail,
+        )
+
+    def _env(self, key: str) -> str:
+        """Read an env var, falling back to its deprecated alias if any.
+
+        Returns "" when neither is set, so every `_env_*` helper keeps treating
+        an empty value as unset.
+        """
+        value = os.getenv(key, "")
+        if value:
+            return value
+        return self._legacy_env(key)
+
+    def _legacy_env(self, key: str) -> str:
+        """Resolve `key` from the pre-rename env var it replaced, if set."""
+        old_key = self._DEPRECATED_ENV.get(key)
+        if old_key is None:
+            return ""
+        value = os.getenv(old_key, "")
+        if not value:
+            return ""
+        self._warn_deprecated(old_key, key)
+        convert = _DEPRECATED_KEYS[old_key.lower()][1]
+        if convert is None:
+            return value
+        return self._as_env_text(convert(value))
+
+    @staticmethod
+    def _as_env_text(value: Any) -> str:
+        """Render a migrated value the way an env var would have carried it."""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        return str(value)
 
     @staticmethod
     def _flatten(data: dict) -> dict:
@@ -537,30 +663,26 @@ class Settings:
         _walk("", data)
         return flat
 
-    @staticmethod
-    def _env_int(key: str, default: int) -> int:
+    def _env_int(self, key: str, default: int) -> int:
         """Read an env var as int, falling back to default if unset or empty."""
-        value = os.getenv(key, "")
+        value = self._env(key)
         return int(value) if value else default
 
-    @staticmethod
-    def _env_float(key: str, default: float) -> float:
+    def _env_float(self, key: str, default: float) -> float:
         """Read an env var as float, falling back to default if unset or empty."""
-        value = os.getenv(key, "")
+        value = self._env(key)
         return float(value) if value else default
 
-    @staticmethod
-    def _env_bool(key: str, default: bool) -> bool:
+    def _env_bool(self, key: str, default: bool) -> bool:
         """Read an env var as bool (truthy: 1/true/yes), falling back to default."""
-        value = os.getenv(key, "")
+        value = self._env(key)
         if not value:
             return default
         return value.strip().lower() in ("1", "true", "yes", "on")
 
-    @staticmethod
-    def _env_int_list(key: str, default: List[int]) -> List[int]:
+    def _env_int_list(self, key: str, default: List[int]) -> List[int]:
         """Read an env var as a comma-separated list of ints, falling back to default."""
-        value = os.getenv(key, "")
+        value = self._env(key)
         if not value:
             return list(default)
         return [int(part.strip()) for part in value.split(",") if part.strip()]
@@ -769,9 +891,8 @@ class Settings:
         self.basemap_cache_control_tile = os.getenv(
             "BASEMAP_CACHE_CONTROL_TILE", self.basemap_cache_control_tile
         )
-        self.basemap_sync_mode = (
-            os.getenv("BASEMAP_SYNC_MODE", self.basemap_sync_mode)
-            or self.basemap_sync_mode
+        self.basemap_backup_mode = (
+            self._env("BASEMAP_BACKUP_MODE") or self.basemap_backup_mode
         )
         self.basemap_scrape_parallelism_mode = (
             os.getenv(
@@ -946,17 +1067,17 @@ class Settings:
     def _validate(self) -> None:
         # pylint: disable=too-many-branches
         """Fail-fast validation for values with a fixed domain."""
-        if self.basemap_sync_mode not in self._BASEMAP_SYNC_MODES:
+        if self.basemap_backup_mode not in self._BASEMAP_BACKUP_MODES:
             raise ValueError(
-                f"Invalid basemap_sync_mode={self.basemap_sync_mode!r}; "
-                f"expected one of {self._BASEMAP_SYNC_MODES}"
+                f"Invalid basemap_backup_mode={self.basemap_backup_mode!r}; "
+                f"expected one of {self._BASEMAP_BACKUP_MODES}"
             )
         if (
-            self.basemap_sync_mode == "relay_only"
+            self.basemap_backup_mode == "relay_only"
             and not self.basemap_online_fallback_enabled
         ):
             raise ValueError(
-                "Invalid combination: basemap_sync_mode='relay_only' requires "
+                "Invalid combination: basemap_backup_mode='relay_only' requires "
                 "basemap_online_fallback_enabled=true; otherwise the service "
                 "has no source of tile data."
             )

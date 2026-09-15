@@ -38,7 +38,7 @@ class BasemapTileReader:
     Mode behaviour is driven by two boolean knobs configured by
     `main.configure_basemap`:
       * `redis_cache_enabled=False` skips the Redis tier (read + write).
-        Used by `basemap_sync_mode = "no_cache"` and `"relay_only"`.
+        Used by `basemap_backup_mode = "backup_only"` and `"relay_only"`.
       * `s3_cache_enabled=False` skips the S3 tier (read + write). Used by
         `"relay_only"` so the reader becomes a pure provider proxy.
 

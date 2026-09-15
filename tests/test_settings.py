@@ -22,9 +22,12 @@ def _load(tmp_path: Path, data: dict) -> Settings:
 
 
 def test_nested_basemap_loads_into_flat_attrs(tmp_path):
-    s = _load(tmp_path, {"basemap": {"tile_ttl": 42, "sync_mode": "on_demand"}})
+    s = _load(
+        tmp_path,
+        {"basemap": {"tile_ttl": 42, "backup_mode": "backup_and_cache_on_read"}},
+    )
     assert s.basemap_tile_ttl == 42
-    assert s.basemap_sync_mode == "on_demand"
+    assert s.basemap_backup_mode == "backup_and_cache_on_read"
 
 
 def test_nested_ecmwf_and_radar_load(tmp_path):
@@ -123,7 +126,7 @@ def test_real_settings_json_round_trip():
     s = Settings.__new__(Settings)
     s._load_from_json(repo_path)  # pylint: disable=protected-access
     assert s.basemap_tile_ttl == 86400
-    assert s.basemap_sync_mode == "no_cache"
+    assert s.basemap_backup_mode == "backup_only"
     assert s.ecmwf_tile_ttl == 86400
     assert s.radar_tile_ttl == 21600
     assert s.sync_mode == "full"
@@ -157,7 +160,7 @@ def test_scrape_parallelism_mode_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "scrape_parallelism_mode": "per_origin",
                 "scrape_per_host_concurrent": 4,
                 "scrape_concurrent": 20,
@@ -176,7 +179,7 @@ def test_invalid_scrape_parallelism_mode_rejected(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "scrape_parallelism_mode": "bogus",
                 }
             },
@@ -191,7 +194,7 @@ def test_per_host_concurrent_exceeding_global_rejected(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "scrape_parallelism_mode": "sequential",
                     "scrape_concurrent": 4,
                     "scrape_per_host_concurrent": 8,
@@ -205,7 +208,7 @@ def test_provider_cooldown_schedule_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "provider_cooldown_schedule": [60, 120, 300],
             }
         },
@@ -218,7 +221,7 @@ def test_provider_error_rate_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "provider_error_rate_threshold": 0.1,
                 "provider_error_rate_min_samples": 25,
             }
@@ -234,7 +237,12 @@ def test_provider_error_rate_threshold_out_of_range_rejected(tmp_path):
     with pytest.raises(ValueError, match="basemap_provider_error_rate_threshold"):
         _built_settings(
             tmp_path,
-            {"basemap": {"sync_mode": "full", "provider_error_rate_threshold": 1.5}},
+            {
+                "basemap": {
+                    "backup_mode": "backup_and_prefetch",
+                    "provider_error_rate_threshold": 1.5,
+                }
+            },
         )
 
 
@@ -244,7 +252,12 @@ def test_provider_error_rate_min_samples_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="basemap_provider_error_rate_min_samples"):
         _built_settings(
             tmp_path,
-            {"basemap": {"sync_mode": "full", "provider_error_rate_min_samples": 0}},
+            {
+                "basemap": {
+                    "backup_mode": "backup_and_prefetch",
+                    "provider_error_rate_min_samples": 0,
+                }
+            },
         )
 
 
@@ -256,7 +269,7 @@ def test_provider_cooldown_schedule_rejects_empty(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [],
                 }
             },
@@ -271,7 +284,7 @@ def test_provider_cooldown_schedule_rejects_non_positive(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [60, 0, 300],
                 }
             },
@@ -286,7 +299,7 @@ def test_provider_cooldown_schedule_rejects_non_monotonic(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [600, 300, 900],
                 }
             },

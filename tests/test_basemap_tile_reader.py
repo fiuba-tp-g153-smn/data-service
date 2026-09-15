@@ -359,7 +359,7 @@ async def test_deadline_releases_single_flight_waiters():
 
 
 @pytest.mark.asyncio
-async def test_no_cache_mode_skips_redis_tier_entirely():
+async def test_backup_only_mode_skips_redis_tier_entirely():
     """redis_cache_enabled=False: no GET, no write-through, even when prod hits."""
     redis = _make_redis()
     redis.get_basemap_tile = AsyncMock(return_value=b"should-not-be-read")
@@ -375,8 +375,8 @@ async def test_no_cache_mode_skips_redis_tier_entirely():
 
 
 @pytest.mark.asyncio
-async def test_no_cache_mode_uploads_s3_but_skips_redis_after_prod_hit():
-    """no_cache + prod hit: write-through to S3, but never to Redis."""
+async def test_backup_only_mode_uploads_s3_but_skips_redis_after_prod_hit():
+    """backup_only + prod hit: write-through to S3, but never to Redis."""
     redis = _make_redis()
     s3 = _make_s3()
     http = _make_http(data=b"from-prod")

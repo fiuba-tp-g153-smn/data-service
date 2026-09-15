@@ -20,7 +20,7 @@ The Data Service is a FastAPI microservice (Python 3.13) that serves satellite i
    - [Cache Sync: Full mode](#cache-sync-full-mode)
    - [Cache Sync: On-demand mode](#cache-sync-on-demand-mode)
    - [Data domains](#data-domains)
-   - [Basemap cache modes](#basemap-cache-modes)
+   - [Basemap backup modes](#basemap-backup-modes)
 1. [Dependencies](#dependencies)
 1. [Setup for development](#setup-for-development)
 1. [S3 Integration](#s3-integration)
@@ -65,48 +65,57 @@ full list.
 | **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                          |
 | **Radar**     | `/products/radar-sinarame/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
 | **ECMWF**     | `/products/ecmwf-ifs/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_mode` (`full` / `on_demand`)                          |
-| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_sync_mode` (independent of `sync_mode`; see below) |
+| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_backup_mode` (independent of `sync_mode`; see below) |
 
 Satellite, radar, ECMWF, WRF and GFS share the same `sync_mode` knob. Basemap
-has its own `basemap_sync_mode` because the volume and caching
+has its own `basemap_backup_mode` because the volume and caching
 economics are different — the scraper writes to a dedicated S3 bucket
 (`S3_BASEMAP_BUCKET_NAME`) and populates Redis with small PNG tiles
 that can blow up memory if left uncapped.
 
-### Basemap cache modes
+### Basemap backup modes
 
-`basemap_sync_mode` is an independent four-valued knob controlling how
-the basemap subsystem uses Redis, S3, and the external-provider relay.
-Set it in `settings.json` or via the `BASEMAP_SYNC_MODE` env var.
+`basemap_backup_mode` is an independent four-valued knob controlling how
+the basemap subsystem maintains its S3 backup of the external providers,
+and which tiers the reader falls back through. Set it in `settings.json`
+or via the `BASEMAP_BACKUP_MODE` env var.
 
-| Mode               | Scraper runs | Scraper writes S3 | Scraper writes Redis | Reader Redis | Reader S3 | Reader relay |
-| :----------------- | :----------: | :---------------: | :------------------: | :----------: | :-------: | :----------: |
-| `full` _(default)_ |     yes      |        yes        |         yes          |     yes      |    yes    |     yes      |
-| `on_demand`        |     yes      |        yes        |        **no**        |     yes      |    yes    |     yes      |
-| `no_cache`         |     yes      |        yes        |          no          |    **no**    |    yes    |     yes      |
-| `relay_only`       |    **no**    |         —         |          —           |      no      |  **no**   |     yes      |
+The S3 bucket is a **cold mirror, not a cache**: the sweep walks the whole
+bbox on a timer whether or not anyone requested those tiles, and
+`basemap_s3_object_ttl_days` (35 d) is deliberately longer than the scrape
+interval so objects outlive their own refresh. Redis is the actual cache,
+and it is the only thing the three backup modes disagree about.
 
-- **`full`** — the code default; `settings.json` currently sets
-  `no_cache`. Scraper pre-warms both Redis and S3. The reader chain is
-  provider → Redis → S3 (`BasemapTileReader`: upstream is authoritative,
-  the caches answer when it fails). Highest Redis RAM.
-- **`on_demand`** — scraper still builds the S3 cold backup but leaves
-  Redis alone; reader lazily populates Redis on the first cold read.
-  Use this when the full sweep's RAM footprint is too high.
-- **`no_cache`** — scraper writes only S3; reader skips Redis entirely
+| Mode                             | Sweep runs | Sweep writes S3 | Sweep writes Redis | Reader Redis | Reader S3 | Reader relay |
+| :------------------------------- | :--------: | :-------------: | :----------------: | :----------: | :-------: | :----------: |
+| `backup_and_prefetch` _(default)_ |    yes     |       yes       |        yes         |     yes      |    yes    |     yes      |
+| `backup_and_cache_on_read`       |    yes     |       yes       |       **no**       |     yes      |    yes    |     yes      |
+| `backup_only`                    |    yes     |       yes       |         no         |    **no**    |    yes    |     yes      |
+| `relay_only`                     |   **no**   |        —        |         —          |      no      |  **no**   |     yes      |
+
+- **`backup_and_prefetch`** — the code default; `settings.json` currently
+  sets `backup_only`. Sweep pre-warms both the S3 backup and Redis. The
+  reader chain is provider → Redis → S3 (`BasemapTileReader`: upstream is
+  authoritative, the backup answers when it fails). Highest Redis RAM.
+- **`backup_and_cache_on_read`** — sweep still builds the S3 backup but
+  leaves Redis alone; the reader populates Redis itself on the first cold
+  read. Use this when the full sweep's RAM footprint is too high.
+- **`backup_only`** — sweep writes only S3; reader skips Redis entirely
   (no GET, no write-through, no negative-cache tombstones). Useful
   when Redis memory is at a premium — every request the provider can't
   serve re-probes S3.
-- **`relay_only`** — scraper off, both caches off. Reader is a pure
-  provider proxy. Requires `basemap_online_fallback_enabled=true`
+- **`relay_only`** — sweep off, no backup kept, both read tiers off.
+  Reader is a pure provider proxy, and this is the only mode that
+  survives an S3 outage. Requires `basemap_online_fallback_enabled=true`
   (enforced at startup); otherwise the service has no data source.
 
-Negative-cache tombstones are Redis writes, so they follow Redis: on
-in `full` / `on_demand`, off in `no_cache` / `relay_only`.
+Negative-cache tombstones are Redis writes, so they follow Redis: on in
+`backup_and_prefetch` / `backup_and_cache_on_read`, off in `backup_only` /
+`relay_only`.
 
 #### Scrape parallelism
 
-Independent of `basemap_sync_mode`, `basemap_scrape_parallelism_mode`
+Independent of `basemap_backup_mode`, `basemap_scrape_parallelism_mode`
 controls how providers are dispatched within a single scrape cycle:
 
 | Mode                   | Cross-provider dispatch                                                    | When it fits                                                                            |
@@ -495,7 +504,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 
 | Key                                                                                                          | Description                                                                                                                                                                                                                                                                     |
 | :----------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `basemap_sync_mode`                                                                                          | `"full"` / `"on_demand"` / `"no_cache"` / `"relay_only"` (see [Basemap cache modes](#basemap-cache-modes); code default `"full"`, `settings.json` sets `"no_cache"`).                                                                                                       |
+| `basemap_backup_mode`                                                                                        | `"backup_and_prefetch"` / `"backup_and_cache_on_read"` / `"backup_only"` / `"relay_only"` (see [Basemap backup modes](#basemap-backup-modes); code default `"backup_and_prefetch"`, `settings.json` sets `"backup_only"`).                                                  |
 | `basemap_providers`                                                                                          | List of `{ "id": ..., "enabled": ... }` selecting which external providers are served. URLs live in `.env` (`BASEMAP_*_URL`).                                                                                                                                                   |
 | `basemap_tile_ttl`                                                                                           | Redis TTL for cached basemap tiles (code default 2592000 = 30 days; `settings.json` sets 86400 = 1 day).                                                                                                                                                                        |
 | `basemap_scrape_interval_seconds`                                                                            | Seconds between full-sweep scrape cycles (default: 604800 = weekly). Must be strictly less than `basemap_s3_object_ttl_days` so S3 objects are refreshed before the lifecycle expires them.                                                                                     |
@@ -518,7 +527,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=2592000, immutable` = 30 days — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
 | `basemap_provider_cooldown_schedule`                                                                         | Exponential backoff list (seconds) indexed by consecutive trip count, capped at the last element (default: `[300, 900, 3600, 10800, 21600]` = 5 min → 6 h). Must be non-empty, positive, monotonically non-decreasing. Persists across restarts via SQLite.                     |
 
-Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `SATELLITE_TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_SYNC_MODE`).
+Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `SATELLITE_TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_BACKUP_MODE`).
 
 About cache-control headers:
 
@@ -549,7 +558,7 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `REDIS_URL`                          | Redis connection URL. No code default — must be set.                                       | `redis://redis:6379/0` in `.env.example` |
 | `WEB_CONCURRENCY`                    | Uvicorn workers for the `web` container. The `worker` container uses `WORKER_CONCURRENCY`.  | `3` in `.env.example` (`WORKER_CONCURRENCY`: 1) |
 | `SYNC_MODE`                          | `full` / `on_demand` — applies to satellite, radar, ECMWF, WRF and GFS.                    | `full`                     |
-| `BASEMAP_SYNC_MODE`                  | `full` / `on_demand` / `no_cache` / `relay_only`.                                          | `full`                     |
+| `BASEMAP_BACKUP_MODE`                | `backup_and_prefetch` / `backup_and_cache_on_read` / `backup_only` / `relay_only`.         | `backup_and_prefetch`      |
 | `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
 | `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |
 | `BASEMAP_PROVIDER_COOLDOWN_SCHEDULE` | Comma-separated seconds, indexed by consecutive trip count, capped at last.                | `300,900,3600,10800,21600` |
