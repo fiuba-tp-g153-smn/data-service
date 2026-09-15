@@ -22,9 +22,12 @@ def _load(tmp_path: Path, data: dict) -> Settings:
 
 
 def test_nested_basemap_loads_into_flat_attrs(tmp_path):
-    s = _load(tmp_path, {"basemap": {"tile_ttl": 42, "sync_mode": "on_demand"}})
+    s = _load(
+        tmp_path,
+        {"basemap": {"tile_ttl": 42, "backup_mode": "backup_and_cache_on_read"}},
+    )
     assert s.basemap_tile_ttl == 42
-    assert s.basemap_sync_mode == "on_demand"
+    assert s.basemap_backup_mode == "backup_and_cache_on_read"
 
 
 def test_nested_ecmwf_and_radar_load(tmp_path):
@@ -105,13 +108,13 @@ def test_top_level_shared_keys_unchanged(tmp_path):
     s = _load(
         tmp_path,
         {
-            "sync_mode": "on_demand",
+            "sync_prefetch": False,
             "satellite": {"tile_ttl": 1234},
             "cache_control_tile": "no-store",
             "basemap": {"tile_ttl": 1},
         },
     )
-    assert s.sync_mode == "on_demand"
+    assert s.sync_prefetch is False
     assert s.satellite_tile_ttl == 1234
     assert s.cache_control_tile == "no-store"
     assert s.basemap_tile_ttl == 1
@@ -123,12 +126,17 @@ def test_real_settings_json_round_trip():
     s = Settings.__new__(Settings)
     s._load_from_json(repo_path)  # pylint: disable=protected-access
     assert s.basemap_tile_ttl == 86400
-    assert s.basemap_sync_mode == "no_cache"
+    assert s.basemap_backup_mode == "backup_only"
     assert s.ecmwf_tile_ttl == 86400
     assert s.radar_tile_ttl == 21600
-    assert s.sync_mode == "full"
+    assert s.sync_prefetch is True
     assert s.sync_min_sleep_seconds == 20
     assert s.wrf_inits_to_keep == 3
+    # GFS was the one served product with no block in the file; these three
+    # deliberately equal the code defaults, so a diff here is a real change.
+    assert s.gfs_tile_ttl == 64800
+    assert s.gfs_geojson_ttl == 64800
+    assert s.gfs_cycles_to_keep == 2
     assert s.basemap_scrape_fanout_window == 500
     assert s.basemap_scrape_per_host_concurrent == 8
     assert isinstance(s.basemap_providers, list) and s.basemap_providers
@@ -157,7 +165,7 @@ def test_scrape_parallelism_mode_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "scrape_parallelism_mode": "per_origin",
                 "scrape_per_host_concurrent": 4,
                 "scrape_concurrent": 20,
@@ -176,7 +184,7 @@ def test_invalid_scrape_parallelism_mode_rejected(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "scrape_parallelism_mode": "bogus",
                 }
             },
@@ -191,7 +199,7 @@ def test_per_host_concurrent_exceeding_global_rejected(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "scrape_parallelism_mode": "sequential",
                     "scrape_concurrent": 4,
                     "scrape_per_host_concurrent": 8,
@@ -205,7 +213,7 @@ def test_provider_cooldown_schedule_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "provider_cooldown_schedule": [60, 120, 300],
             }
         },
@@ -218,7 +226,7 @@ def test_provider_error_rate_round_trips(tmp_path):
         tmp_path,
         {
             "basemap": {
-                "sync_mode": "full",
+                "backup_mode": "backup_and_prefetch",
                 "provider_error_rate_threshold": 0.1,
                 "provider_error_rate_min_samples": 25,
             }
@@ -234,7 +242,12 @@ def test_provider_error_rate_threshold_out_of_range_rejected(tmp_path):
     with pytest.raises(ValueError, match="basemap_provider_error_rate_threshold"):
         _built_settings(
             tmp_path,
-            {"basemap": {"sync_mode": "full", "provider_error_rate_threshold": 1.5}},
+            {
+                "basemap": {
+                    "backup_mode": "backup_and_prefetch",
+                    "provider_error_rate_threshold": 1.5,
+                }
+            },
         )
 
 
@@ -244,7 +257,12 @@ def test_provider_error_rate_min_samples_must_be_positive(tmp_path):
     with pytest.raises(ValueError, match="basemap_provider_error_rate_min_samples"):
         _built_settings(
             tmp_path,
-            {"basemap": {"sync_mode": "full", "provider_error_rate_min_samples": 0}},
+            {
+                "basemap": {
+                    "backup_mode": "backup_and_prefetch",
+                    "provider_error_rate_min_samples": 0,
+                }
+            },
         )
 
 
@@ -256,7 +274,7 @@ def test_provider_cooldown_schedule_rejects_empty(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [],
                 }
             },
@@ -271,7 +289,7 @@ def test_provider_cooldown_schedule_rejects_non_positive(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [60, 0, 300],
                 }
             },
@@ -286,7 +304,7 @@ def test_provider_cooldown_schedule_rejects_non_monotonic(tmp_path):
             tmp_path,
             {
                 "basemap": {
-                    "sync_mode": "full",
+                    "backup_mode": "backup_and_prefetch",
                     "provider_cooldown_schedule": [600, 300, 900],
                 }
             },
@@ -421,3 +439,16 @@ def test_basemap_tile_miss_default_is_revalidatable():
     exactly what pins a transparent tile in place while upstream is down."""
     assert "immutable" not in Settings.basemap_cache_control_tile_miss
     assert "max-age=300" in Settings.basemap_cache_control_tile_miss
+
+
+def test_stale_string_in_a_boolean_knob_is_rejected(tmp_path):
+    """A leftover mode string is truthy, so it would read as "on" unchecked.
+
+    `sync.mode: "on_demand"` migrates cleanly via the deprecation shim, but
+    `sync.prefetch: "on_demand"` — the half-applied rename — is just a truthy
+    string, and would silently turn prefetching on. Fail instead.
+    """
+    import pytest  # local import; this file uses plain asserts elsewhere
+
+    with pytest.raises(ValueError, match="sync_prefetch must be a boolean"):
+        _built_settings(tmp_path, {"sync": {"prefetch": "on_demand"}})

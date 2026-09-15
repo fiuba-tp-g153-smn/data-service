@@ -321,7 +321,7 @@ async def test_scraper_clears_negative_cache_after_upload(store):
 
 @pytest.mark.asyncio
 async def test_redis_writes_disabled_skips_all_scraper_redis_calls(store):
-    """no_cache mode: scraper uploads to S3 but never touches Redis."""
+    """backup_only mode: scraper uploads to S3 but never touches Redis."""
     provider = _make_provider(min_zoom=5, max_zoom=5)
     bbox = _make_bbox()
     http = FakeHttp()

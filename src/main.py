@@ -127,8 +127,8 @@ class WeatherStationsRuntime:
     # local-dev case where auth is disabled AND S3 is not configured.
     keystore: Optional[WeatherStationsKeystore] = None
     api_keys_s3_client: Optional[S3Client] = None
-    # All four are absent when sync_mode == "disabled" (keystore stays for
-    # read-side auth gating, but nothing scrapes).
+    # All four are absent when weather_stations_sync_enabled is False
+    # (keystore stays for read-side auth gating, but nothing scrapes).
     s3_client: Optional[S3Client] = None
     smn_client: Optional[SmnApiClient] = None
     registry_client: Optional[SmnRegistryClient] = None
@@ -187,8 +187,8 @@ async def configure_strategies(
 
     point_value_strategy = S3CogPointValueStrategy(s3_client)
 
-    if settings.sync_mode == "full":
-        # Background sync mode (default). Reads are still Redis-first, but each
+    if settings.sync_prefetch:
+        # Prefetching mode (default). Reads are still Redis-first, but each
         # strategy is given the S3 client + TTLs so a tile miss / evicted index
         # falls back to S3 (and re-warms Redis) instead of returning empty.
         sat_strategy = SatelliteFullSyncStrategy(
@@ -245,8 +245,8 @@ async def configure_strategies(
                     service.set_metrics_store(metrics_store)
                 await service.start(logger)
     else:
-        # On-demand mode: lazy fetch + cache
-        logger.info("Starting in on-demand sync mode")
+        # Lazy mode: no prefetch loops, fetch from S3 on a miss and cache it
+        logger.info("Starting with sync prefetch off (lazy fetch + cache)")
 
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
@@ -331,23 +331,24 @@ def configure_product_availability(
 async def configure_basemap(
     client_redis: RedisClient,
 ) -> Optional[BasemapRuntime]:
-    """Bring up the basemap subsystem using the active `basemap_sync_mode`.
+    """Bring up the basemap subsystem using the active `basemap_backup_mode`.
 
-    Modes (set via `settings.json::basemap_sync_mode` or `BASEMAP_SYNC_MODE`):
-      * ``full``       — scraper on (writes Redis + S3); reader tries
-                         upstream first, then falls back to Redis, then S3.
-      * ``on_demand``  — scraper on but writes only S3; reader tries
-                         upstream first, then Redis (lazily populated by
-                         the reader on hits), then S3.
-      * ``no_cache``   — scraper on, S3-only. Reader skips Redis tier
-                         entirely (upstream → S3).
-      * ``relay_only`` — scraper off, Redis off, S3 off. Reader is a pure
-                         provider proxy.
+    Modes (set via `settings.json::basemap.backup_mode` or
+    `BASEMAP_BACKUP_MODE`):
+      * ``backup_and_prefetch`` — sweep on, writes S3 and Redis; reader
+        tries upstream first, then falls back to Redis, then S3.
+      * ``backup_and_cache_on_read`` — sweep on, writes S3 only; reader tries
+        upstream first, then Redis (which it populates itself on a hit),
+        then S3.
+      * ``backup_only`` — sweep on, writes S3 only; reader skips the Redis
+        tier entirely (upstream → S3).
+      * ``relay_only`` — sweep off, Redis off, S3 off. Reader is a pure
+        provider proxy.
 
     `relay_only` is the only mode that skips S3 reads, so an S3 backend
     outage doesn't take the service down under `relay_only`. For every
-    other mode, S3 must be configured — a cold backup without S3 storage
-    defeats the point of having a backup.
+    other mode, S3 must be configured — a backup with nowhere to write
+    defeats the point of having one.
 
     When enabled, populates the module-level `basemap_service` singleton via
     `configure()` and returns its backing runtime for lifespan-scoped shutdown.
@@ -359,19 +360,24 @@ async def configure_basemap(
         logger.info("Basemap disabled: no providers enabled in settings.json")
         return None
 
-    mode = settings.basemap_sync_mode
+    mode = settings.basemap_backup_mode
+    s3_backed = (
+        "backup_and_prefetch",
+        "backup_and_cache_on_read",
+        "backup_only",
+    )
     # The reader (serving) is always built below; the scraper only runs in a
     # background-job role so the web role doesn't scrape.
-    run_scraper = mode in ("full", "on_demand", "no_cache") and _runs_background_jobs()
-    scraper_writes_redis = mode == "full"
-    redis_cache_enabled = mode in ("full", "on_demand")
-    s3_cache_enabled = mode in ("full", "on_demand", "no_cache")
+    run_scraper = mode in s3_backed and _runs_background_jobs()
+    scraper_writes_redis = mode == "backup_and_prefetch"
+    redis_cache_enabled = mode in ("backup_and_prefetch", "backup_and_cache_on_read")
+    s3_cache_enabled = mode in s3_backed
 
     if s3_cache_enabled and not settings.is_s3_configured():
         logger.error(
             "Basemap refused to start: S3 is not configured but basemap "
             "mode=%s requires S3 storage. Configure S3 credentials, switch "
-            "to basemap_sync_mode=relay_only, or disable basemap_providers "
+            "to basemap_backup_mode=relay_only, or disable basemap_providers "
             "in settings.json.",
             mode,
         )
@@ -438,7 +444,7 @@ async def configure_basemap(
     # regardless of this process's role. The worker writes it; the web role
     # only reads it to serve /metrics/basemap/providers. WAL mode lets the web
     # reader and the worker writer share the file across processes/containers.
-    if s3_cache_enabled:  # mode in (full, on_demand, no_cache) — not relay_only
+    if s3_cache_enabled:  # any S3-backed mode — not relay_only
         state_store = BasemapStateStore(settings.basemap_scrape_state_db_path)
         await state_store.connect()
         set_basemap_state_store(state_store)
@@ -503,7 +509,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
 
     The keystore is built on a dedicated S3 bucket (separate from the
     weather-stations data bucket) and gates the read endpoints' API-key auth
-    even when no scraper runs. When `weather_stations_sync_mode == "full"`
+    even when no scraper runs. When `weather_stations_sync_enabled` is True
     the scraper + its S3/SMN clients are also built and started. Subsystem
     is S3-only by design — no Redis.
     """
@@ -538,8 +544,10 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             "Configure S3 to enable them."
         )
 
-    if settings.weather_stations_sync_mode == "disabled":
-        logger.info("Weather stations scraper disabled (sync_mode=disabled)")
+    if not settings.weather_stations_sync_enabled:
+        logger.info(
+            "Weather stations scraper disabled " "(weather_stations_sync_enabled=false)"
+        )
         weather_stations_service.configure(
             s3_client=None,
             list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
@@ -549,8 +557,8 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     if not settings.is_s3_configured():
         logger.error(
             "Weather stations refused to start: S3 is not configured but "
-            "weather_stations_sync_mode=full requires S3. Configure S3 "
-            "credentials or set WEATHER_STATIONS_SYNC_MODE=disabled."
+            "weather_stations_sync_enabled=true requires S3. Configure S3 "
+            "credentials or set WEATHER_STATIONS_SYNC_ENABLED=false."
         )
         weather_stations_service.configure(
             s3_client=None,
@@ -680,8 +688,8 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
 
 
 async def shutdown_services():
-    """Stop the per-product background sync loops if sync mode is full."""
-    if settings.sync_mode == "full":
+    """Stop the per-product background sync loops if prefetching is on."""
+    if settings.sync_prefetch:
         for service in _SYNC_SERVICES:
             await _safe_shutdown(
                 service.stop(logger), f"sync:{service.__class__.__name__}"

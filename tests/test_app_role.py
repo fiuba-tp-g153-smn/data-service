@@ -61,7 +61,7 @@ async def test_web_role_opens_state_store_for_reads(tmp_path, monkeypatch):
     provider as 'pendiente' despite the worker scraping all night.
     """
     monkeypatch.setattr(main.settings, "app_role", "web")
-    monkeypatch.setattr(main.settings, "basemap_sync_mode", "full")
+    monkeypatch.setattr(main.settings, "basemap_backup_mode", "backup_and_prefetch")
     monkeypatch.setattr(
         main.settings,
         "basemap_scrape_state_db_path",
