@@ -108,13 +108,13 @@ def test_top_level_shared_keys_unchanged(tmp_path):
     s = _load(
         tmp_path,
         {
-            "sync_mode": "on_demand",
+            "sync_prefetch": False,
             "satellite": {"tile_ttl": 1234},
             "cache_control_tile": "no-store",
             "basemap": {"tile_ttl": 1},
         },
     )
-    assert s.sync_mode == "on_demand"
+    assert s.sync_prefetch is False
     assert s.satellite_tile_ttl == 1234
     assert s.cache_control_tile == "no-store"
     assert s.basemap_tile_ttl == 1
@@ -129,7 +129,7 @@ def test_real_settings_json_round_trip():
     assert s.basemap_backup_mode == "backup_only"
     assert s.ecmwf_tile_ttl == 86400
     assert s.radar_tile_ttl == 21600
-    assert s.sync_mode == "full"
+    assert s.sync_prefetch is True
     assert s.sync_min_sleep_seconds == 20
     assert s.wrf_inits_to_keep == 3
     assert s.basemap_scrape_fanout_window == 500
@@ -434,3 +434,16 @@ def test_basemap_tile_miss_default_is_revalidatable():
     exactly what pins a transparent tile in place while upstream is down."""
     assert "immutable" not in Settings.basemap_cache_control_tile_miss
     assert "max-age=300" in Settings.basemap_cache_control_tile_miss
+
+
+def test_stale_string_in_a_boolean_knob_is_rejected(tmp_path):
+    """A leftover mode string is truthy, so it would read as "on" unchecked.
+
+    `sync.mode: "on_demand"` migrates cleanly via the deprecation shim, but
+    `sync.prefetch: "on_demand"` — the half-applied rename — is just a truthy
+    string, and would silently turn prefetching on. Fail instead.
+    """
+    import pytest  # local import; this file uses plain asserts elsewhere
+
+    with pytest.raises(ValueError, match="sync_prefetch must be a boolean"):
+        _built_settings(tmp_path, {"sync": {"prefetch": "on_demand"}})

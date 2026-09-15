@@ -127,8 +127,8 @@ class WeatherStationsRuntime:
     # local-dev case where auth is disabled AND S3 is not configured.
     keystore: Optional[WeatherStationsKeystore] = None
     api_keys_s3_client: Optional[S3Client] = None
-    # All four are absent when sync_mode == "disabled" (keystore stays for
-    # read-side auth gating, but nothing scrapes).
+    # All four are absent when weather_stations_sync_enabled is False
+    # (keystore stays for read-side auth gating, but nothing scrapes).
     s3_client: Optional[S3Client] = None
     smn_client: Optional[SmnApiClient] = None
     registry_client: Optional[SmnRegistryClient] = None
@@ -187,8 +187,8 @@ async def configure_strategies(
 
     point_value_strategy = S3CogPointValueStrategy(s3_client)
 
-    if settings.sync_mode == "full":
-        # Background sync mode (default). Reads are still Redis-first, but each
+    if settings.sync_prefetch:
+        # Prefetching mode (default). Reads are still Redis-first, but each
         # strategy is given the S3 client + TTLs so a tile miss / evicted index
         # falls back to S3 (and re-warms Redis) instead of returning empty.
         sat_strategy = SatelliteFullSyncStrategy(
@@ -245,8 +245,8 @@ async def configure_strategies(
                     service.set_metrics_store(metrics_store)
                 await service.start(logger)
     else:
-        # On-demand mode: lazy fetch + cache
-        logger.info("Starting in on-demand sync mode")
+        # Lazy mode: no prefetch loops, fetch from S3 on a miss and cache it
+        logger.info("Starting with sync prefetch off (lazy fetch + cache)")
 
         sat_strategy = SatelliteOnDemandStrategy(
             client_redis,
@@ -509,7 +509,7 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
 
     The keystore is built on a dedicated S3 bucket (separate from the
     weather-stations data bucket) and gates the read endpoints' API-key auth
-    even when no scraper runs. When `weather_stations_sync_mode == "full"`
+    even when no scraper runs. When `weather_stations_sync_enabled` is True
     the scraper + its S3/SMN clients are also built and started. Subsystem
     is S3-only by design — no Redis.
     """
@@ -544,8 +544,10 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
             "Configure S3 to enable them."
         )
 
-    if settings.weather_stations_sync_mode == "disabled":
-        logger.info("Weather stations scraper disabled (sync_mode=disabled)")
+    if not settings.weather_stations_sync_enabled:
+        logger.info(
+            "Weather stations scraper disabled " "(weather_stations_sync_enabled=false)"
+        )
         weather_stations_service.configure(
             s3_client=None,
             list_cache_ttl=settings.weather_stations_list_cache_ttl_seconds,
@@ -555,8 +557,8 @@ async def configure_weather_stations() -> WeatherStationsRuntime:
     if not settings.is_s3_configured():
         logger.error(
             "Weather stations refused to start: S3 is not configured but "
-            "weather_stations_sync_mode=full requires S3. Configure S3 "
-            "credentials or set WEATHER_STATIONS_SYNC_MODE=disabled."
+            "weather_stations_sync_enabled=true requires S3. Configure S3 "
+            "credentials or set WEATHER_STATIONS_SYNC_ENABLED=false."
         )
         weather_stations_service.configure(
             s3_client=None,
@@ -686,8 +688,8 @@ async def shutdown_basemap(runtime: Optional[BasemapRuntime]) -> None:
 
 
 async def shutdown_services():
-    """Stop the per-product background sync loops if sync mode is full."""
-    if settings.sync_mode == "full":
+    """Stop the per-product background sync loops if prefetching is on."""
+    if settings.sync_prefetch:
         for service in _SYNC_SERVICES:
             await _safe_shutdown(
                 service.stop(logger), f"sync:{service.__class__.__name__}"

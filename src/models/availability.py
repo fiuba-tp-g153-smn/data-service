@@ -17,7 +17,7 @@ class ProductAvailabilityResponse(BaseModel):
     which are a cache of S3, and every per-product endpoint falls back to S3
     when its index is cold. Treating absence as "no data" would grey out live
     products for as long as a sync takes to fill in — and permanently under
-    `sync_mode=on_demand`, where no sync loop runs. Probe what is missing.
+    `sync_prefetch=false`, where no sync loop runs. Probe what is missing.
 
     `domains` is diagnostic: the domains that contributed at least one product.
     Useful for spotting an index that has never been written; not a coverage

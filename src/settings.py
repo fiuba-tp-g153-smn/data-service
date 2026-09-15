@@ -48,9 +48,25 @@ def _to_basemap_backup_mode(value: Any) -> Any:
     return _BASEMAP_BACKUP_MODE_RENAMES.get(value, value)
 
 
+def _sync_mode_to_prefetch(value: Any) -> bool:
+    """`sync_mode` was "full" (background loops prefetch) vs "on_demand"."""
+    return value == "full"
+
+
+def _weather_stations_mode_to_enabled(value: Any) -> bool:
+    """`weather_stations_sync_mode` was "full" vs "disabled"."""
+    return value == "full"
+
+
 _DEPRECATED_KEYS: Dict[str, Tuple[str, Optional[Callable[[Any], Any]]]] = {
     # Phase 1: basemap backup mode
     "basemap_sync_mode": ("basemap_backup_mode", _to_basemap_backup_mode),
+    # Phase 2: string modes that only ever had two values
+    "sync_mode": ("sync_prefetch", _sync_mode_to_prefetch),
+    "weather_stations_sync_mode": (
+        "weather_stations_sync_enabled",
+        _weather_stations_mode_to_enabled,
+    ),
 }
 
 
@@ -136,7 +152,14 @@ class Settings:
     gdal_vsicurl_cache_size: str = "200MB"
 
     # --- Operational tuning (loaded from settings.json, env overrides) ---
-    sync_mode: str
+    # Whether the background loops prefetch each product into Redis ahead of
+    # any request (True) or every strategy fetches lazily from S3 on a miss
+    # and caches what it fetched (False). Both postures serve the same tiles;
+    # this only decides who pays the S3 round trip and when. Applies to
+    # satellite, radar, ECMWF, WRF and GFS — basemap has its own knob.
+    # Defaults True, matching the `sync_mode: "full"` this replaced; the old
+    # bare annotation had no default and crashed if settings.json omitted it.
+    sync_prefetch: bool = True
     satellite_tile_ttl: int
     radar_tile_ttl: int
     radar_cache_control_tile_miss: str = "public, max-age=300"
@@ -333,7 +356,10 @@ class Settings:
     # and the bucket name live above as env-only. Reads are Redis-first (the
     # scrape loop write-throughs the hot keys so the cache stays warm) with an
     # S3 fallback + a tiny in-process LRU on LIST results for the cold path.
-    weather_stations_sync_mode: str = "full"
+    # Whether the SMN polling loop runs at all. Unlike `sync_prefetch` this is
+    # a true on/off: with it False nothing scrapes, and the endpoints serve
+    # whatever is already in S3/Redis.
+    weather_stations_sync_enabled: bool = True
     weather_stations_scrape_interval_seconds: int = 300
     weather_stations_scrape_lock_path: str = "/tmp/weather_stations_scrape.lock"
     weather_stations_http_timeout_seconds: int = 30
@@ -415,7 +441,6 @@ class Settings:
         "relay_only",
     )
     _BASEMAP_PARALLELISM_MODES = ("sequential", "per_origin", "full")
-    _WEATHER_STATIONS_SYNC_MODES = ("full", "disabled")
     _APP_ROLES = ("web", "worker", "all")
     # Operational keys accepted from settings.json, after nested objects are
     # flattened to underscore-joined names by `_flatten`. Anything else in the
@@ -430,7 +455,7 @@ class Settings:
     _JSON_KEYS: frozenset[str] = frozenset(
         {
             # Shared: sync cadence, S3 client, cache-control headers
-            "sync_mode",
+            "sync_prefetch",
             "satellite_tile_ttl",
             "radar_tile_ttl",
             "radar_cache_control_tile_miss",
@@ -502,7 +527,7 @@ class Settings:
             "basemap_provider_error_rate_min_samples",
             "basemap_provider_error_rate_window",
             # Weather stations
-            "weather_stations_sync_mode",
+            "weather_stations_sync_enabled",
             "weather_stations_scrape_interval_seconds",
             "weather_stations_scrape_lock_path",
             "weather_stations_http_timeout_seconds",
@@ -737,7 +762,7 @@ class Settings:
         self.sync_domain_timeout_seconds = self._env_int(
             "SYNC_DOMAIN_TIMEOUT_SECONDS", self.sync_domain_timeout_seconds
         )
-        self.sync_mode = os.getenv("SYNC_MODE", self.sync_mode) or self.sync_mode
+        self.sync_prefetch = self._env_bool("SYNC_PREFETCH", self.sync_prefetch)
         self.satellite_tile_ttl = self._env_int(
             "SATELLITE_TILE_TTL", self.satellite_tile_ttl
         )
@@ -949,9 +974,8 @@ class Settings:
         self.weather_stations_admin_password = os.getenv(
             "WEATHER_STATIONS_ADMIN_PASSWORD", self.weather_stations_admin_password
         )
-        self.weather_stations_sync_mode = (
-            os.getenv("WEATHER_STATIONS_SYNC_MODE", self.weather_stations_sync_mode)
-            or self.weather_stations_sync_mode
+        self.weather_stations_sync_enabled = self._env_bool(
+            "WEATHER_STATIONS_SYNC_ENABLED", self.weather_stations_sync_enabled
         )
         self.weather_stations_scrape_interval_seconds = self._env_int(
             "WEATHER_STATIONS_SCRAPE_INTERVAL_SECONDS",
@@ -1140,12 +1164,15 @@ class Settings:
                 "basemap_provider_cooldown_schedule must be monotonically "
                 f"non-decreasing (got {schedule})"
             )
-        if self.weather_stations_sync_mode not in self._WEATHER_STATIONS_SYNC_MODES:
-            raise ValueError(
-                f"Invalid weather_stations_sync_mode="
-                f"{self.weather_stations_sync_mode!r}; "
-                f"expected one of {self._WEATHER_STATIONS_SYNC_MODES}"
-            )
+        # settings.json is untyped, so a stale `"full"` string would be truthy
+        # and read as "on" no matter what it said. Reject anything but a bool.
+        for _flag in ("sync_prefetch", "weather_stations_sync_enabled"):
+            if not isinstance(getattr(self, _flag), bool):
+                raise ValueError(
+                    f"{_flag} must be a boolean (got "
+                    f"{getattr(self, _flag)!r}); it replaced a string mode, so "
+                    "a quoted value here is almost certainly a stale setting."
+                )
         if self.app_role not in self._APP_ROLES:
             raise ValueError(
                 f"Invalid app_role={self.app_role!r}; "
@@ -1186,11 +1213,11 @@ class Settings:
                 f"s3://{self.s3_api_keys_bucket_name}/."
             )
         # The scraper cannot mint a JWT without credentials.
-        if self.weather_stations_sync_mode == "full" and not (
+        if self.weather_stations_sync_enabled and not (
             self.smn_api_username and self.smn_api_password
         ):
             raise ValueError(
-                "weather_stations_sync_mode='full' requires SMN_API_USERNAME "
+                "weather_stations_sync_enabled=true requires SMN_API_USERNAME "
                 "and SMN_API_PASSWORD to be set; the scraper needs them to "
                 "mint a JWT for the SMN API."
             )

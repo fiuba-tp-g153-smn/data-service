@@ -64,3 +64,29 @@ def test_every_settings_json_key_is_read_somewhere_in_src():
         "Either a read site still uses the pre-rename attribute name, or the "
         "key is dead and should come out of settings.json."
     )
+
+
+def test_no_two_settings_enums_share_a_value():
+    """Distinct knobs must not answer to the same word.
+
+    `full` once meant four different things across this file. Overlapping
+    vocabularies are how a value gets pasted into the wrong knob and validates.
+    """
+    enums = {
+        name: getattr(Settings, name)
+        for name in dir(Settings)
+        if name.startswith("_")
+        and name.endswith(("_MODES", "_ROLES"))
+        and isinstance(getattr(Settings, name), tuple)
+    }
+    assert enums, "found no settings enums to check; did they get renamed?"
+
+    collisions = {}
+    for name, values in enums.items():
+        for other, other_values in enums.items():
+            if other <= name:
+                continue
+            shared = sorted(set(values) & set(other_values))
+            if shared:
+                collisions[f"{name} / {other}"] = shared
+    assert not collisions, f"settings enums share values: {collisions}"

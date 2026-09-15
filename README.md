@@ -62,12 +62,12 @@ full list.
 
 | Domain        | Route prefix                                                   | Source                                   | Sync control                                                |
 | :------------ | :------------------------------------------------------------- | :--------------------------------------- | :---------------------------------------------------------- |
-| **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_mode` (`full` / `on_demand`)                          |
-| **Radar**     | `/products/radar-sinarame/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_mode` (`full` / `on_demand`)                          |
-| **ECMWF**     | `/products/ecmwf-ifs/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_mode` (`full` / `on_demand`)                          |
-| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_backup_mode` (independent of `sync_mode`; see below) |
+| **Satellite** | `/products/{product_id}/{instrument_id}/{channel_id}/...`      | GOES-19 ABI + GLM tiles from SeaweedFS   | `sync_prefetch` (`true` / `false`)                          |
+| **Radar**     | `/products/radar-sinarame/{radar_id}/{variable_id}/{elevation_id}/...`  | Argentine radar network tiles            | `sync_prefetch` (`true` / `false`)                          |
+| **ECMWF**     | `/products/ecmwf-ifs/...`                                          | ECMWF total-precipitation tiles and mean-sea-level-pressure GeoJSON | `sync_prefetch` (`true` / `false`)                          |
+| **Basemap**   | `/basemap/{provider_id}/{z}/{x}/{y}.png`, `/basemap/providers` | External providers (IGN, ArcGIS, Google) | `basemap_backup_mode` (independent of `sync_prefetch`; see below) |
 
-Satellite, radar, ECMWF, WRF and GFS share the same `sync_mode` knob. Basemap
+Satellite, radar, ECMWF, WRF and GFS share the same `sync_prefetch` knob. Basemap
 has its own `basemap_backup_mode` because the volume and caching
 economics are different — the scraper writes to a dedicated S3 bucket
 (`S3_BASEMAP_BUCKET_NAME`) and populates Redis with small PNG tiles
@@ -285,7 +285,7 @@ The Data Service syncs tile data from a SeaweedFS S3 bucket, typically populated
 ### Sync loops and failure modes
 
 1. **One loop per product**: a process that runs background jobs
-   (`APP_ROLE=worker` or `all`) and has `sync_mode=full` starts six
+   (`APP_ROLE=worker` or `all`) and has `sync_prefetch=true` starts six
    independent, `fcntl`-gated loops — satellite, radar, ECMWF-TP,
    ECMWF-MSLP, WRF, GFS — each with its own S3 client, interval and
    watchdog, so no product can monopolize another's scheduling or S3
@@ -467,14 +467,14 @@ The project includes three Dockerfiles for different environments:
 
 Operational tuning settings live in `settings.json` at the project root. Edit this file to adjust sync behavior, caching, and retention without touching environment variables. `src/settings.py` is the authoritative source of defaults and loaders — consult it for any key not documented below.
 
-Per-domain knobs are grouped under a namespace object (`satellite`, `basemap`, `ecmwf`, `radar`); the loader recursively flattens nested objects so each inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`sync_mode`, `tileset_listing_ttl`, `cache_control_*`, …) stay at the root because they apply across every domain or have no domain. Example:
+Per-domain knobs are grouped under a namespace object (`satellite`, `basemap`, `ecmwf`, `radar`); the loader recursively flattens nested objects so each inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`tileset_listing_ttl`, `cache_control_*`, …) stay at the root because they apply across every domain or have no domain. Example:
 
 ```jsonc
 {
-  "sync_mode": "full",
+  "sync": { "prefetch": true },
   "satellite": { "tile_ttl": 21600 },
   "basemap": {
-    "sync_mode": "no_cache",
+    "backup_mode": "backup_only",
     "tile_ttl": 604800,
     "providers": [{ "id": "argenmap", "enabled": true }],
   },
@@ -489,18 +489,18 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 
 | Key                           | Description                                                                                                                               |
 | :---------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `sync_mode`                   | `"full"` (background sync) or `"on_demand"` (lazy fetch + cache). Controls satellite, radar, ECMWF, WRF and GFS.                          |
+| `sync_prefetch`               | `true` (background loops prefetch into Redis) or `false` (lazy fetch from S3 on a miss, then cache). Both serve the same tiles; this decides who pays the S3 round trip. Controls satellite, radar, ECMWF, WRF and GFS. |
 | `satellite_tile_ttl`          | Redis TTL in seconds for cached **satellite** tiles (ABI c02/c09/c13, GLM). Should match the SeaweedFS per-object TTL (default: 21600 = 6 h). |
 | `radar_tile_ttl`              | Redis TTL in seconds for cached **radar** tiles (`settings.json`: 21600 = 6 h; no code default, so the key must be present).              |
 | `ecmwf_tile_ttl`              | Redis TTL in seconds for cached **ECMWF** tiles (default: 86400 = 1 day).                                                                 |
 | `ecmwf_forecasts_to_keep`     | How many ECMWF forecast cycles to retain in the hot cache.                                                                                |
 | `tileset_listing_ttl`         | Redis TTL in seconds for cached directory/tileset listings (both modes).                                                                  |
-| `sync_interval_seconds`       | Seconds between background sync cycles (`full` mode) for satellite, radar and both ECMWF products. WRF and GFS use `wrf_sync_interval_seconds` / `gfs_sync_interval_seconds` (120 s each). |
+| `sync_interval_seconds`       | Seconds between background sync cycles (when `sync_prefetch` is true) for satellite, radar and both ECMWF products. WRF and GFS use `wrf_sync_interval_seconds` / `gfs_sync_interval_seconds` (120 s each). |
 | `s3_max_concurrent_downloads` | Semaphore limit for concurrent S3 downloads (default: 5).                                                                                 |
 | `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                               |
 | `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                |
 
-**Basemap subsystem** (all independent of `sync_mode`):
+**Basemap subsystem** (all independent of `sync_prefetch`):
 
 | Key                                                                                                          | Description                                                                                                                                                                                                                                                                     |
 | :----------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -527,7 +527,7 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `basemap_cache_control_tile`                                                                                 | `Cache-Control` header for successful basemap tile responses (default: `public, max-age=2592000, immutable` = 30 days — matches `basemap_tile_ttl`). Kept separate from `cache_control_tile` because basemap tiles are static while satellite/radar/ECMWF rotate every few hours. |
 | `basemap_provider_cooldown_schedule`                                                                         | Exponential backoff list (seconds) indexed by consecutive trip count, capped at the last element (default: `[300, 900, 3600, 10800, 21600]` = 5 min → 6 h). Must be non-empty, positive, monotonically non-decreasing. Persists across restarts via SQLite.                     |
 
-Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_MODE`, `SATELLITE_TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_BACKUP_MODE`).
+Every key in `settings.json` can still be overridden by its corresponding environment variable (e.g. `SYNC_PREFETCH`, `SATELLITE_TILE_TTL`, `RADAR_TILE_TTL`, `BASEMAP_BACKUP_MODE`).
 
 About cache-control headers:
 
@@ -557,7 +557,7 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `S3_BASEMAP_BUCKET_NAME`             | S3 bucket name for the basemap cold backup.                                                | `basemap-tiles`            |
 | `REDIS_URL`                          | Redis connection URL. No code default — must be set.                                       | `redis://redis:6379/0` in `.env.example` |
 | `WEB_CONCURRENCY`                    | Uvicorn workers for the `web` container. The `worker` container uses `WORKER_CONCURRENCY`.  | `3` in `.env.example` (`WORKER_CONCURRENCY`: 1) |
-| `SYNC_MODE`                          | `full` / `on_demand` — applies to satellite, radar, ECMWF, WRF and GFS.                    | `full`                     |
+| `SYNC_PREFETCH`                      | `true` / `false` — background prefetch for satellite, radar, ECMWF, WRF and GFS.           | `true`                     |
 | `BASEMAP_BACKUP_MODE`                | `backup_and_prefetch` / `backup_and_cache_on_read` / `backup_only` / `relay_only`.         | `backup_and_prefetch`      |
 | `BASEMAP_SCRAPE_PARALLELISM_MODE`    | `sequential` / `per_origin` / `full` — provider dispatch within a scrape cycle.            | `sequential`               |
 | `BASEMAP_SCRAPE_PER_HOST_CONCURRENT` | Max concurrent scraper requests to a single upstream host (≤ `BASEMAP_SCRAPE_CONCURRENT`). | `8`                        |

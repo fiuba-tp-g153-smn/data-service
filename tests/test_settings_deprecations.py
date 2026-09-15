@@ -113,6 +113,51 @@ def test_unset_deprecated_env_var_resolves_to_nothing(monkeypatch):
     assert s._env("BASEMAP_BACKUP_MODE") == ""  # pylint: disable=protected-access
 
 
+# --- phase 2: string modes that only ever had two values --------------------
+
+
+@pytest.mark.parametrize(
+    "old_value,prefetch",
+    [("full", True), ("on_demand", False)],
+)
+def test_deprecated_sync_mode_becomes_a_boolean(tmp_path, old_value, prefetch):
+    s = _load(tmp_path, {"sync_mode": old_value})
+    assert s.sync_prefetch is prefetch
+
+
+@pytest.mark.parametrize(
+    "old_value,enabled",
+    [("full", True), ("disabled", False)],
+)
+def test_deprecated_weather_stations_mode_becomes_a_boolean(
+    tmp_path, old_value, enabled
+):
+    s = _load(tmp_path, {"weather_stations": {"sync_mode": old_value}})
+    assert s.weather_stations_sync_enabled is enabled
+
+
+@pytest.mark.parametrize(
+    "env_value,expected",
+    [("full", "true"), ("on_demand", "false")],
+)
+def test_deprecated_sync_mode_env_var_renders_as_a_boolean(
+    monkeypatch, env_value, expected
+):
+    """`_env_bool` reads strings, so the migrated value has to arrive as one."""
+    monkeypatch.delenv("SYNC_PREFETCH", raising=False)
+    monkeypatch.setenv("SYNC_MODE", env_value)
+    s = Settings.__new__(Settings)
+    assert s._env("SYNC_PREFETCH") == expected  # pylint: disable=protected-access
+
+
+def test_deprecated_sync_mode_env_var_round_trips_through_env_bool(monkeypatch):
+    """End to end: the old env var still lands on the new attribute's value."""
+    monkeypatch.delenv("SYNC_PREFETCH", raising=False)
+    monkeypatch.setenv("SYNC_MODE", "on_demand")
+    s = Settings.__new__(Settings)
+    assert s._env_bool("SYNC_PREFETCH", True) is False  # pylint: disable=W0212
+
+
 def test_env_alias_table_covers_every_rename():
     """`_DEPRECATED_ENV` is derived, not maintained by hand alongside renames."""
     import settings as settings_module  # pylint: disable=import-outside-toplevel

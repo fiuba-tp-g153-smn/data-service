@@ -1,6 +1,6 @@
 {
   "sync": {
-    "mode": "full",
+    "prefetch": true,
     "interval_seconds": 60,
     "min_sleep_seconds": 20
   },
