@@ -30,6 +30,11 @@
     "geojson_ttl": 64800,
     "inits_to_keep": 3
   },
+  "gfs": {
+    "tile_ttl": 64800,
+    "geojson_ttl": 64800,
+    "cycles_to_keep": 2
+  },
   "basemap": {
     "backup_mode": "backup_only",
     "tile_ttl": 86400,

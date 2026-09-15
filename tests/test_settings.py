@@ -132,6 +132,11 @@ def test_real_settings_json_round_trip():
     assert s.sync_prefetch is True
     assert s.sync_min_sleep_seconds == 20
     assert s.wrf_inits_to_keep == 3
+    # GFS was the one served product with no block in the file; these three
+    # deliberately equal the code defaults, so a diff here is a real change.
+    assert s.gfs_tile_ttl == 64800
+    assert s.gfs_geojson_ttl == 64800
+    assert s.gfs_cycles_to_keep == 2
     assert s.basemap_scrape_fanout_window == 500
     assert s.basemap_scrape_per_host_concurrent == 8
     assert isinstance(s.basemap_providers, list) and s.basemap_providers

@@ -500,6 +500,19 @@ Legacy flat keys (`basemap_tile_ttl`, `ecmwf_tile_ttl`, …) at the root still l
 | `cache_control_config`        | `Cache-Control` header for configuration/listing endpoints.                                                                               |
 | `cache_control_tile`          | `Cache-Control` header for tile endpoints.                                                                                                |
 
+**WRF / GFS:**
+
+Both models carry their own block because they run on a longer cadence than the other products. The `gfs` block's values deliberately equal the code defaults — it is there so every served product is tunable from the file without reading `settings.py` first.
+
+| Key                    | Description                                                                                       |
+| :--------------------- | :------------------------------------------------------------------------------------------------ |
+| `wrf_tile_ttl`         | Redis TTL in seconds for cached WRF tiles (`settings.json`: 64800 = 18 h; code default 86400).     |
+| `wrf_geojson_ttl`      | Redis TTL in seconds for cached WRF barb GeoJSON (`settings.json`: 64800; code default 86400).     |
+| `wrf_inits_to_keep`    | How many WRF init runs to retain in the hot cache (`settings.json`: 3; code default 2).            |
+| `gfs_tile_ttl`         | Redis TTL in seconds for cached GFS tiles (default: 64800 = 18 h).                                 |
+| `gfs_geojson_ttl`      | Redis TTL in seconds for cached GFS barb GeoJSON (default: 64800 = 18 h).                          |
+| `gfs_cycles_to_keep`   | How many GFS cycles to retain in the hot cache (default: 2). Must be >= 1 — 0 never prunes.        |
+
 **Basemap subsystem** (all independent of `sync_prefetch`):
 
 | Key                                                                                                          | Description                                                                                                                                                                                                                                                                     |
