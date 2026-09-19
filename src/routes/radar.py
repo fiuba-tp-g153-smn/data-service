@@ -14,202 +14,244 @@ from routes.utils import (
     not_modified,
 )
 from services.point_value_service import CogNotFoundError, NoDataOrOutsideError
-from services.radar_service import radar_service
+from services.radar_service import inta_radar_service, radar_service
 
-router = APIRouter(prefix="/products/radar-sinarame", tags=["Radar"])
+# Resolved per call, not captured when the router is built: the module
+# attributes stay the patch point the route tests already use, and closing over
+# the instance would make that seam silently inert.
+def _service_for(network: str):
+    """The service backing one radar network, read at call time."""
+    return {"sinarame": radar_service, "inta": inta_radar_service}[network]
 
 
-@router.get(
-    "",
-    status_code=status.HTTP_200_OK,
-    summary="List all radars",
-    response_description="Returns all available radars",
-)
-async def list_radars():
+def build_radar_router(network: str) -> APIRouter:
+    """Build the router serving one radar network.
+
+    Every network exposes the same endpoints over the same S3 layout, so the
+    routes are built once and mounted per fleet: ``/products/radar-sinarame``
+    and ``/products/radar-inta``. The service carries the network, which is what
+    picks the S3 subtree and the Redis listing namespace.
     """
-    List all available radars (e.g., RMA1, RMA2, ...)
-    """
-    logger.debug("API: Listing all radars")
-    return await radar_service.list_radars()
-
-
-@router.get(
-    "/{radar_id}",
-    status_code=status.HTTP_200_OK,
-    summary="List variables for a radar",
-    response_description="Returns all available variables for a radar",
-)
-async def list_radar_variables(
-    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1, RMA2)")
-):
-    """List all variables for a given radar."""
-    logger.debug("API: Listing variables for radar: %s", radar_id)
-    return await radar_service.list_radar_variables(radar_id)
-
-
-@router.get(
-    "/{radar_id}/{variable_id}",
-    status_code=status.HTTP_200_OK,
-    summary="List elevations for a radar variable",
-    response_description="Returns all available elevations for a radar variable",
-)
-async def list_radar_elevations(
-    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
-    variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-):
-    """List all elevations for a given radar variable."""
-    logger.debug(
-        "API: Listing elevations for radar: %s, variable: %s", radar_id, variable_id
-    )
-    return await radar_service.list_radar_elevations(radar_id, variable_id)
-
-
-@router.get(
-    "/{radar_id}/{variable_id}/{elevation_id}",
-    status_code=status.HTTP_200_OK,
-    summary="List tilesets for a radar variable and elevation",
-    response_description="Returns all available tilesets for a radar variable and elevation",
-    response_model=RadarTilesetListResponse,
-)
-async def list_radar_tilesets(
-    request: Request,
-    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
-    variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-    elevation_id: str = PathParam(
-        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
-    ),
-):
-    """List all tilesets for a radar variable and elevation."""
-    logger.debug(
-        "API: Listing tilesets for radar: %s, variable: %s, elevation: %s",
-        radar_id,
-        variable_id,
-        elevation_id,
-    )
-    data = await radar_service.list_radar_tilesets(radar_id, variable_id, elevation_id)
-    return json_listing_response(
-        data, request.headers.get("if-none-match"), settings.cache_control_config
+    router = APIRouter(
+        prefix=f"/products/radar-{network}", tags=[f"Radar {network}"]
     )
 
-
-@router.get(
-    "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp",
-    status_code=status.HTTP_200_OK,
-    summary="Get Radar Tile",
-    response_description="Returns a specific radar tile image",
-)
-async def get_radar_tile(
-    request: Request,
-    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
-    variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-    elevation_id: str = PathParam(
-        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
-    ),
-    tileset_id: str = PathParam(
-        ..., description="Tileset identifier (timestamp, e.g., 20260114T170328Z)"
-    ),
-    z: int = PathParam(..., description="Zoom level"),
-    x: int = PathParam(..., description="Tile X coordinate"),
-    y: int = PathParam(..., description="Tile Y coordinate"),
-):
-    # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
-    """Get Radar Tile."""
-    # ETag based on unique tile identifier
-    etag, miss_etag = etag_pair(
-        f"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"
+    @router.get(
+        "",
+        status_code=status.HTTP_200_OK,
+        summary="List all radars",
+        response_description="Returns all available radars",
     )
+    async def list_radars():
+        """
+        List all available radars (e.g., RMA1, RMA2, ...)
+        """
+        logger.debug("API: Listing all radars")
+        return await _service_for(network).list_radars()
 
-    # Check If-None-Match for 304
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match == etag:
-        return Response(status_code=status.HTTP_304_NOT_MODIFIED)
 
-    tile_data = await radar_service.get_tile_data(
-        radar_id, variable_id, elevation_id, tileset_id, z, x, y
+    @router.get(
+        "/{radar_id}",
+        status_code=status.HTTP_200_OK,
+        summary="List variables for a radar",
+        response_description="Returns all available variables for a radar",
     )
-    if not tile_data:
-        logger.warning(
-            "Radar tile not found, returning transparent fallback: %s/%s/%s/%s/%s/%s/%s",
+    async def list_radar_variables(
+        radar_id: str = PathParam(
+            ..., description="Radar identifier (e.g., RMA1, RMA2)"
+        )
+    ):
+        """List all variables for a given radar."""
+        logger.debug("API: Listing variables for radar: %s", radar_id)
+        return await _service_for(network).list_radar_variables(radar_id)
+
+
+    @router.get(
+        "/{radar_id}/{variable_id}",
+        status_code=status.HTTP_200_OK,
+        summary="List elevations for a radar variable",
+        response_description="Returns all available elevations for a radar variable",
+    )
+    async def list_radar_elevations(
+        radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
+        variable_id: str = PathParam(
+            ..., description="Variable identifier (e.g., dbzh)"
+        ),
+    ):
+        """List all elevations for a given radar variable."""
+        logger.debug(
+            "API: Listing elevations for radar: %s, variable: %s", radar_id, variable_id
+        )
+        return await _service_for(network).list_radar_elevations(
+            radar_id, variable_id
+        )
+
+
+    @router.get(
+        "/{radar_id}/{variable_id}/{elevation_id}",
+        status_code=status.HTTP_200_OK,
+        summary="List tilesets for a radar variable and elevation",
+        response_description=(
+            "Returns all available tilesets for a radar variable and elevation"
+        ),
+        response_model=RadarTilesetListResponse,
+    )
+    async def list_radar_tilesets(
+        request: Request,
+        radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
+        variable_id: str = PathParam(
+            ..., description="Variable identifier (e.g., dbzh)"
+        ),
+        elevation_id: str = PathParam(
+            ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+        ),
+    ):
+        """List all tilesets for a radar variable and elevation."""
+        logger.debug(
+            "API: Listing tilesets for radar: %s, variable: %s, elevation: %s",
             radar_id,
             variable_id,
             elevation_id,
-            tileset_id,
-            z,
-            x,
-            y,
         )
-        if if_none_match == miss_etag:
-            return not_modified(settings.radar_cache_control_tile_miss)
-        return make_transparent_tile_response(
-            miss_etag, settings.radar_cache_control_tile_miss
+        data = await _service_for(network).list_radar_tilesets(
+            radar_id, variable_id, elevation_id
+        )
+        return json_listing_response(
+            data, request.headers.get("if-none-match"), settings.cache_control_config
         )
 
-    logger.debug("Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y)
 
-    return create_tile_response(tile_data, etag, settings.cache_control_tile)
-
-
-@router.get(
-    "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/point",
-    status_code=status.HTTP_200_OK,
-    summary="Get Radar Point Value",
-    response_description="Returns nearest sampled value for a lat/lon from radar COG",
-    response_model=RadarPointValueResponse,
-)
-async def get_radar_point_value(
-    radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
-    variable_id: str = PathParam(..., description="Variable identifier (e.g., DBZH)"),
-    elevation_id: str = PathParam(
-        ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
-    ),
-    tileset_id: str = PathParam(..., description="Tileset identifier"),
-    lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
-    lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"),
-):
-    """Query nearest point value for a radar COG by geographic coordinate."""
-    try:
-        sample = await radar_service.get_point_value(
-            radar_id=radar_id,
-            variable_id=variable_id,
-            elevation_id=elevation_id,
-            tileset_id=tileset_id,
-            lat=lat,
-            lon=lon,
+    @router.get(
+        "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp",
+        status_code=status.HTTP_200_OK,
+        summary="Get Radar Tile",
+        response_description="Returns a specific radar tile image",
+    )
+    async def get_radar_tile(
+        request: Request,
+        radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
+        variable_id: str = PathParam(
+            ..., description="Variable identifier (e.g., dbzh)"
+        ),
+        elevation_id: str = PathParam(
+            ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+        ),
+        tileset_id: str = PathParam(
+            ..., description="Tileset identifier (timestamp, e.g., 20260114T170328Z)"
+        ),
+        z: int = PathParam(..., description="Zoom level"),
+        x: int = PathParam(..., description="Tile X coordinate"),
+        y: int = PathParam(..., description="Tile Y coordinate"),
+    ):
+        # pylint: disable=too-many-arguments,disable=too-many-positional-arguments
+        """Get Radar Tile."""
+        # ETag based on unique tile identifier
+        etag, miss_etag = etag_pair(
+            f"{radar_id}-{variable_id}-{elevation_id}-{tileset_id}-{z}-{x}-{y}"
         )
-    except CogNotFoundError as exc:
-        logger.warning(
-            "Radar COG not found for point query: %s/%s/%s/%s",
-            radar_id,
-            variable_id,
-            elevation_id,
-            tileset_id,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="cog_not_found",
-        ) from exc
-    except NoDataOrOutsideError as exc:
-        logger.warning(
-            "Radar point query returned nodata/outside: %s/%s/%s/%s lat=%s lon=%s",
-            radar_id,
-            variable_id,
-            elevation_id,
-            tileset_id,
-            lat,
-            lon,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="nodata_or_outside",
-        ) from exc
 
-    return {
-        "radar": radar_id,
-        "variable": variable_id,
-        "elevation": elevation_id,
-        "tileset_id": tileset_id,
-        "lat": lat,
-        "lon": lon,
-        "value": sample.value,
-        "unit": sample.unit,
-    }
+        # Check If-None-Match for 304
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match == etag:
+            return Response(status_code=status.HTTP_304_NOT_MODIFIED)
+
+        tile_data = await _service_for(network).get_tile_data(
+            radar_id, variable_id, elevation_id, tileset_id, z, x, y
+        )
+        if not tile_data:
+            logger.warning(
+                "Radar tile not found, returning transparent fallback: "
+                "%s/%s/%s/%s/%s/%s/%s",
+                radar_id,
+                variable_id,
+                elevation_id,
+                tileset_id,
+                z,
+                x,
+                y,
+            )
+            if if_none_match == miss_etag:
+                return not_modified(settings.radar_cache_control_tile_miss)
+            return make_transparent_tile_response(
+                miss_etag, settings.radar_cache_control_tile_miss
+            )
+
+        logger.debug(
+            "Serving radar tile: %s/%s/%s/%s/%s", radar_id, tileset_id, z, x, y
+        )
+
+        return create_tile_response(tile_data, etag, settings.cache_control_tile)
+
+
+    @router.get(
+        "/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}/point",
+        status_code=status.HTTP_200_OK,
+        summary="Get Radar Point Value",
+        response_description=(
+            "Returns nearest sampled value for a lat/lon from radar COG"
+        ),
+        response_model=RadarPointValueResponse,
+    )
+    async def get_radar_point_value(
+        radar_id: str = PathParam(..., description="Radar identifier (e.g., RMA1)"),
+        variable_id: str = PathParam(
+            ..., description="Variable identifier (e.g., dbzh)"
+        ),
+        elevation_id: str = PathParam(
+            ..., description="Elevation identifier (e.g., elev0, elev1, elev2)"
+        ),
+        tileset_id: str = PathParam(..., description="Tileset identifier"),
+        lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude in EPSG:4326"),
+        lon: float = Query(
+            ..., ge=-180.0, le=180.0, description="Longitude in EPSG:4326"
+        ),
+    ):
+        """Query nearest point value for a radar COG by geographic coordinate."""
+        try:
+            sample = await _service_for(network).get_point_value(
+                radar_id=radar_id,
+                variable_id=variable_id,
+                elevation_id=elevation_id,
+                tileset_id=tileset_id,
+                lat=lat,
+                lon=lon,
+            )
+        except CogNotFoundError as exc:
+            logger.warning(
+                "Radar COG not found for point query: %s/%s/%s/%s",
+                radar_id,
+                variable_id,
+                elevation_id,
+                tileset_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="cog_not_found",
+            ) from exc
+        except NoDataOrOutsideError as exc:
+            logger.warning(
+                "Radar point query returned nodata/outside: %s/%s/%s/%s lat=%s lon=%s",
+                radar_id,
+                variable_id,
+                elevation_id,
+                tileset_id,
+                lat,
+                lon,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="nodata_or_outside",
+            ) from exc
+
+        return {
+            "radar": radar_id,
+            "variable": variable_id,
+            "elevation": elevation_id,
+            "tileset_id": tileset_id,
+            "lat": lat,
+            "lon": lon,
+            "value": sample.value,
+            "unit": sample.unit,
+        }
+
+    return router

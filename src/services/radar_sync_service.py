@@ -5,28 +5,39 @@ import time
 from typing import Optional, Tuple
 
 from services.domain_sync_service import DomainSyncService
+from services.radar_sync_strategy import radar_s3_prefix
 from settings import Settings
 
 logger = logging.getLogger(__name__)
 
-# S3 prefix where radar data lives
-RADAR_S3_PREFIX = "tiles/radar/sinarame"
+# S3 prefix is derived per network; the layout under it is identical, so one
+# service class covers every radar network.
 
 
 class RadarSyncService(DomainSyncService):
     """Syncs radar tilesets from S3 to Redis on its own loop."""
 
-    def __init__(self, settings: Optional[Settings] = None):
+    def __init__(
+        self, settings: Optional[Settings] = None, network: str = "sinarame"
+    ):
         resolved = settings or Settings.get_settings()
+        # The two loops run side by side, so they need distinct domains and
+        # locks. SINARAME keeps the bare "radar" identity it already has: the
+        # domain key surfaces in /sync/status and in the metrics dashboard, and
+        # renaming it would silently break every existing consumer for no gain.
+        is_default = network == "sinarame"
+        suffix = "" if is_default else f"-{network}"
         super().__init__(
             resolved,
-            domain="radar",
-            lock_path=resolved.radar_lock_path,
+            domain=f"radar{suffix}",
+            lock_path=f"{resolved.radar_lock_path}{suffix}",
             interval=resolved.sync_interval_seconds,
             timeout=resolved.sync_domain_timeout_seconds,
             s3_concurrency=resolved.s3_max_concurrent_downloads,
-            service_name="Radar sync",
+            service_name="Radar sync" if is_default else f"Radar {network} sync",
         )
+        self._network = network
+        self._prefix = radar_s3_prefix(network)
 
     async def _run_sync(self) -> None:
         await self._run_single_domain(self._sync_radar())
@@ -47,20 +58,20 @@ class RadarSyncService(DomainSyncService):
         cutoff = now - self._settings.radar_tile_ttl
 
         try:
-            # 1. List radar IDs: tiles/radar/sinarame/{radar_id}/
-            radar_prefixes = await self._client.get_subdirectories(RADAR_S3_PREFIX)
+            # 1. List radar IDs: {prefix}/{radar_id}/
+            radar_prefixes = await self._client.get_subdirectories(self._prefix)
 
             for radar_prefix in radar_prefixes:
                 radar_id = radar_prefix.rstrip("/").split("/")[-1]
                 radar_ids_seen.add(radar_id)
 
-                # 2. List variables: tiles/radar/sinarame/{radar_id}/{variable_id}/
+                # 2. List variables: {prefix}/{radar_id}/{variable_id}/
                 var_prefixes = await self._client.get_subdirectories(radar_prefix)
 
                 for var_prefix in var_prefixes:
                     variable_id = var_prefix.rstrip("/").split("/")[-1]
 
-                    # 3. List elevations: tiles/radar/sinarame/{radar_id}/{variable_id}/elev{N}/
+                    # 3. List elevations: {prefix}/{radar_id}/{variable_id}/elev{N}/
                     elevation_prefixes = await self._client.get_subdirectories(
                         var_prefix
                     )
@@ -163,4 +174,5 @@ class RadarSyncService(DomainSyncService):
 
 
 # Singleton instance for use across the application
-radar_sync_service = RadarSyncService()
+radar_sync_service = RadarSyncService(network="sinarame")
+inta_radar_sync_service = RadarSyncService(network="inta")

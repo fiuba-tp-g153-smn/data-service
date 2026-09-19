@@ -49,11 +49,16 @@ class PointValueService(BaseProductService):
         "goes19/glm/mfa": "km2",
     }
 
+    # Keyed by the product segment of the tile path, shared by every radar
+    # network: SINARAME and INTA publish the same products.
     RADAR_UNITS = {
         "dbzh": "dBZ",
-        # Long-range reflectivity (subvolume 04): same moment as DBZH.
+        # Long-range reflectivity (subvolume 04): same moment as dbzh.
         "dbzh-450km": "dBZ",
         "vrad": "m/s",
+        "zdr": "dB",
+        "rhohv": "",
+        "kdp": "°/km",
     }
 
     MODEL_UNITS = {
@@ -110,9 +115,18 @@ class PointValueService(BaseProductService):
         tileset_id: str,
         lat: float,
         lon: float,
+        network: str = "sinarame",
     ) -> PointSample:
-        """Sample a radar COG at a specific coordinate."""
-        cog_key = f"cog/radar/sinarame/{radar_id}/{variable_id}/{elevation_id}/{tileset_id}.tif"
+        # pylint: disable=too-many-arguments,too-many-positional-arguments
+        """Sample a radar COG at a specific coordinate.
+
+        ``network`` selects the radar fleet's subtree; units are keyed by
+        product, which both fleets share.
+        """
+        cog_key = (
+            f"cog/radar/{network}/{radar_id}/{variable_id}/"
+            f"{elevation_id}/{tileset_id}.tif"
+        )
         unit = self.RADAR_UNITS.get(variable_id, "1")
         value = await self._sample_value(cog_key, lat, lon)
         return PointSample(value=value, unit=unit)

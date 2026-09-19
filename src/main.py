@@ -63,7 +63,7 @@ from services.product_availability_service import (
     product_availability_service,
 )
 from services.point_value_strategy import S3CogPointValueStrategy
-from services.radar_service import radar_service
+from services.radar_service import inta_radar_service, radar_service
 from services.radar_sync_strategy import (
     RadarFullSyncStrategy,
     RadarOnDemandStrategy,
@@ -78,7 +78,10 @@ from services.satellite_sync_strategy import (
 )
 from services.ecmwf_mslp_sync_service import ecmwf_mslp_sync_service
 from services.ecmwf_tp_sync_service import ecmwf_tp_sync_service
-from services.radar_sync_service import radar_sync_service
+from services.radar_sync_service import (
+    inta_radar_sync_service,
+    radar_sync_service,
+)
 from services.satellite_sync_service import satellite_sync_service
 from services.wrf_sync_service import wrf_sync_service
 from services.gfs_sync_service import gfs_sync_service
@@ -103,6 +106,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 _SYNC_SERVICES = (
     satellite_sync_service,
     radar_sync_service,
+    inta_radar_sync_service,
     ecmwf_tp_sync_service,
     ecmwf_mslp_sync_service,
     wrf_sync_service,
@@ -154,6 +158,7 @@ async def configure_strategies(
 ) -> tuple[
     SatelliteSyncStrategy,
     RadarSyncStrategy,
+    RadarSyncStrategy,
     EcmwfTpSyncStrategy,
     EcmwfMslpSyncStrategy,
     S3CogPointValueStrategy,
@@ -165,6 +170,7 @@ async def configure_strategies(
     s3_client = None
     sat_strategy: SatelliteSyncStrategy
     radar_strategy: RadarSyncStrategy
+    inta_radar_strategy: RadarSyncStrategy
     ecmwf_tp_strategy: EcmwfTpSyncStrategy
     ecmwf_mslp_strategy: EcmwfMslpSyncStrategy
     wrf_strategy: WrfSyncStrategy
@@ -202,6 +208,13 @@ async def configure_strategies(
             s3_client,
             settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
+        )
+        inta_radar_strategy = RadarFullSyncStrategy(
+            client_redis,
+            s3_client,
+            settings.radar_tile_ttl,
+            settings.tileset_listing_ttl,
+            network="inta",
         )
         ecmwf_tp_strategy = EcmwfTpFullSyncStrategy(
             client_redis,
@@ -260,6 +273,13 @@ async def configure_strategies(
             settings.radar_tile_ttl,
             settings.tileset_listing_ttl,
         )
+        inta_radar_strategy = RadarOnDemandStrategy(
+            client_redis,
+            s3_client,
+            settings.radar_tile_ttl,
+            settings.tileset_listing_ttl,
+            network="inta",
+        )
         ecmwf_tp_strategy = EcmwfTpOnDemandStrategy(
             client_redis,
             s3_client,
@@ -292,6 +312,7 @@ async def configure_strategies(
     return (
         sat_strategy,
         radar_strategy,
+        inta_radar_strategy,
         ecmwf_tp_strategy,
         ecmwf_mslp_strategy,
         point_value_strategy,
@@ -303,6 +324,7 @@ async def configure_strategies(
 
 def configure_product_availability(
     radar_strategy,
+    inta_radar_strategy,
     satellite_strategy,
     ecmwf_tp_strategy,
     wrf_strategy,
@@ -317,6 +339,7 @@ def configure_product_availability(
     product_availability_service.configure(
         build_contributors(
             radar_strategy=radar_strategy,
+            inta_radar_strategy=inta_radar_strategy,
             satellite_strategy=satellite_strategy,
             satellite_channel_dirs=list(satellite_service.CHANNEL_DIR_MAPPING.values()),
             ecmwf_tp_strategy=ecmwf_tp_strategy,
@@ -778,6 +801,7 @@ async def lifespan(_app: FastAPI):
     (
         sat_strategy,
         radar_strategy,
+        inta_radar_strategy,
         ecmwf_tp_strategy,
         ecmwf_mslp_strategy,
         point_value_strategy,
@@ -788,13 +812,19 @@ async def lifespan(_app: FastAPI):
 
     satellite_service.set_strategy(sat_strategy)
     radar_service.set_strategy(radar_strategy)
+    inta_radar_service.set_strategy(inta_radar_strategy)
     ecmwf_tp_service.set_strategy(ecmwf_tp_strategy)
     ecmwf_mslp_service.set_strategy(ecmwf_mslp_strategy)
     point_value_service.set_strategy(point_value_strategy)
     wrf_service.set_strategy(wrf_strategy)
     gfs_service.set_strategy(gfs_strategy)
     configure_product_availability(
-        radar_strategy, sat_strategy, ecmwf_tp_strategy, wrf_strategy, gfs_strategy
+        radar_strategy,
+        inta_radar_strategy,
+        sat_strategy,
+        ecmwf_tp_strategy,
+        wrf_strategy,
+        gfs_strategy,
     )
 
     basemap_runtime = await configure_basemap(redis_client)
@@ -870,7 +900,10 @@ app.include_router(general.router)
 app.include_router(availability.router)  # Literal /products/availability:
 # must precede satellite, whose /{product_id} would otherwise swallow it
 app.include_router(basemap.router)  # Base map tile proxy
-app.include_router(radar.router)  # Radar routes (most specific)
+# One router per radar fleet; both serve the same shape over their own
+# S3 subtree. Kept adjacent so the route order stays obvious.
+app.include_router(radar.build_radar_router("sinarame"))
+app.include_router(radar.build_radar_router("inta"))
 app.include_router(ecmwf_tp.router)  # ECMWF total precipitation routes
 app.include_router(ecmwf_mslp.router)  # ECMWF mean sea level pressure routes
 app.include_router(wrf.router)  # WRF model routes

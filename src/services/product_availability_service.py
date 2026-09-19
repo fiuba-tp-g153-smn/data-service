@@ -36,6 +36,7 @@ from typing import (
 )
 
 RADAR_DOMAIN = "radar-sinarame"
+INTA_RADAR_DOMAIN = "radar-inta"
 SATELLITE_DOMAIN = "goes19"
 ECMWF_DOMAIN = "ecmwf-ifs"
 WRF_DOMAIN = "wrf-arg4k"
@@ -77,17 +78,20 @@ class AvailabilityContributor(Protocol):
 
 
 class RadarAvailability:
-    """The radar fleet, enumerated the way `/products/radar-sinarame/...` is.
+    """One radar fleet, enumerated the way `/products/radar-<network>/...` is.
 
     Four levels — radars, variables, elevations, tilesets — each Redis-first
     with an S3 fallback, so the answer matches an individual probe whether the
     index is warm, cold, or half-written mid-sync.
+
+    ``domain`` is per-instance rather than a class attribute: the two fleets are
+    two instances of this contributor, and the domain is the API path prefix a
+    client would have probed.
     """
 
-    domain = RADAR_DOMAIN
-
-    def __init__(self, strategy) -> None:
+    def __init__(self, strategy, domain: str = RADAR_DOMAIN) -> None:
         self._strategy = strategy
+        self.domain = domain
 
     async def available(self) -> List[str]:
         """Radar/variable/elevation combinations that have at least one tileset."""
@@ -255,6 +259,7 @@ class ProductAvailabilityService:
 def build_contributors(
     *,
     radar_strategy,
+    inta_radar_strategy,
     satellite_strategy,
     satellite_channel_dirs: Sequence[str],
     ecmwf_tp_strategy,
@@ -264,7 +269,8 @@ def build_contributors(
 ) -> List[AvailabilityContributor]:
     """Every domain that can answer for its products, in a stable order."""
     return [
-        RadarAvailability(radar_strategy),
+        RadarAvailability(radar_strategy, RADAR_DOMAIN),
+        RadarAvailability(inta_radar_strategy, INTA_RADAR_DOMAIN),
         SatelliteAvailability(satellite_strategy, satellite_channel_dirs),
         EcmwfTpAvailability(ecmwf_tp_strategy),
         WrfAvailability(wrf_strategy),
