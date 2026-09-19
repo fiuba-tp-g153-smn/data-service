@@ -7,7 +7,7 @@ from clients.s3_client import S3Client
 from services.ecmwf_mslp_sync_service import EcmwfMslpSyncService
 from services.ecmwf_tp_sync_service import EcmwfTpSyncService
 from services.radar_sync_service import RadarSyncService
-from services.radar_sync_strategy import RadarOnDemandStrategy
+from services.radar_sync_strategy import RadarOnDemandStrategy, radar_s3_prefix
 from services.satellite_sync_service import SatelliteSyncService
 from services.wrf_sync_service import WrfSyncService
 from settings import Settings
@@ -247,13 +247,13 @@ def _make_satellite(mock_s3, mock_redis, prefixes=None):
     return _wire(service, mock_s3, mock_redis, _make_settings())
 
 
-def _make_radar(mock_s3, mock_redis):
-    return _wire(
-        RadarSyncService.__new__(RadarSyncService),
-        mock_s3,
-        mock_redis,
-        _make_settings(),
-    )
+def _make_radar(mock_s3, mock_redis, network="sinarame"):
+    # The S3 subtree is per-network state that __init__ derives, so it has to be
+    # set here the way _make_satellite sets its prefixes.
+    service = RadarSyncService.__new__(RadarSyncService)
+    service._network = network
+    service._prefix = radar_s3_prefix(network)
+    return _wire(service, mock_s3, mock_redis, _make_settings())
 
 
 def _make_ecmwf_tp(mock_s3, mock_redis, ecmwf_forecasts_to_keep=2):
@@ -441,6 +441,40 @@ async def test_sync_radar_scores_new_tileset_with_insertion_time(mock_redis_clie
     assert before <= score <= time.time()
     assert args.kwargs["ttl"] == service._settings.radar_tile_ttl
     mock_redis_client.trim_radar_index.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_sync_radar_scans_only_its_own_network(mock_redis_client):
+    """Each loop walks its own S3 subtree, so the two networks never cross.
+
+    SINARAME and INTA run as two instances of this service side by side; the
+    network is what keeps them apart, and it reaches S3 through this first
+    listing call.
+    """
+    mock_s3 = AsyncMock()
+    mock_s3.get_subdirectories = AsyncMock(
+        side_effect=[
+            ["tiles/radar/inta/PAR/"],
+            ["tiles/radar/inta/PAR/dbzh/"],
+            ["tiles/radar/inta/PAR/dbzh/elev0/"],
+            ["tiles/radar/inta/PAR/dbzh/elev0/20260521T152004Z/"],
+        ]
+    )
+    mock_s3.sync_radar_prefix_to_redis = AsyncMock(return_value=3)
+    mock_redis_client.get_radar_tilesets = AsyncMock(return_value=[])
+
+    service = _make_radar(mock_s3, mock_redis_client, network="inta")
+
+    downloaded, errors = await service._sync_radar()
+
+    assert (downloaded, errors) == (3, 0)
+    assert mock_s3.get_subdirectories.await_args_list[0].args[0] == "tiles/radar/inta"
+    assert mock_redis_client.add_radar_index.await_args.args[:4] == (
+        "PAR",
+        "dbzh",
+        "elev0",
+        "20260521T152004Z",
+    )
 
 
 @pytest.mark.asyncio
