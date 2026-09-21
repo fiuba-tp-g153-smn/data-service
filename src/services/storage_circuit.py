@@ -115,6 +115,15 @@ class StorageCircuit:
         """
         return not self.is_open() or self._in_probe_window()
 
+    def allows_attempt(self) -> bool:
+        """Alias of `allows_write` for gates gating a read rather than a write.
+
+        The admission rule is identical; only the caller's verb differs. The
+        basemap reader gates its upstream *fetch* on this, and reading
+        `allows_write()` there would misdescribe what is being admitted.
+        """
+        return self.allows_write()
+
     def _in_probe_window(self) -> bool:
         """True while the circuit is open and its cooldown has elapsed."""
         return self.is_open() and self._now() >= self._open_until

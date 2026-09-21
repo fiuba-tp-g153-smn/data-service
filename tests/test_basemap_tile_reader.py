@@ -56,6 +56,8 @@ def _make_reader(
     request_deadline_seconds=4.0,
     redis_cache_enabled=True,
     s3_cache_enabled=True,
+    relay_circuit_enabled=True,
+    relay_circuit_min_samples=5,
 ) -> BasemapTileReader:
     # When s3_cache_enabled is False, pass s3=None so the reader goes
     # straight to the relay (matches production relay_only wiring).
@@ -71,6 +73,8 @@ def _make_reader(
         request_deadline_seconds=request_deadline_seconds,
         redis_cache_enabled=redis_cache_enabled,
         s3_cache_enabled=s3_cache_enabled,
+        relay_circuit_enabled=relay_circuit_enabled,
+        relay_circuit_min_samples=relay_circuit_min_samples,
     )
 
 
@@ -508,3 +512,112 @@ async def test_provider_unavailable_does_not_write_caches():
     await _drain(reader)
     s3.upload_tile.assert_not_called()
     redis.store_basemap_tile.assert_not_called()
+
+
+def _unavailable_http() -> MagicMock:
+    """HTTP client whose every fetch reports the upstream as unreachable."""
+    http = MagicMock()
+    http.download_tile = AsyncMock(
+        side_effect=ProviderUnavailableError(
+            "https://example.test/5/10/20.png", "connect timeout"
+        )
+    )
+    return http
+
+
+@pytest.mark.asyncio
+async def test_relay_circuit_stops_retrying_a_dead_upstream():
+    """Once the breaker opens, tier 1 is skipped and S3 answers directly.
+
+    The regression this guards: a provider that blackholes TCP costs a full
+    connect timeout per tile, so without a breaker every request re-paid it
+    before reaching the backup and the whole chain blew its deadline.
+    """
+    http = _unavailable_http()
+    s3 = _make_s3(data=b"from-s3")
+    reader = _make_reader(http=http, s3=s3, relay_circuit_min_samples=5)
+
+    for _ in range(5):
+        assert await reader.get_tile("fake", 5, 10, 20) == b"from-s3"
+    attempts_before = http.download_tile.await_count
+
+    # Circuit is open now: further reads must not touch upstream at all.
+    for _ in range(5):
+        assert await reader.get_tile("fake", 5, 10, 20) == b"from-s3"
+
+    assert http.download_tile.await_count == attempts_before
+    await _drain(reader)
+
+
+@pytest.mark.asyncio
+async def test_relay_circuit_disabled_keeps_probing_upstream():
+    """With the breaker off, every request re-attempts upstream (legacy path)."""
+    http = _unavailable_http()
+    s3 = _make_s3(data=b"from-s3")
+    reader = _make_reader(http=http, s3=s3, relay_circuit_enabled=False)
+
+    for _ in range(8):
+        assert await reader.get_tile("fake", 5, 10, 20) == b"from-s3"
+
+    assert http.download_tile.await_count == 8
+    await _drain(reader)
+
+
+@pytest.mark.asyncio
+async def test_relay_circuit_recovers_and_serves_upstream_again():
+    """A half-open probe that succeeds closes the circuit and restores tier 1.
+
+    Sleeps past the breaker's 1s base cooldown rather than reaching into its
+    state, so this exercises the same admission clock production uses.
+    """
+    http = _unavailable_http()
+    s3 = _make_s3(data=b"from-s3")
+    reader = _make_reader(http=http, s3=s3, relay_circuit_min_samples=5)
+
+    for _ in range(5):
+        await reader.get_tile("fake", 5, 10, 20)
+
+    await asyncio.sleep(1.05)  # cooldown lapses → next read is admitted as a probe
+    http.download_tile = AsyncMock(return_value=b"from-prod")
+
+    assert await reader.get_tile("fake", 5, 10, 20) == b"from-prod"
+    await _drain(reader)
+
+
+def _provider_at(provider_id: str, host: str) -> BasemapProvider:
+    """Provider whose upstream URL is distinguishable by host."""
+    return BasemapProvider(
+        provider_id=provider_id,
+        name=provider_id,
+        source_url_template=f"https://{host}/{{z}}/{{x}}/{{y}}.png",
+        is_tms=False,
+        min_zoom=0,
+        max_zoom=22,
+        cache_max_zoom=22,
+        attribution="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_relay_circuit_is_per_provider():
+    """One dead provider must not gate a healthy sibling."""
+
+    async def _download(url: str):
+        if "dead.test" in url:
+            raise ProviderUnavailableError(url, "connect timeout")
+        return b"from-prod"
+
+    http = MagicMock()
+    http.download_tile = AsyncMock(side_effect=_download)
+    providers = {
+        "dead": _provider_at("dead", "dead.test"),
+        "alive": _provider_at("alive", "alive.test"),
+    }
+    reader = _make_reader(http=http, s3=_make_s3(data=b"from-s3"), providers=providers)
+
+    for _ in range(6):
+        await reader.get_tile("dead", 5, 10, 20)
+
+    # The dead provider's breaker is open; the healthy one is untouched.
+    assert await reader.get_tile("alive", 5, 10, 20) == b"from-prod"
+    await _drain(reader)

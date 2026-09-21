@@ -296,6 +296,18 @@ class Settings:
     # Hard wall-clock deadline per tile request. Bounds single-flight waiters
     # and the relay fallback together.
     basemap_request_deadline_seconds: float = 4.0
+    # Per-provider breaker on the reader's upstream (tier-1) fetch. A provider
+    # that blackholes TCP costs a full connect timeout per tile, which without
+    # a breaker is re-paid on every request and pushes the whole chain past
+    # `basemap_request_deadline_seconds` — so the backup that would have
+    # answered in milliseconds never gets reached. Opens after
+    # `min_samples` outcomes exceed `threshold` failures, then backs off
+    # 1 → 2 → 4 … → `max_cooldown` between half-open probes. Disable to
+    # restore the previous always-try-upstream behaviour.
+    basemap_relay_circuit_enabled: bool = True
+    basemap_relay_circuit_min_samples: int = 5
+    basemap_relay_circuit_threshold: float = 0.8
+    basemap_relay_circuit_max_cooldown: float = 30.0
     # Cache-Control header returned for missing tiles (datalayer-style: a
     # transparent PNG with a short TTL so the browser stops re-requesting).
     # The miss also carries its own ETag so that revalidation can return the
@@ -517,6 +529,10 @@ class Settings:
             "basemap_reader_http_timeout_seconds",
             "basemap_reader_http_max_retries",
             "basemap_request_deadline_seconds",
+            "basemap_relay_circuit_enabled",
+            "basemap_relay_circuit_min_samples",
+            "basemap_relay_circuit_threshold",
+            "basemap_relay_circuit_max_cooldown",
             "basemap_cache_control_tile_miss",
             "basemap_cache_control_tile",
             "basemap_backup_mode",
@@ -909,6 +925,19 @@ class Settings:
         )
         self.basemap_request_deadline_seconds = self._env_float(
             "BASEMAP_REQUEST_DEADLINE_SECONDS", self.basemap_request_deadline_seconds
+        )
+        self.basemap_relay_circuit_enabled = self._env_bool(
+            "BASEMAP_RELAY_CIRCUIT_ENABLED", self.basemap_relay_circuit_enabled
+        )
+        self.basemap_relay_circuit_min_samples = self._env_int(
+            "BASEMAP_RELAY_CIRCUIT_MIN_SAMPLES", self.basemap_relay_circuit_min_samples
+        )
+        self.basemap_relay_circuit_threshold = self._env_float(
+            "BASEMAP_RELAY_CIRCUIT_THRESHOLD", self.basemap_relay_circuit_threshold
+        )
+        self.basemap_relay_circuit_max_cooldown = self._env_float(
+            "BASEMAP_RELAY_CIRCUIT_MAX_COOLDOWN",
+            self.basemap_relay_circuit_max_cooldown,
         )
         self.basemap_cache_control_tile_miss = os.getenv(
             "BASEMAP_CACHE_CONTROL_TILE_MISS", self.basemap_cache_control_tile_miss
