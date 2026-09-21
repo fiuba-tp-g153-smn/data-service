@@ -434,6 +434,10 @@ async def configure_basemap(
         s3_cache_enabled=s3_cache_enabled,
         negative_cache_enabled=settings.basemap_negative_cache_enabled,
         negative_cache_ttl=settings.basemap_negative_cache_ttl,
+        relay_circuit_enabled=settings.basemap_relay_circuit_enabled,
+        relay_circuit_min_samples=settings.basemap_relay_circuit_min_samples,
+        relay_circuit_threshold=settings.basemap_relay_circuit_threshold,
+        relay_circuit_max_cooldown=settings.basemap_relay_circuit_max_cooldown,
     )
 
     scraper_http_client: Optional[HttpTileClient] = None

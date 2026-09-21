@@ -10,6 +10,7 @@ from clients.http_tile_client import HttpTileClient, ProviderUnavailableError
 from clients.redis_client import RedisClient
 from clients.s3_client import S3Client
 from services.basemap_config import BasemapProvider, build_source_url
+from services.storage_circuit import CircuitTransition, StorageCircuit
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,15 @@ class BasemapTileReader:
 
     `online_fallback=False` disables the upstream tier entirely — reads
     degrade to Redis → S3 only (the legacy offline-read path).
+
+    Tier 1 is additionally gated by a per-provider `StorageCircuit`. A host
+    that blackholes TCP costs a full connect timeout per tile, and without a
+    breaker every request re-pays it before reaching the backup that would
+    have answered in milliseconds — so an upstream outage reads as a service
+    outage. Once the circuit opens, tier 1 is skipped until a half-open probe
+    succeeds. The breaker is per-provider because providers fail
+    independently; it is per-process because each Uvicorn worker holds its own
+    reader, and each converges after a handful of tiles.
     """
 
     def __init__(
@@ -60,6 +70,10 @@ class BasemapTileReader:
         s3_cache_enabled: bool = True,
         negative_cache_enabled: bool = True,
         negative_cache_ttl: int = 300,
+        relay_circuit_enabled: bool = True,
+        relay_circuit_min_samples: int = 5,
+        relay_circuit_threshold: float = 0.8,
+        relay_circuit_max_cooldown: float = 30.0,
     ):
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         self._redis = redis_client
@@ -86,13 +100,19 @@ class BasemapTileReader:
         self._cache_semaphore = asyncio.Semaphore(cache_concurrent)
         self._inflight_cache_tasks: set[asyncio.Task] = set()
         self._inflight: dict[_TileKey, "asyncio.Future[Optional[bytes]]"] = {}
+        self._relay_circuit_enabled = relay_circuit_enabled
+        self._relay_circuit_min_samples = relay_circuit_min_samples
+        self._relay_circuit_threshold = relay_circuit_threshold
+        self._relay_circuit_max_cooldown = relay_circuit_max_cooldown
+        self._relay_circuits: dict[str, StorageCircuit] = {}
         logger.info(
             "BasemapTileReader (prod-first) redis=%s s3=%s online_fallback=%s "
-            "deadline=%.1fs",
+            "deadline=%.1fs relay_circuit=%s",
             "enabled" if redis_cache_enabled else "disabled",
             "enabled" if s3_cache_enabled else "disabled",
             online_fallback,
             request_deadline_seconds,
+            "enabled" if relay_circuit_enabled else "disabled",
         )
 
     async def get_tile(
@@ -201,27 +221,92 @@ class BasemapTileReader:
     async def _try_provider(
         self, provider_id: str, z: int, x: int, y: int
     ) -> Optional[bytes]:
-        """Fetch from upstream. Returns bytes on success, None on any failure."""
+        """Fetch from upstream unless this provider's relay circuit is open."""
         if not self._online_fallback:
             return None
         provider = self._providers.get(provider_id)
         if not provider:
             return None
+        circuit = self._relay_circuit(provider_id)
+        if circuit is not None and not circuit.allows_attempt():
+            # Known-dead upstream: skip straight to the caches rather than
+            # re-paying its timeout on every tile.
+            return None
+        return await self._download_from_provider(provider, z, x, y, circuit)
+
+    async def _download_from_provider(
+        self,
+        provider: BasemapProvider,
+        z: int,
+        x: int,
+        y: int,
+        circuit: Optional[StorageCircuit],
+    ) -> Optional[bytes]:
+        """Fetch one tile upstream, folding the outcome into the relay circuit."""
         url = build_source_url(provider, z, x, y)
         try:
-            return await self._http.download_tile(url)
+            data = await self._http.download_tile(url)
         except ProviderUnavailableError as exc:
-            # Upstream unreachable — degrade to caches. The scraper's circuit
-            # breaker owns the health signal; the reader's job is just bytes.
-            logger.info(
-                "Relay unavailable for %s/%d/%d/%d: %s",
-                provider_id,
-                z,
-                x,
-                y,
-                exc.cause,
-            )
+            # Per-tile detail is debug: during an outage this fires for every
+            # tile. The circuit's transitions carry the operator-facing signal.
+            logger.debug("Relay unavailable for %s: %s", url, exc.cause)
+            if circuit is not None:
+                self._log_relay_circuit(circuit.record_failure(), exc)
             return None
+        if circuit is not None:
+            self._log_relay_circuit(circuit.record_success())
+        return data
+
+    def _relay_circuit(self, provider_id: str) -> Optional[StorageCircuit]:
+        """Return this provider's relay breaker, created on first use.
+
+        None when the breaker is disabled, which restores the previous
+        always-try-upstream behaviour.
+        """
+        if not self._relay_circuit_enabled:
+            return None
+        circuit = self._relay_circuits.get(provider_id)
+        if circuit is None:
+            circuit = StorageCircuit(
+                f"Relay {provider_id}",
+                min_samples=self._relay_circuit_min_samples,
+                threshold=self._relay_circuit_threshold,
+                max_cooldown=self._relay_circuit_max_cooldown,
+            )
+            self._relay_circuits[provider_id] = circuit
+        return circuit
+
+    @staticmethod
+    def _log_relay_circuit(
+        transition: Optional[CircuitTransition],
+        exc: Optional[BaseException] = None,
+    ) -> None:
+        """Emit the one line a relay circuit state change is worth."""
+        if transition is None:
+            return
+        if transition.opened:
+            logger.warning(
+                "%s circuit opened after %d failed fetches (%s) — "
+                "serving from cache for %.0fs",
+                transition.name,
+                transition.failures,
+                exc,
+                transition.cooldown,
+            )
+        elif transition.probe_failed:
+            logger.warning(
+                "%s still unavailable (%s) — next probe in %.0fs",
+                transition.name,
+                exc,
+                transition.cooldown,
+            )
+        elif transition.recovered:
+            logger.info(
+                "%s recovered after %.0fs and %d failed fetches — resuming",
+                transition.name,
+                transition.downtime,
+                transition.failures,
+            )
 
     async def _safe_redis_get(
         self, provider_id: str, z: int, x: int, y: int
