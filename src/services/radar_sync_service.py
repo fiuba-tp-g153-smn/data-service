@@ -17,9 +17,7 @@ logger = logging.getLogger(__name__)
 class RadarSyncService(DomainSyncService):
     """Syncs radar tilesets from S3 to Redis on its own loop."""
 
-    def __init__(
-        self, settings: Optional[Settings] = None, network: str = "sinarame"
-    ):
+    def __init__(self, settings: Optional[Settings] = None, network: str = "sinarame"):
         resolved = settings or Settings.get_settings()
         # The two loops run side by side, so they need distinct domains and
         # locks. SINARAME keeps the bare "radar" identity it already has: the
@@ -99,7 +97,8 @@ class RadarSyncService(DomainSyncService):
             errors += 1
 
         logger.info(
-            "[radar] %d radar(s) scanned | %d tiles downloaded",
+            "[%s] %d radar(s) scanned | %d tiles downloaded",
+            self._domain,
             len(radar_ids_seen),
             total_downloaded,
         )
@@ -123,7 +122,7 @@ class RadarSyncService(DomainSyncService):
         if elevation_id not in existing_by_elevation:
             existing_by_elevation[elevation_id] = set(
                 await self._redis_client.get_radar_tilesets(
-                    radar_id, variable_id, elevation_id
+                    radar_id, variable_id, elevation_id, network=self._network
                 )
             )
 
@@ -143,6 +142,7 @@ class RadarSyncService(DomainSyncService):
                 tileset_id,
                 elevation_id,
                 tile_ttl=self._settings.radar_tile_ttl,
+                network=self._network,
             )
 
             if downloaded > 0:
@@ -154,6 +154,7 @@ class RadarSyncService(DomainSyncService):
                     tileset_id,
                     now,
                     ttl=self._settings.radar_tile_ttl,
+                    network=self._network,
                 )
                 downloaded_total += downloaded
                 logger.info(
@@ -167,7 +168,7 @@ class RadarSyncService(DomainSyncService):
 
         # Trim every cycle so the index stays bounded to the live-tile window.
         await self._redis_client.trim_radar_index(
-            radar_id, variable_id, elevation_id, cutoff
+            radar_id, variable_id, elevation_id, cutoff, network=self._network
         )
 
         return downloaded_total

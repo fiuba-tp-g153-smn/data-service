@@ -21,7 +21,17 @@ from redis.exceptions import ResponseError
 
 logger = logging.getLogger(__name__)
 
-_RADAR_ROOT_KEY = "idx:radar:radars"
+
+def _radar_ns(network: str) -> str:
+    """Key namespace for one radar network.
+
+    SINARAME keeps the bare ``radar`` namespace it has always had, so a deploy
+    does not cold-start its cache; every other network gets its own, since the
+    fleets are indexed side by side and must never see each other's radars.
+    """
+    return "radar" if network == "sinarame" else f"radar-{network}"
+
+
 _WRF_PRODUCTS_KEY = "idx:wrf:products"
 
 
@@ -211,10 +221,13 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         y: int,
         data: bytes,
         ttl: int = 3600,
+        network: str = "sinarame",
     ) -> None:
         # pylint: disable=too-many-arguments
         """Store a radar tile in Redis with TTL."""
-        key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
+        key = self._radar_tile_key(
+            network, radar_id, variable_id, tileset_id, elevation_id, z, x, y
+        )
         await self._conn.set(key, data, ex=ttl)
 
     async def get_radar_tile(
@@ -226,11 +239,31 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         z: int,
         x: int,
         y: int,
+        network: str = "sinarame",
     ) -> Optional[bytes]:
         # pylint: disable=too-many-arguments
         """Get a radar tile from Redis."""
-        key = f"tile:radar:{radar_id}/{variable_id}/{tileset_id}_{elevation_id}/{z}/{x}/{y}"
+        key = self._radar_tile_key(
+            network, radar_id, variable_id, tileset_id, elevation_id, z, x, y
+        )
         return await self._conn.get(key)
+
+    @staticmethod
+    def _radar_tile_key(
+        network: str,
+        radar_id: str,
+        variable_id: str,
+        tileset_id: str,
+        elevation_id: str,
+        z: int,
+        x: int,
+        y: int,
+    ) -> str:
+        # pylint: disable=too-many-arguments
+        return (
+            f"tile:{_radar_ns(network)}:{radar_id}/{variable_id}/"
+            f"{tileset_id}_{elevation_id}/{z}/{x}/{y}"
+        )
 
     # ============== Radar Index Operations ==============
 
@@ -242,6 +275,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         tileset_id: str,
         score: float,
         ttl: int = 3600,
+        network: str = "sinarame",
     ) -> None:
         """Add entries to radar index sets with TTL.
 
@@ -251,57 +285,77 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         """
         pipe = await self._conn.pipeline()
 
-        radars_key = _RADAR_ROOT_KEY
+        radars_key = self._radar_root_key(network)
         pipe.sadd(radars_key, radar_id.encode())
         pipe.expire(radars_key, ttl)
 
-        vars_key = self._radar_variables_key(radar_id)
+        vars_key = self._radar_variables_key(network, radar_id)
         pipe.sadd(vars_key, variable_id.encode())
         pipe.expire(vars_key, ttl)
 
-        elevs_key = self._radar_elevations_key(radar_id, variable_id)
+        elevs_key = self._radar_elevations_key(network, radar_id, variable_id)
         pipe.sadd(elevs_key, elevation_id.encode())
         pipe.expire(elevs_key, ttl)
 
-        tilesets_key = self._radar_tilesets_key(radar_id, variable_id, elevation_id)
+        tilesets_key = self._radar_tilesets_key(
+            network, radar_id, variable_id, elevation_id
+        )
         pipe.zadd(tilesets_key, {tileset_id.encode(): score})
         pipe.expire(tilesets_key, ttl)
 
         await pipe.execute()
 
     @staticmethod
-    def _radar_variables_key(radar_id: str) -> str:
-        return f"idx:radar:{radar_id}:variables"
+    def _radar_root_key(network: str) -> str:
+        return f"idx:{_radar_ns(network)}:radars"
 
     @staticmethod
-    def _radar_elevations_key(radar_id: str, variable_id: str) -> str:
-        return f"idx:radar:{radar_id}:{variable_id}:elevations"
+    def _radar_variables_key(network: str, radar_id: str) -> str:
+        return f"idx:{_radar_ns(network)}:{radar_id}:variables"
 
     @staticmethod
-    def _radar_tilesets_key(radar_id: str, variable_id: str, elevation_id: str) -> str:
-        return f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+    def _radar_elevations_key(network: str, radar_id: str, variable_id: str) -> str:
+        return f"idx:{_radar_ns(network)}:{radar_id}:{variable_id}:elevations"
 
-    async def get_radar_radars(self) -> List[str]:
-        """Get all radar IDs."""
-        members = await self._conn.smembers(_RADAR_ROOT_KEY)  # type: ignore[misc]
-        return sorted(m.decode() for m in members)
+    @staticmethod
+    def _radar_tilesets_key(
+        network: str, radar_id: str, variable_id: str, elevation_id: str
+    ) -> str:
+        return (
+            f"idx:{_radar_ns(network)}:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        )
 
-    async def get_radar_variables(self, radar_id: str) -> List[str]:
-        """Get all variable IDs for a radar."""
+    async def get_radar_radars(self, network: str = "sinarame") -> List[str]:
+        """Get all radar IDs of one network."""
         members = await self._conn.smembers(  # type: ignore[misc]
-            self._radar_variables_key(radar_id)
+            self._radar_root_key(network)
         )
         return sorted(m.decode() for m in members)
 
-    async def get_radar_elevations(self, radar_id: str, variable_id: str) -> List[str]:
+    async def get_radar_variables(
+        self, radar_id: str, network: str = "sinarame"
+    ) -> List[str]:
+        """Get all variable IDs for a radar."""
+        members = await self._conn.smembers(  # type: ignore[misc]
+            self._radar_variables_key(network, radar_id)
+        )
+        return sorted(m.decode() for m in members)
+
+    async def get_radar_elevations(
+        self, radar_id: str, variable_id: str, network: str = "sinarame"
+    ) -> List[str]:
         """Get all elevation IDs for a radar/variable."""
         members = await self._conn.smembers(  # type: ignore[misc]
-            self._radar_elevations_key(radar_id, variable_id)
+            self._radar_elevations_key(network, radar_id, variable_id)
         )
         return sorted(m.decode() for m in members)
 
     async def get_radar_tilesets(
-        self, radar_id: str, variable_id: str, elevation_id: str
+        self,
+        radar_id: str,
+        variable_id: str,
+        elevation_id: str,
+        network: str = "sinarame",
     ) -> List[str]:
         """Get all tileset IDs for a radar/variable/elevation (newest first).
 
@@ -309,7 +363,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         a WRONGTYPE means a pre-migration key, which we drop so the next sync
         recreates it as a sorted set.
         """
-        key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        key = self._radar_tilesets_key(network, radar_id, variable_id, elevation_id)
         try:
             members = await self._conn.zrange(key, 0, -1)
         except ResponseError as exc:
@@ -325,13 +379,14 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         variable_id: str,
         elevation_id: str,
         min_score: float,
+        network: str = "sinarame",
     ) -> int:
         """Drop tilesets older than min_score (epoch seconds) from a radar elevation.
 
         Keeps the index bounded to the live-tile window, the radar analogue of
         trim_satellite_index. Returns the number of members removed.
         """
-        key = f"idx:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+        key = self._radar_tilesets_key(network, radar_id, variable_id, elevation_id)
         return await self._conn.zremrangebyscore(key, "-inf", f"({min_score}")
 
     # ============== ECMWF Total Precipitation Tile Operations ==============

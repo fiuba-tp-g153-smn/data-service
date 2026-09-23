@@ -178,6 +178,41 @@ async def test_radar_index_operations():
 
 
 @pytest.mark.asyncio
+async def test_inta_radar_keys_never_share_the_sinarame_namespace():
+    """Both fleets are indexed side by side; a shared key would list RMA1 under
+    radar-inta and serve SINARAME tiles for it. SINARAME keeps its bare keys."""
+    client = RedisClient("redis://localhost:6379/0")
+    mock_redis = AsyncMock()
+    mock_pipeline = MagicMock()
+    mock_redis.pipeline = AsyncMock(return_value=mock_pipeline)
+    mock_pipeline.execute = AsyncMock(return_value=[])
+    mock_redis.smembers = AsyncMock(return_value=set())
+    mock_redis.zrange = AsyncMock(return_value=[])
+    client._redis = mock_redis
+
+    await client.add_radar_index(
+        "PAR", "dbzh", "elev0", "ts1", 1234.0, ttl=3600, network="inta"
+    )
+    await client.store_radar_tile(
+        "PAR", "dbzh", "ts1", "elev0", 5, 10, 15, b"data", network="inta"
+    )
+    await client.get_radar_radars("inta")
+    await client.get_radar_tilesets("PAR", "dbzh", "elev0", network="inta")
+
+    assert mock_pipeline.sadd.call_args_list[0].args[0] == "idx:radar-inta:radars"
+    mock_pipeline.zadd.assert_called_once_with(
+        "idx:radar-inta:PAR:dbzh:elev0:tilesets", {b"ts1": 1234.0}
+    )
+    mock_redis.set.assert_awaited_once_with(
+        "tile:radar-inta:PAR/dbzh/ts1_elev0/5/10/15", b"data", ex=3600
+    )
+    mock_redis.smembers.assert_awaited_once_with("idx:radar-inta:radars")
+    mock_redis.zrange.assert_awaited_once_with(
+        "idx:radar-inta:PAR:dbzh:elev0:tilesets", 0, -1
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_radar_tilesets_returns_newest_first():
     """Sorted-set members are decoded and returned newest (highest) first."""
     client = RedisClient("redis://localhost:6379/0")

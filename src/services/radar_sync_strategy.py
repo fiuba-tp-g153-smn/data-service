@@ -88,7 +88,7 @@ class RadarFullSyncStrategy:
     ) -> Optional[bytes]:
         """Get radar tile from Redis; on miss fall back to S3."""
         data = await self._redis.get_radar_tile(
-            radar_id, variable_id, tileset_id, elevation_id, z, x, y
+            radar_id, variable_id, tileset_id, elevation_id, z, x, y, self._network
         )
         if data:
             return data
@@ -100,7 +100,7 @@ class RadarFullSyncStrategy:
 
     async def list_radars(self) -> List[str]:
         """List radars from the Redis index; on empty fall back to S3."""
-        radars = await self._redis.get_radar_radars()
+        radars = await self._redis.get_radar_radars(self._network)
         if radars:
             return radars
         if self._fallback is not None:
@@ -109,7 +109,7 @@ class RadarFullSyncStrategy:
 
     async def list_variables(self, radar_id: str) -> List[str]:
         """List variables from the Redis index; on empty fall back to S3."""
-        variables = await self._redis.get_radar_variables(radar_id)
+        variables = await self._redis.get_radar_variables(radar_id, self._network)
         if variables:
             return variables
         if self._fallback is not None:
@@ -118,7 +118,9 @@ class RadarFullSyncStrategy:
 
     async def list_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """List elevations from the Redis index; on empty fall back to S3."""
-        elevations = await self._redis.get_radar_elevations(radar_id, variable_id)
+        elevations = await self._redis.get_radar_elevations(
+            radar_id, variable_id, self._network
+        )
         if elevations:
             return elevations
         if self._fallback is not None:
@@ -130,7 +132,7 @@ class RadarFullSyncStrategy:
     ) -> List[str]:
         """List tilesets from the Redis index; on empty fall back to S3."""
         tilesets = await self._redis.get_radar_tilesets(
-            radar_id, variable_id, elevation_id
+            radar_id, variable_id, elevation_id, self._network
         )
         if tilesets:
             return tilesets
@@ -171,7 +173,7 @@ class RadarOnDemandStrategy:
     ) -> Optional[bytes]:
         """Get tile from Redis, falling back to S3 with cache-aside."""
         data = await self._redis.get_radar_tile(
-            radar_id, variable_id, tileset_id, elevation_id, z, x, y
+            radar_id, variable_id, tileset_id, elevation_id, z, x, y, self._network
         )
         if data:
             return data
@@ -195,6 +197,7 @@ class RadarOnDemandStrategy:
                     y,
                     data,
                     ttl=self._tile_ttl,
+                    network=self._network,
                 )
             )
             return data

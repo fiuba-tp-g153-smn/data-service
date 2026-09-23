@@ -737,6 +737,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         tileset_id: str,
         elevation_id: str,
         tile_ttl: int,
+        network: str = "sinarame",
     ) -> int:
         # pylint: disable=too-many-arguments
         """Download all radar tiles for a tileset from S3 and store in Redis."""
@@ -768,6 +769,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                 tileset_id,
                 elevation_id,
                 tile_ttl,
+                network,
             )
             for obj in tile_objects
         ]
@@ -783,6 +785,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         tileset_id: str,
         elevation_id: str,
         tile_ttl: int,
+        network: str = "sinarame",
     ) -> bool:
         # pylint: disable=too-many-arguments,too-many-positional-arguments
         """Download a single radar tile from S3 and store in Redis."""
@@ -804,6 +807,7 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
                     y,
                     content,
                     ttl=tile_ttl,
+                    network=network,
                 )
                 return True
             except Exception as e:  # pylint: disable=broad-exception-caught

@@ -36,6 +36,8 @@ logger = logging.getLogger(__name__)
 _PREFIX_DOMAINS = (
     ("tile:sat:", "satellite"),
     ("tile:radar:", "radar"),
+    # INTA tiles live in their own namespace but are the same radar product.
+    ("tile:radar-inta:", "radar"),
     ("tile:ecmwf_tp:", "ecmwf_tp"),
     ("geojson:ecmwf_mslp:", "ecmwf_mslp"),
     ("tile:wrf:", "wrf"),

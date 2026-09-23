@@ -22,6 +22,7 @@ def test_sync_status_empty():
         assert set(domains) == {
             "satellite",
             "radar",
+            "radar-inta",
             "ecmwf_tp",
             "ecmwf_mslp",
             "wrf",

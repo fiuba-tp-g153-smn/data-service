@@ -475,6 +475,10 @@ async def test_sync_radar_scans_only_its_own_network(mock_redis_client):
         "elev0",
         "20260521T152004Z",
     )
+    # ...and it has to reach Redis too, or both fleets land in one index.
+    assert mock_redis_client.add_radar_index.await_args.kwargs["network"] == "inta"
+    assert mock_s3.sync_radar_prefix_to_redis.await_args.kwargs["network"] == "inta"
+    assert mock_redis_client.trim_radar_index.await_args.kwargs["network"] == "inta"
 
 
 @pytest.mark.asyncio
