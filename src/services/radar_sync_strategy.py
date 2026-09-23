@@ -9,8 +9,15 @@ from clients.s3_client import S3Client
 
 # pylint: disable=too-many-arguments,too-many-positional-arguments
 
-# S3 prefix where radar data lives
-RADAR_S3_PREFIX = "tiles/radar/sinarame"
+# S3 prefix where radar data lives, one subtree per network. The layout below
+# it is identical for every network, so the network is a parameter rather than
+# a second copy of the strategy.
+RADAR_S3_ROOT = "tiles/radar"
+
+
+def radar_s3_prefix(network: str) -> str:
+    """S3 prefix holding one radar network's tiles."""
+    return f"{RADAR_S3_ROOT}/{network}"
 
 
 class RadarSyncStrategy(Protocol):
@@ -57,10 +64,14 @@ class RadarFullSyncStrategy:
         s3_client: Optional[S3Client] = None,
         tile_ttl: int = 0,
         listing_ttl: int = 0,
+        network: str = "sinarame",
     ):
         self._redis = redis_client
+        self._network = network
         self._fallback = (
-            RadarOnDemandStrategy(redis_client, s3_client, tile_ttl, listing_ttl)
+            RadarOnDemandStrategy(
+                redis_client, s3_client, tile_ttl, listing_ttl, network
+            )
             if s3_client is not None
             else None
         )
@@ -139,11 +150,14 @@ class RadarOnDemandStrategy:
         s3_client: Optional[S3Client],
         tile_ttl: int,
         listing_ttl: int,
+        network: str = "sinarame",
     ):
         self._redis = redis_client
         self._s3 = s3_client
         self._tile_ttl = tile_ttl
         self._listing_ttl = listing_ttl
+        self._network = network
+        self._prefix = radar_s3_prefix(network)
 
     async def get_tile(
         self,
@@ -166,7 +180,7 @@ class RadarOnDemandStrategy:
             return None
 
         s3_key = S3Client.build_radar_tile_key(
-            radar_id, variable_id, tileset_id, elevation_id, z, x, y
+            radar_id, variable_id, tileset_id, elevation_id, z, x, y, self._network
         )
         data = await self._s3.download_tile(s3_key)
         if data:
@@ -189,7 +203,7 @@ class RadarOnDemandStrategy:
 
     async def list_radars(self) -> List[str]:
         """List radars from cache or S3."""
-        cache_key = "cache:listing:radar:radars"
+        cache_key = f"cache:listing:radar:{self._network}:radars"
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
             return json.loads(cached)
@@ -197,7 +211,7 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        subdirs = await self._s3.try_get_subdirectories(RADAR_S3_PREFIX)
+        subdirs = await self._s3.try_get_subdirectories(self._prefix)
         radars = sorted(s.rstrip("/").split("/")[-1] for s in subdirs)
 
         await self._redis.cache_listing(
@@ -207,7 +221,7 @@ class RadarOnDemandStrategy:
 
     async def list_variables(self, radar_id: str) -> List[str]:
         """List variables from cache or S3."""
-        cache_key = f"cache:listing:radar:{radar_id}:variables"
+        cache_key = f"cache:listing:radar:{self._network}:{radar_id}:variables"
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
             return json.loads(cached)
@@ -215,7 +229,7 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        prefix = f"{RADAR_S3_PREFIX}/{radar_id}"
+        prefix = f"{self._prefix}/{radar_id}"
         subdirs = await self._s3.try_get_subdirectories(prefix)
         variables = sorted(s.rstrip("/").split("/")[-1] for s in subdirs)
 
@@ -226,7 +240,10 @@ class RadarOnDemandStrategy:
 
     async def list_elevations(self, radar_id: str, variable_id: str) -> List[str]:
         """List elevations from cache or S3."""
-        cache_key = f"cache:listing:radar:{radar_id}:{variable_id}:elevations"
+        cache_key = (
+            f"cache:listing:radar:{self._network}:{radar_id}:"
+            f"{variable_id}:elevations"
+        )
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
             return json.loads(cached)
@@ -234,7 +251,7 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}"
+        prefix = f"{self._prefix}/{radar_id}/{variable_id}"
         subdirs = await self._s3.try_get_subdirectories(prefix)
         elevations = []
         for subdir in subdirs:
@@ -253,7 +270,8 @@ class RadarOnDemandStrategy:
     ) -> List[str]:
         """List tilesets from cache or S3."""
         cache_key = (
-            f"cache:listing:radar:{radar_id}:{variable_id}:{elevation_id}:tilesets"
+            f"cache:listing:radar:{self._network}:{radar_id}:"
+            f"{variable_id}:{elevation_id}:tilesets"
         )
         cached = await self._redis.get_cached_listing(cache_key)
         if cached:
@@ -262,7 +280,7 @@ class RadarOnDemandStrategy:
         if not self._s3:
             return []
 
-        prefix = f"{RADAR_S3_PREFIX}/{radar_id}/{variable_id}/{elevation_id}"
+        prefix = f"{self._prefix}/{radar_id}/{variable_id}/{elevation_id}"
         subdirs = await self._s3.try_get_subdirectories(prefix)
         tilesets = []
         for subdir in subdirs:

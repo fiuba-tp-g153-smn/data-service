@@ -716,10 +716,15 @@ class S3Client:  # pylint: disable=too-many-positional-arguments,too-many-instan
         z: int,
         x: int,
         y: int,
+        network: str = "sinarame",
     ) -> str:
-        """Build S3 key for a radar tile."""
+        """Build S3 key for a radar tile.
+
+        ``network`` selects the radar fleet's subtree (sinarame / inta); the
+        layout under it is identical for both.
+        """
         return (
-            f"tiles/radar/sinarame/{radar_id}/{variable_id}/"
+            f"tiles/radar/{network}/{radar_id}/{variable_id}/"
             f"{elevation_id}/{tileset_id}/{z}/{x}/{y}.webp"
         )
 

@@ -10,8 +10,14 @@ from services.radar_sync_strategy import RadarSyncStrategy
 class RadarService(BaseProductService):
     """Service to manage radar products and tiles via sync strategy."""
 
-    def __init__(self):
+    def __init__(self, network: str = "sinarame"):
         self._strategy: Optional[RadarSyncStrategy] = None
+        self._network = network
+
+    @property
+    def network(self) -> str:
+        """The radar fleet this service serves (sinarame / inta)."""
+        return self._network
 
     def set_strategy(self, strategy: RadarSyncStrategy) -> None:
         """Set the sync strategy (called during app startup)."""
@@ -98,6 +104,7 @@ class RadarService(BaseProductService):
     ) -> PointSample:
         """Get a nearest-neighbor sampled value from the radar COG."""
         return await point_value_service.sample_radar_point(
+            network=self._network,
             radar_id=radar_id,
             variable_id=variable_id,
             elevation_id=elevation_id,
@@ -107,5 +114,7 @@ class RadarService(BaseProductService):
         )
 
 
-# Singleton instance
-radar_service = RadarService()
+# One instance per radar network. They share no state: each carries its own
+# strategy (and through it its own S3 prefix and Redis listing namespace).
+radar_service = RadarService("sinarame")
+inta_radar_service = RadarService("inta")

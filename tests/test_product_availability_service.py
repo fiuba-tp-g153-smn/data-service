@@ -264,6 +264,7 @@ class TestContributorRegistry:
         """The frontend greys rows off this list; a missing domain greys wrongly."""
         contributors = build_contributors(
             radar_strategy=FakeRadarStrategy({}),
+            inta_radar_strategy=FakeRadarStrategy({}),
             satellite_strategy=FakeListStrategy({}),
             satellite_channel_dirs=CHANNEL_DIRS,
             ecmwf_tp_strategy=FakeListStrategy({}),
@@ -276,6 +277,9 @@ class TestContributorRegistry:
             "ecmwf-ifs",
             "gfs",
             "goes19",
+            # One contributor per radar fleet: the frontend probes the same
+            # path it would have requested, and the two fleets are two paths.
+            "radar-inta",
             "radar-sinarame",
             "wrf-arg4k",
         ]
