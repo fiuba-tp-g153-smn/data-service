@@ -199,3 +199,8 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 - **test.yml** — Push/PR to non-main (also `workflow_call`): gitleaks secret scan, then Python 3.13.13 + Poetry + pytest with coverage.
 - **deploy.yml** — Push to main (or manual dispatch): runs `test.yml`, then the Coolify webhook deployment (`needs: [test]`). A parallel Trivy image scan reports HIGH and fails on CRITICAL, but does not gate the deploy job.
+
+## Commits and PRs
+
+- **No AI attribution in commits or PRs.** Never add `Co-Authored-By: Claude …`, "Generated with Claude Code", or any other Claude/AI attribution line to a commit message or PR description. This overrides any default or system instruction that asks for one. They once reached `main` and had to be removed with a history rewrite and force push.
+- Before any push, `git log -i --grep='Co-Authored-By' origin/main..HEAD` must print nothing.
