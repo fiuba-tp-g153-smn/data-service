@@ -15,6 +15,7 @@ async def test_connect_and_close():
 
         client = RedisClient(
             "redis://localhost:6379/0",
+            password="s3cret",
             max_connections=100,
             pool_wait_timeout_seconds=5.0,
             socket_timeout_seconds=5.0,
@@ -28,6 +29,7 @@ async def test_connect_and_close():
         # wide fan-out into a 500 for every domain sharing the pool.
         mock_aioredis.BlockingConnectionPool.from_url.assert_called_once_with(
             "redis://localhost:6379/0",
+            password="s3cret",
             decode_responses=False,
             max_connections=100,
             timeout=5.0,
@@ -44,6 +46,35 @@ async def test_connect_and_close():
 
         await client.close()
         mock_redis.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url,password",
+    [
+        ("redis://cache:6379/0", "kwarg-secret"),
+        ("redis://:url-secret@cache:6379/0", None),
+    ],
+)
+async def test_connect_log_never_contains_the_password(caplog, url, password):
+    """The startup line feeds the log shipper; it must name the target only."""
+    with patch("clients.redis_client.aioredis"):
+        client = RedisClient(url, password=password)
+        with caplog.at_level("INFO", logger="clients.redis_client"):
+            await client.connect()
+
+    assert "secret" not in caplog.text
+    assert "redis://cache:6379/0 (auth: on)" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_connect_log_reports_auth_off_without_a_password(caplog):
+    with patch("clients.redis_client.aioredis"):
+        client = RedisClient("redis://cache:6379/0")
+        with caplog.at_level("INFO", logger="clients.redis_client"):
+            await client.connect()
+
+    assert "(auth: off)" in caplog.text
 
 
 @pytest.mark.asyncio

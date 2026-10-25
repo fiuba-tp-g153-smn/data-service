@@ -15,6 +15,7 @@ and provides a shared cache for radar tiles.
 import asyncio
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional
+from urllib.parse import urlsplit
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
@@ -35,6 +36,12 @@ def _radar_ns(network: str) -> str:
 _WRF_PRODUCTS_KEY = "idx:wrf:products"
 
 
+def _redacted_target(redis_url: str) -> str:
+    """The URL's scheme, host:port and db, without any credentials it carries."""
+    parts = urlsplit(redis_url)
+    return f"{parts.scheme}://{parts.netloc.rpartition('@')[2]}{parts.path}"
+
+
 class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-public-methods
     """
     Async Redis client for tile storage and sync metadata.
@@ -48,6 +55,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
         self,
         redis_url: str,
         *,
+        password: Optional[str] = None,
         max_connections: int = 100,
         pool_wait_timeout_seconds: float = 5.0,
         socket_timeout_seconds: float = 5.0,
@@ -56,6 +64,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
     ) -> None:
         # pylint: disable=too-many-arguments
         self._redis_url = redis_url
+        self._password = password
         self._max_connections = max_connections
         self._pool_wait_timeout_seconds = pool_wait_timeout_seconds
         self._socket_timeout_seconds = socket_timeout_seconds
@@ -87,6 +96,7 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
                 return
             pool = aioredis.BlockingConnectionPool.from_url(
                 self._redis_url,
+                password=self._password or None,
                 decode_responses=False,
                 max_connections=self._max_connections,
                 timeout=self._pool_wait_timeout_seconds,
@@ -96,7 +106,16 @@ class RedisClient:  # pylint: disable=too-many-positional-arguments,too-many-pub
                 health_check_interval=self._health_check_interval_seconds,
             )
             self._redis = aioredis.Redis(connection_pool=pool)
-            logger.info("Connected to Redis at %s", self._redis_url)
+            # Never the raw URL (or the pool's repr, which lists every
+            # connection kwarg): either may carry the password. "Configured",
+            # not "connected": from_url opens no socket, so a bad password
+            # first surfaces as AuthenticationError on the first command.
+            has_auth = bool(self._password or urlsplit(self._redis_url).password)
+            logger.info(
+                "Redis pool configured for %s (auth: %s)",
+                _redacted_target(self._redis_url),
+                "on" if has_auth else "off",
+            )
 
     async def close(self) -> None:
         """Close the Redis connection."""

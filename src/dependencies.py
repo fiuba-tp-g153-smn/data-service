@@ -19,6 +19,7 @@ settings: Settings = Settings.get_settings()
 logger: Logger = init_logger(settings)
 redis_client: RedisClient = RedisClient(
     settings.redis_url,
+    password=settings.redis_password,
     max_connections=settings.redis_max_connections,
     pool_wait_timeout_seconds=settings.redis_pool_wait_timeout_seconds,
     socket_timeout_seconds=settings.redis_socket_timeout_seconds,
