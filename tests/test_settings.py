@@ -156,6 +156,7 @@ def _built_settings(tmp_path: Path, data: dict) -> Settings:
     s.s3_tiles_data_access_key = "ak"
     s.s3_tiles_data_secret_key = "sk"
     s.s3_api_keys_bucket_name = "api-keys"
+    s.redis_password = "rp"
     s._validate()  # pylint: disable=protected-access
     return s
 
@@ -452,3 +453,16 @@ def test_stale_string_in_a_boolean_knob_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="sync_prefetch must be a boolean"):
         _built_settings(tmp_path, {"sync": {"prefetch": "on_demand"}})
+
+
+def test_redis_password_is_read_from_env(monkeypatch):
+    monkeypatch.setenv("REDIS_PASSWORD", "s3cret")
+    assert Settings().redis_password == "s3cret"
+
+
+def test_empty_redis_password_is_rejected(monkeypatch):
+    import pytest  # local import; this file uses plain asserts elsewhere
+
+    monkeypatch.setenv("REDIS_PASSWORD", "")
+    with pytest.raises(ValueError, match="REDIS_PASSWORD"):
+        Settings()

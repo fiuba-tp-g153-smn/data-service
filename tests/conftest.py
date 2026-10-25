@@ -16,6 +16,7 @@ import os
 os.environ.setdefault("WEATHER_STATIONS_ADMIN_PASSWORD", "test-admin-password")
 os.environ.setdefault("SMN_API_USERNAME", "test-user")
 os.environ.setdefault("SMN_API_PASSWORD", "test-pass")
+os.environ.setdefault("REDIS_PASSWORD", "test-redis-password")
 # The keystore now persists to S3, and Settings._validate() refuses to start
 # with auth enabled unless S3 is configured. Tests never touch a real S3 —
 # placeholders satisfy `is_s3_configured()` so the validator passes.

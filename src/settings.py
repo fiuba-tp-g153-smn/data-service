@@ -100,6 +100,8 @@ class Settings:
     # of either bucket independently.
     s3_api_keys_bucket_name: str = "api-keys"
     redis_url: str = ""
+    # Env-only, required: the same secret redis-server enforces via --requirepass.
+    redis_password: str = ""
     # Redis connection-pool bounds + socket timeouts. A hung/swapping Redis must
     # fail fast rather than block every awaiting coroutine forever; the pool is
     # capped so a full-sync fan-out can't balloon FDs on the shared box.
@@ -754,6 +756,7 @@ class Settings:
 
         # Redis
         self.redis_url = os.getenv("REDIS_URL", self.redis_url)
+        self.redis_password = os.getenv("REDIS_PASSWORD", self.redis_password)
 
         # GDAL / VSI S3 tuning
         self.gdal_disable_readdir_on_open = os.getenv(
@@ -1219,6 +1222,11 @@ class Settings:
             raise ValueError(
                 "weather_stations_s3_object_ttl_days must be >= 1 "
                 f"(got {self.weather_stations_s3_object_ttl_days})"
+            )
+        if not self.redis_password:
+            raise ValueError(
+                "REDIS_PASSWORD must be set; every Redis this service connects "
+                "to requires a password (redis-server --requirepass)."
             )
         # Admin endpoints mint/revoke API keys; if the gateway is on but no
         # admin password is configured, the system is permanently locked out
