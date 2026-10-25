@@ -259,12 +259,11 @@ You need to have the next dependencies installed:
 2. Copy the example environment file:
    `cp .env.example .env`
    Edit `.env` to set the S3 endpoint and credentials, `REDIS_URL`, `REDIS_PASSWORD`, the SMN API credentials and `WEATHER_STATIONS_ADMIN_PASSWORD`.
-   Every compose file with a Redis service refuses to start without `REDIS_PASSWORD` (`set REDIS_PASSWORD in .env`), and so does the app.
 
 3. For local development:
 
    With Docker:
-   - Run `make up`. It starts Redis (password-protected with `REDIS_PASSWORD`, published on `127.0.0.1:6389` only) plus two containers off the same image:
+   - Run `make up`. It starts Redis plus two containers off the same image:
      `data-service-api-dev` (`APP_ROLE=web`) and `data-service-sync-dev`
      (`APP_ROLE=worker`).
 
@@ -382,21 +381,21 @@ Run these from the project root:
   Installs Poetry and all dependencies (including dev/test deps). Required before running `make local` or bare `pytest` commands.
 
 - `make up`:
-  Builds the development image (`Dockerfile.dev`) and starts `docker-compose-dev.yaml`: Redis (requires `REDIS_PASSWORD`), the `web`-role container and the `worker`-role container.
+  Builds the development image (`Dockerfile.dev`) and starts `docker-compose-dev.yaml`: Redis, the `web`-role container and the `worker`-role container.
   - Mounts `./src` (live reload), `settings.json`, `alembic.ini`, `migrations/` and `./data` (metrics + basemap scraper SQLite).
   - Reads `.env` for the compose variable substitutions.
-  - Publishes the API on `APP_HOST_PORT`, default http://localhost:6006.
+  - Publishes the API on `APP_HOST_PORT`, default http://localhost:6006, and Redis on `127.0.0.1:6389`.
     Stop with Ctrl+C or `make down`.
 
 - `make data`:
   Brings up only the two data-service containers (`docker-compose.data.yaml`, project `data-service-data`), for the split deployment where Redis runs in its own stack.
 
 - `make redis`:
-  Brings up only Redis (`docker-compose.redis.yaml`, project `data-service-redis`). It requires `REDIS_PASSWORD` and publishes `6379` on every host interface, so data services on another host can reach it; the password guards it (Docker-published ports bypass `ufw`, so keep a cloud firewall in front of the public interface). Both stacks attach to the external network `data_service_network` — create it once with `docker network create data_service_network`.
+  Brings up only Redis (`docker-compose.redis.yaml`, project `data-service-redis`), publishing `6379` so data services on another host can reach it. Both stacks attach to the external network `data_service_network` — create it once with `docker network create data_service_network`.
   The production cache host runs this file as `docker compose -p data-service -f docker-compose.redis.yaml up -d`, not via `make redis`: the project name `data-service` keeps its existing `data-service_redis_data` volume (and warm cache); `-p data-service-redis` would start on an empty one.
 
 - `make down`:
-  Stops the `docker-compose.yaml` and `docker-compose-dev.yaml` stacks. Like every compose command on these files, it needs `REDIS_PASSWORD` in `.env` (as does `make clean`).
+  Stops the `docker-compose.yaml` and `docker-compose-dev.yaml` stacks.
 
 - `make clean`:
   Stops both stacks, drops their named volumes, and wipes the contents of the `./data` bind mount (metrics + basemap scraper state SQLite; API keys live in S3, not here).
@@ -417,7 +416,7 @@ Run these from the project root:
   Runs pre-commit hooks (black formatter, pylint static analysis, mypy type checking).
 
 - `make prod`:
-  Builds and starts the production stack (`docker-compose.yaml`): Redis (requires `REDIS_PASSWORD`; no published port), the `web` container and the `worker` container.
+  Builds and starts the production stack (`docker-compose.yaml`): Redis, the `web` container and the `worker` container.
 
 ## Running Tests
 
@@ -571,7 +570,7 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `S3_TILES_DATA_SECURE`               | Use HTTPS for S3 connection (`true`/`false`).                                              | `false`                    |
 | `S3_BASEMAP_BUCKET_NAME`             | S3 bucket name for the basemap cold backup.                                                | `basemap-tiles`            |
 | `REDIS_URL`                          | Redis connection URL, without credentials. No code default — must be set.                  | `redis://redis:6379/0` in `.env.example` |
-| `REDIS_PASSWORD`                     | Required. Redis password, shared with `redis-server --requirepass` in every compose file; passed to redis-py as `password=`. | None — startup fails if empty |
+| `REDIS_PASSWORD`                     | Redis password, enforced by `redis-server --requirepass` in every compose file. Kept out of `REDIS_URL` and the logs. | None — startup fails if empty |
 | `WEB_CONCURRENCY`                    | Uvicorn workers for the `web` container. The `worker` container uses `WORKER_CONCURRENCY`.  | `3` in `.env.example` (`WORKER_CONCURRENCY`: 1) |
 | `SYNC_PREFETCH`                      | `true` / `false` — background prefetch for satellite, radar, ECMWF, WRF and GFS.           | `true`                     |
 | `BASEMAP_BACKUP_MODE`                | `backup_and_prefetch` / `backup_and_cache_on_read` / `backup_only` / `relay_only`.         | `backup_and_prefetch`      |
@@ -584,18 +583,12 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 Basemap tuning (scrape cadence, HTTP client budgets, bounding box,
 negative-cache TTL, etc.) is also settable via env; see `settings.py`
 for the complete list (every `basemap_*` setting has a matching
-`BASEMAP_*` env var). The SMN weather-stations subsystem adds its own
-env-only vars (`SMN_API_*`, `S3_WEATHER_STATIONS_BUCKET_NAME`,
-`S3_API_KEYS_BUCKET_NAME`, `WEATHER_STATIONS_ADMIN_PASSWORD`) — all in
-`.env.example`. `Settings._validate` fails startup if API-key auth is on
-(the default) without an admin password or without S3 configured.
-
-`REDIS_PASSWORD` is env-only as well, and `Settings._validate` fails startup
-when it is empty. It travels separately from `REDIS_URL`, so the URL never
-carries a secret, and the startup log names only the target and whether auth
-is on (`Redis pool configured for redis://redis:6379/0 (auth: on)`), never the
-password. A password embedded in `REDIS_URL` still works and takes precedence,
-but keep it out: the URL is not treated as a secret.
+`BASEMAP_*` env var). `REDIS_PASSWORD` is env-only, as are the SMN
+weather-stations subsystem's own vars (`SMN_API_*`,
+`S3_WEATHER_STATIONS_BUCKET_NAME`, `S3_API_KEYS_BUCKET_NAME`,
+`WEATHER_STATIONS_ADMIN_PASSWORD`) — all in `.env.example`.
+`Settings._validate` fails startup without `REDIS_PASSWORD`, or if API-key
+auth is on (the default) without an admin password or without S3 configured.
 
 ## API Documentation
 
