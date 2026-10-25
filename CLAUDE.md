@@ -103,7 +103,8 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 | `S3_TILES_DATA_ENDPOINT/ACCESS_KEY/SECRET_KEY` | S3/SeaweedFS connection |
 | `S3_TILES_DATA_BUCKET_NAME` | Satellite/radar/ECMWF/WRF/GFS bucket (default `tiles-data`) |
 | `S3_BASEMAP_BUCKET_NAME` | Basemap cold-backup bucket (default `basemap-tiles`) |
-| `REDIS_URL` | Redis. No code default — must be set (`.env.example`: `redis://redis:6379/0`) |
+| `REDIS_URL` | Redis. No code default — must be set (`.env.example`: `redis://redis:6379/0`). Keep credentials out of it |
+| `REDIS_PASSWORD` | Required (`Settings._validate`); the same secret as `redis-server --requirepass` in every compose file. Passed to redis-py as `password=`, so `REDIS_URL` stays credential-free and the startup log never shows it |
 | `SYNC_PREFETCH` | `true` or `false` — background prefetch for satellite, radar, ECMWF, WRF, GFS (default: `true`) |
 | `BASEMAP_BACKUP_MODE` | `backup_and_prefetch` / `backup_and_cache_on_read` / `backup_only` / `relay_only` (default: `backup_and_prefetch`) |
 | `BASEMAP_ONLINE_FALLBACK_ENABLED` | Disable tier-3 provider relay when `false` (default: `true`) |
