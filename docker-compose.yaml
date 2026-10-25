@@ -25,6 +25,7 @@ x-ds-env: &ds-env
   S3_TILES_DATA_SECURE: ${S3_TILES_DATA_SECURE}
   SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
   REDIS_URL: ${REDIS_URL}
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
   # Basemap tile backup bucket + per-provider source URLs
   S3_BASEMAP_BUCKET_NAME: ${S3_BASEMAP_BUCKET_NAME}
   BASEMAP_ARGENMAP_URL: ${BASEMAP_ARGENMAP_URL}
@@ -72,12 +73,16 @@ services:
   redis:
     container_name: data-service-redis-dev
     image: redis:8.10-trixie
-    command: redis-server --maxmemory 5gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env} --maxmemory 5gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
+    environment:
+      # Lets the healthcheck's redis-cli authenticate.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     restart: unless-stopped
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # redis-cli exits 0 on a NOAUTH reply too, so match the PONG itself.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 10s
       retries: 5

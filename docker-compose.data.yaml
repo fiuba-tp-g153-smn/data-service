@@ -5,10 +5,12 @@
 # `make redis` (docker-compose.redis.yaml).
 #
 # Reaches Redis over the shared external `data_service_network` as `redis:6379`
-# (REDIS_URL=redis://redis:6379/0). There is intentionally NO `depends_on: redis`
-# here: the two stacks are independent compose projects, the Redis client connects
-# lazily, and the restart policy + healthcheck cover a cold Redis. When Redis moves
-# to a separate host, only REDIS_URL changes (point it at the Redis host).
+# (REDIS_URL=redis://redis:6379/0), authenticating with REDIS_PASSWORD, the same
+# value the Redis stack's --requirepass uses; keep it out of REDIS_URL. There is
+# intentionally NO `depends_on: redis` here: the two stacks are independent
+# compose projects, the Redis client connects lazily, and the restart policy +
+# healthcheck cover a cold Redis. When Redis moves to a separate host, only
+# REDIS_URL changes (point it at the Redis host); REDIS_PASSWORD stays the same.
 #
 # Run with its own project name so it's independent of the `redis` stack:
 #   docker compose -p data-service-data -f docker-compose.data.yaml up --build
@@ -26,6 +28,7 @@ x-ds-env: &ds-env
   S3_TILES_DATA_SECURE: ${S3_TILES_DATA_SECURE}
   SYNC_INTERVAL_SECONDS: ${SYNC_INTERVAL_SECONDS}
   REDIS_URL: ${REDIS_URL}
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
   # Basemap tile backup bucket + per-provider source URLs
   S3_BASEMAP_BUCKET_NAME: ${S3_BASEMAP_BUCKET_NAME}
   BASEMAP_ARGENMAP_URL: ${BASEMAP_ARGENMAP_URL}
