@@ -197,8 +197,9 @@ Derivation lives in `main.configure_basemap`. `relay_only` requires `basemap_onl
 
 ## CI/CD
 
-- **test.yml** — Push/PR to non-main (also `workflow_call`): gitleaks secret scan, then Python 3.13.13 + Poetry + pytest with coverage.
+- **test.yml** — Push/PR to non-main (also `workflow_call`): gitleaks secret scan, then Python 3.13 (latest patch, like the `python:3.13-slim-trixie` images) + Poetry 2.3.2 (same pin as the Dockerfiles) + pytest with coverage.
 - **deploy.yml** — Push to main (or manual dispatch): runs `test.yml`, then the Coolify webhook deployment (`needs: [test]`). A parallel Trivy image scan reports HIGH and fails on CRITICAL, but does not gate the deploy job.
+- CI tool binaries (gitleaks, Trivy) are pinned to a version **and** verified against the release's SHA-256 before use. To bump one, change both the version and its checksum (from the release's `*_checksums.txt`).
 
 ## Commits and PRs
 
