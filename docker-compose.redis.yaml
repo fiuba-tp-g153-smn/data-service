@@ -5,13 +5,15 @@
 # data-service + the co-located GDAL renderer / SeaweedFS that were paging it
 # to swap.
 #
+# REDIS_PASSWORD is required (redis-server --requirepass); set it, and
+# REDIS_BIND_IP for cross host, in a .env next to this file. The data services
+# get the same REDIS_PASSWORD as their own env var, never inside REDIS_URL.
+#
 # Same host: joins the shared external `data_service_network`, so co-located
 # data services reach it as `redis:6379` via DNS (REDIS_URL=redis://redis:6379/0).
 #
-# Cross host: port 6379 is published to the host (see `ports:` below), so a
-# data-service on another VPS can connect via REDIS_URL=redis://<this-host>:6379/0.
-# This exposes Redis on the host's network — lock it down with `--requirepass`
-# + a firewall allowlist (see the note on the service).
+# Cross host: port 6379 is published on REDIS_BIND_IP (see `ports:` below), so a
+# data-service on another VPS connects via REDIS_URL=redis://<REDIS_BIND_IP>:6379/0.
 #
 # Run with its own project name so it's independent of the `data` stack:
 #   docker compose -p data-service-redis -f docker-compose.redis.yaml up
@@ -21,20 +23,21 @@ services:
   redis:
     container_name: data-service-redis-dev
     image: redis:8.10-trixie
-    command: redis-server --maxmemory 7gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
+    command: redis-server --requirepass ${REDIS_PASSWORD:?set REDIS_PASSWORD} --maxmemory 7gb --maxmemory-policy volatile-ttl --save 300 1 --appendonly no
+    environment:
+      # Lets the healthcheck's redis-cli authenticate.
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
     restart: unless-stopped
-    # Published to the host so the cache is reachable from another host
-    # (e.g. the data services on a separate VPS, or an external connectivity
-    # check). 0.0.0.0:6379 -> exposed to anything that can route to this host.
-    # SECURE THIS: add `--requirepass <pw>` to the command above + restrict the
-    # firewall (host ufw + Hetzner Cloud Firewall) to the peer IP — an
-    # unauthenticated Redis open to the internet is compromised within minutes.
+    # Published only on REDIS_BIND_IP (default loopback). On the cache host set
+    # it to the private-network address the data services route to, so Redis
+    # is never bound on a public interface.
     ports:
-      - "6379:6379"
+      - "${REDIS_BIND_IP:-127.0.0.1}:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # redis-cli exits 0 on a NOAUTH reply too, so match the PONG itself.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 10s
       retries: 5
