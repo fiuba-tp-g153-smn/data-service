@@ -392,7 +392,7 @@ Run these from the project root:
   Brings up only the two data-service containers (`docker-compose.data.yaml`, project `data-service-data`), for the split deployment where Redis runs in its own stack.
 
 - `make redis`:
-  Brings up only Redis (`docker-compose.redis.yaml`, project `data-service-redis`). It requires `REDIS_PASSWORD` and publishes `6379` only on `REDIS_BIND_IP` (default `127.0.0.1`; on a dedicated cache host, set it to the private-network address). Both stacks attach to the external network `data_service_network` — create it once with `docker network create data_service_network`.
+  Brings up only Redis (`docker-compose.redis.yaml`, project `data-service-redis`). It requires `REDIS_PASSWORD` and publishes `6379` on every host interface, so data services on another host can reach it; the password guards it (Docker-published ports bypass `ufw`, so keep a cloud firewall in front of the public interface). Both stacks attach to the external network `data_service_network` — create it once with `docker network create data_service_network`.
   The production cache host runs this file as `docker compose -p data-service -f docker-compose.redis.yaml up -d`, not via `make redis`: the project name `data-service` keeps its existing `data-service_redis_data` volume (and warm cache); `-p data-service-redis` would start on an empty one.
 
 - `make down`:
@@ -572,7 +572,6 @@ Environment variables configure secrets, infrastructure, and runtime params. Set
 | `S3_BASEMAP_BUCKET_NAME`             | S3 bucket name for the basemap cold backup.                                                | `basemap-tiles`            |
 | `REDIS_URL`                          | Redis connection URL, without credentials. No code default — must be set.                  | `redis://redis:6379/0` in `.env.example` |
 | `REDIS_PASSWORD`                     | Required. Redis password, shared with `redis-server --requirepass` in every compose file; passed to redis-py as `password=`. | None — startup fails if empty |
-| `REDIS_BIND_IP`                      | Standalone Redis stack only (`docker-compose.redis.yaml`): host address `6379` is published on. | `127.0.0.1`                |
 | `WEB_CONCURRENCY`                    | Uvicorn workers for the `web` container. The `worker` container uses `WORKER_CONCURRENCY`.  | `3` in `.env.example` (`WORKER_CONCURRENCY`: 1) |
 | `SYNC_PREFETCH`                      | `true` / `false` — background prefetch for satellite, radar, ECMWF, WRF and GFS.           | `true`                     |
 | `BASEMAP_BACKUP_MODE`                | `backup_and_prefetch` / `backup_and_cache_on_read` / `backup_only` / `relay_only`.         | `backup_and_prefetch`      |

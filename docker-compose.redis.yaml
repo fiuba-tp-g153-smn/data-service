@@ -5,15 +5,15 @@
 # data-service + the co-located GDAL renderer / SeaweedFS that were paging it
 # to swap.
 #
-# REDIS_PASSWORD is required (redis-server --requirepass); set it, and
-# REDIS_BIND_IP for cross host, in a .env next to this file. The data services
-# get the same REDIS_PASSWORD as their own env var, never inside REDIS_URL.
+# REDIS_PASSWORD is required (redis-server --requirepass); set it in a .env next
+# to this file. The data services get the same REDIS_PASSWORD as their own env
+# var, never inside REDIS_URL.
 #
 # Same host: joins the shared external `data_service_network`, so co-located
 # data services reach it as `redis:6379` via DNS (REDIS_URL=redis://redis:6379/0).
 #
-# Cross host: port 6379 is published on REDIS_BIND_IP (see `ports:` below), so a
-# data-service on another VPS connects via REDIS_URL=redis://<REDIS_BIND_IP>:6379/0.
+# Cross host: port 6379 is published to the host (see `ports:` below), so a
+# data-service on another VPS connects via REDIS_URL=redis://<this-host>:6379/0.
 #
 # Run with its own project name so it's independent of the `data` stack:
 #   docker compose -p data-service-redis -f docker-compose.redis.yaml up
@@ -28,11 +28,12 @@ services:
       # Lets the healthcheck's redis-cli authenticate.
       REDISCLI_AUTH: ${REDIS_PASSWORD}
     restart: unless-stopped
-    # Published only on REDIS_BIND_IP (default loopback). On the cache host set
-    # it to the private-network address the data services route to, so Redis
-    # is never bound on a public interface.
+    # Published on every host interface, so the cache is reachable from the
+    # data services on another VPS. Docker-published ports bypass ufw: the
+    # password is what guards it, plus the Hetzner Cloud Firewall on the
+    # public interface.
     ports:
-      - "${REDIS_BIND_IP:-127.0.0.1}:6379:6379"
+      - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
