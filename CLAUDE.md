@@ -29,7 +29,7 @@ FastAPI microservice (Python 3.13) serving satellite/radar/ECMWF/WRF/GFS tiles a
 
 ### Entrypoint & Lifecycle
 
-- `src/main.py` — FastAPI app, CORS middleware, `lifespan` context manager for all background services (six per-product sync loops, basemap scraper, weather-stations scraper, Redis-metrics collector) + `uvloop` event loop policy.
+- `src/main.py` — FastAPI app, CORS middleware, gzip (level 6) on `/metrics/*` only via `PathScopedGZipMiddleware` (`src/scoped_gzip.py`; tiles and map routes stay uncompressed), `lifespan` context manager for all background services (six per-product sync loops, basemap scraper, weather-stations scraper, Redis-metrics collector) + `uvloop` event loop policy.
 - **`APP_ROLE` (web/worker/all)** — one image, role chosen at startup. `web` serves HTTP only; `worker` runs the background sync/scrape/metrics loops only; `all` (default) does both. The lifespan always builds the read-side config; `main._runs_background_jobs()` gates only the `.start()` of the background loops. Deploy a `web` container + a `worker` container (same image, only env differs — see `docker-compose*.yaml`) so the heavy background sync can't CPU-starve request serving. They communicate only via Redis / S3 / the shared `/app/data` metrics SQLite.
 - `src/dependencies.py` — Module-level singletons (`settings`, `logger`, `redis_client`, `metrics_store`, `basemap_service`); `_weather_stations_keystore` and `_basemap_state_store` are stamped in later by the lifespan.
 - `src/settings.py` — Plain class reading env vars via `os.getenv` + `python-dotenv`, merged with `settings.json`. Fail-fast `_validate()` runs after load.

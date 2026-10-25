@@ -261,6 +261,26 @@ def test_sync_cycles_passes_since_before_and_unlimited():
         app.dependency_overrides.clear()
 
 
+def test_metrics_responses_are_gzipped_for_clients_that_accept_it():
+    """The app compresses /metrics/* (the Cache timeline is ~1.3 MB/day raw)."""
+    rows = [_sync_row("satellite", downloaded=i) for i in range(300)]
+    store = AsyncMock()
+    store.get_sync_cycles = AsyncMock(return_value=rows)
+    app.dependency_overrides[get_metrics_store] = lambda: store
+    try:
+        response = TestClient(app).get(
+            "/metrics/sync/cycles?hours=24&limit=0",
+            headers={"Accept-Encoding": "gzip"},
+        )
+        assert response.headers.get("content-encoding") == "gzip"
+        assert response.num_bytes_downloaded < len(response.content)
+        data = response.json()
+        assert len(data) == 300
+        assert data[299]["downloaded"] == 299
+    finally:
+        app.dependency_overrides.clear()
+
+
 def test_memory_history_maps_points():
     store = AsyncMock()
     store.get_memory_history = AsyncMock(

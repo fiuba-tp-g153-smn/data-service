@@ -41,6 +41,7 @@ from routes import (
     gfs,
     wrf,
 )
+from scoped_gzip import PathScopedGZipMiddleware
 from services.basemap_config import BoundingBox, load_providers
 from services.basemap_scraper_service import BasemapScraperService
 from services.basemap_tile_reader import BasemapTileReader
@@ -898,6 +899,17 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# Compress the status-dashboard metrics JSON only: the Cache timeline is ~1.3 MB
+# per day of sync cycles uncompressed and ~155 KB gzipped. Scoped to /metrics/
+# so tiles and the map's other routes keep their exact responses. Level 6, not
+# Starlette's default 9: same size within ~1% at a fraction of the CPU.
+app.add_middleware(
+    PathScopedGZipMiddleware,
+    prefixes=("/metrics/",),
+    minimum_size=1024,
+    compresslevel=6,
 )
 
 app.include_router(general.router)
