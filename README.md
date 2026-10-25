@@ -468,6 +468,10 @@ The project includes three Dockerfiles for different environments:
 
 Operational tuning settings live in `settings.json` at the project root. Edit this file to adjust sync behavior, caching, and retention without touching environment variables. `src/settings.py` is the authoritative source of defaults and loaders — consult it for any key not documented below.
 
+The production image copies this file to `/settings.json`: rebuild the image to
+apply file edits. The development Compose mounts it from the host. Environment
+overrides only take effect when the Compose service passes them into the container.
+
 Per-domain knobs are grouped under a namespace object (`satellite`, `basemap`, `ecmwf`, `radar`); the loader recursively flattens nested objects so each inner key maps to the matching `<namespace>_<key>` Python attribute and `<NAMESPACE>_<KEY>` env var. Top-level keys (`tileset_listing_ttl`, `cache_control_*`, …) stay at the root because they apply across every domain or have no domain. Example:
 
 ```jsonc

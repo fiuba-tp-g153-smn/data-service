@@ -20,8 +20,9 @@ router = APIRouter(prefix="/products", tags=["Availability"])
 async def get_product_availability(request: Request) -> Response:
     """Report which products have data, so a client asks once instead of ~125 times.
 
-    Positive assertions only: a product absent from `available` has not been
-    declared empty, and the caller should fall back to its own endpoint.
+    The snapshot is complete for supported products and uses their individual
+    Redis/S3 listing strategies. Absence from `available` means no listed data;
+    a follow-up probe is unnecessary unless the bundled request itself fails.
     """
     snapshot = await product_availability_service.snapshot()
     payload = ProductAvailabilityResponse(

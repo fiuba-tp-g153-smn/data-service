@@ -12,16 +12,15 @@ class ProductAvailabilityResponse(BaseModel):
     would have put in the URL of an individual probe:
     `radar-sinarame/RMA2/dbzh/elev0`, `goes19/abi/c13`, `wrf-arg4k/granizo`.
 
-    It is a positive assertion and nothing else. A product missing from the
-    list has NOT been declared empty: the snapshot is built from Redis indexes,
-    which are a cache of S3, and every per-product endpoint falls back to S3
-    when its index is cold. Treating absence as "no data" would grey out live
-    products for as long as a sync takes to fill in — and permanently under
-    `sync_prefetch=false`, where no sync loop runs. Probe what is missing.
+    `available` is the complete snapshot for the supported products: contributors
+    use the same Redis/S3 listing strategies as individual product endpoints.
+    A missing path means no data is available through those listings at the time
+    of the snapshot, so the caller does not need a follow-up probe per product.
+    The service briefly memoises the response and conditional GETs use an ETag.
 
-    `domains` is diagnostic: the domains that contributed at least one product.
-    Useful for spotting an index that has never been written; not a coverage
-    guarantee, and not a licence to read absence as emptiness.
+    `domains` is diagnostic: only domains contributing at least one product are
+    included. It is not the configured-domain catalogue or an upstream health
+    guarantee. If the bundled request fails, clients may use individual probes.
     """
 
     available: List[str]
