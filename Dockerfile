@@ -12,8 +12,9 @@ RUN apt-get update \
 # Copy only dependency manifests first (to leverage Docker build cache for faster builds)
 COPY pyproject.toml poetry.lock /app/
 
-# Install Poetry, disable venvs to install into system site-packages
-RUN pip install --no-cache-dir "poetry==2.3.2" && poetry config virtualenvs.create false
+# Install Poetry; the project deps go into /app/.venv so the runner copies them
+# without Poetry and its own dependencies
+RUN pip install --no-cache-dir "poetry==2.3.2" && poetry config virtualenvs.in-project true
 
 # Re-generate lock file if it is outdated, then install all dependencies (except dev/test deps)
 RUN (poetry check --lock || poetry lock) && poetry install --without dev --no-root --no-ansi --no-cache
@@ -32,9 +33,9 @@ RUN apt-get update \
 # Use python implementation of protobuf instead of binary
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
-# Copy installed Python packages from builder
-COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy only the project's virtual environment from builder
+COPY --from=builder /app/.venv /app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy the actual application code into /app
 COPY ./src /app
